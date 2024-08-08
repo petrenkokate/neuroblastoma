@@ -1,0 +1,519 @@
+---
+title: "Data overview"
+output: html_document
+date: "2024-06-14"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+	echo = FALSE,
+	message = FALSE,
+	warning = FALSE
+)
+library(data.table)
+library(Seurat)
+library(scDblFinder)
+library(DoubletFinder)
+library(dplyr)
+library(remotes)
+# remotes::install_github("carmonalab/STACAS")
+library(STACAS)
+library(SingleR)
+# install.packages("scGate")
+library(scGate)
+library(ggplot2)
+library(BiocParallel)
+library(harmony)
+library(RColorBrewer)
+library(stringr)
+library(cowplot)
+library(scuttle)
+# install.packages("devtools")
+# BiocManager::install("Homo.sapiens")
+# BiocManager::install("jpmam1/scalop") #forked copy of a really good guy 
+# devtools::install_github("jlaffy/infercna")
+library(infercna)
+library(infercnv)
+library(parallel)
+library(future)
+library(clustree)
+library(dittoSeq)
+# install.packages("ggh4x")
+library(ggh4x)
+library(EnhancedVolcano)
+library(clusterProfiler)
+library("org.Hs.eg.db")
+library(ReactomePA)
+library(msigdbr)
+library(qs)
+```
+
+```{r read data, include=FALSE}
+set.seed(100)
+DATADIR = '~/neuroblastoma/data/'
+WORKDIR = '~/neuroblastoma/'
+PREPRDATADIR = '~/neuroblastoma/preprocessing_data/'
+
+my_colors <- c("#9ACD32FF", "#4682B4FF",  "#DDA0DDFF", "#FFA07AFF", "#8FBC8BFF",
+               "#40E0D0FF",  "#F0E68CFF", "#5F9EA0FF", "#D2B48CFF",  
+               "#6495EDFF", "#FF69B4FF", "#BA55D3FF",  "#F08080FF", "#32CD32FF",  
+               "#FFDAB9FF",  "#87CEEBFF")
+
+seu <- readRDS(paste0(PREPRDATADIR, 'seu_MYCN_MLLT11.rds'))
+```
+
+```{r metadata load, include=FALSE}
+sample_metadata <- read.csv(paste0(DATADIR, 'samples_metadata_v2.csv'))
+sample_metadata[sample_metadata==""] <- NA
+
+rownames(sample_metadata) <- sample_metadata$Sample_dataset
+
+
+seu$sex <- sample_metadata[seu$SampleID,]$Sex
+seu$less18M <- sample_metadata[seu$SampleID,]$less18M
+seu$Survival.Death <- sample_metadata[seu$SampleID,]$Survival.Death
+seu$Site <- sample_metadata[seu$SampleID,]$Site
+seu$INSS_stage <- sample_metadata[seu$SampleID,]$INSS_stage
+
+seu$Study <- sapply(str_split(seu$SampleID, "_"), function(x) {
+  if (length(x) == 2) {
+    return(x[2])
+  } else if (length(x) == 3) {
+    return(x[3])
+  } else {
+    return(NA)
+  }
+})
+```
+
+# Integration
+
+```{r integration plot, fig.height=4, fig.width=12, message=FALSE, warning=FALSE}
+plot_grid(DimPlot(seu, group.by = 'Study', cols = my_colors) +
+    ggtitle('By studies'),
+  DimPlot(seu, group.by = 'SampleID') +
+    ggtitle('By samples') +
+    NoLegend(), nrow=1, rel_widths = c(0.5, 0.4))
+```
+
+```{r}
+FeaturePlot(seu, 'percent_mito', cols=c("gray90", '#BA55D3FF')) 
+```
+
+# Annotation 
+
+## Define malignant cells
+
+Firstly, I was trying to define malignant cells by known markers
+
+```{r echo=FALSE, fig.height=8, fig.width=12}
+FeaturePlot(seu, c('MYCN', 'SLC6A2', 'MLLT11'), cols=c("gray90", '#BA55D3FF'), ncol = 2)
+```
+
+Some cells are really different they highly express MYCN and don't express MLLT11. I decided to look at this cluster separately and I realized that almost all cells of this cluster are from one patient.
+
+```{r cluster 15 plot, fig.height=4, fig.width=10}
+seu$annotation_simple <- Idents(seu)
+Idents(seu) <- seu$RNA_snn_res.0.1
+
+p1 <- DimPlot(seu, cells.highlight = WhichCells(seu, idents = "15"), cols.highlight = '#6495EDFF') +
+  NoLegend() +
+  ggtitle('Cluster 15')
+
+Idents(seu) <- seu$SampleID
+p2 <- DimPlot(seu, cells.highlight = WhichCells(seu, idents = "NB37_verhoeven"), cols.highlight='#FF69B4FF') +
+  NoLegend() +
+  ggtitle('NB37_verhoeven')
+
+Idents(seu) <- seu$annotation_simple
+
+plot_grid(p1, p2)
+rm(p1, p2)
+```
+
+Secondly, I used the tool InferCNV than can find CNV (copy number variations) in the data. 
+
+```{r infercnv plot, echo=FALSE}
+DimPlot(seu, group.by='infercnv_result') +
+  scale_color_manual(values = c('#FF69B4FF', 'grey')) +
+  ggtitle('inferCNV')
+```
+
+### T-cells
+
+```{r t cells}
+FeaturePlot(seu, 'CD7', cols=c("gray90", '#BA55D3FF'))
+```
+
+### B-cells
+
+```{r b cells}
+FeaturePlot(seu, 'CD79A', cols=c("gray90", '#BA55D3FF'))
+```
+
+
+### Myeloid cells
+
+```{r fig.height=4, fig.width=12}
+FeaturePlot(seu, c('CD14', 'CD141', 'CD1C'), cols=c("gray90", '#BA55D3FF'))
+```
+
+
+## Final annotation
+
+```{r}
+DimPlot(seu, cols = my_colors)
+```
+
+# Analysis by sample
+
+## MYCN amplification 
+
+```{r echo=FALSE, fig.width=12}
+plot_data <- as.data.frame(table(seu@meta.data$SampleID, seu$MYCN_MLLT11))
+colnames(plot_data) <- c("SampleID", "Category", "Count")
+plot_data <- merge(plot_data, sample_metadata, by.x='SampleID', by.y='Sample_dataset')
+plot_data$less18M <- ifelse(plot_data$less18M, '<18M', '>18M')
+
+# Calculate the percentages
+plot_data <- plot_data %>%
+  group_by(SampleID) %>%
+  mutate(Percent = Count / sum(Count))
+
+healthy_percent <- plot_data %>%
+  filter(Category == "normal cells") %>%
+  arrange(Percent)
+
+# Order the SampleID factor levels by the percentage of healthy cells
+plot_data$SampleID <- factor(plot_data$SampleID, levels = healthy_percent$SampleID)
+
+ggplot(plot_data, aes(x = SampleID, y = Percent, fill = Category)) +
+  geom_bar(stat = "identity", position = "fill") +
+  scale_fill_manual(values = c("normal cells" = "#87CEEBFF", "MLLT11" = "#FFA07AFF", "MYCN" = "#9ACD32FF", "MYCN+MLLT11" = "#FF69B4FF")) +
+  labs(y = "Percent of cells", x = "SampleID", title = "MYCN_MLLT11") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  facet_grid2(~MYCN, scales = "free_x", space = "free_x", switch = "x",
+              strip = strip_themed(
+                background_x = elem_list_rect(
+                  fill = c("#6495EDFF", "#32CD32FF", '#DDA0DDFF'),
+                  color = c("#6495EDFF", "#32CD32FF", '#DDA0DDFF')),
+                text_x = elem_list_text(size=14))) +
+  ggtitle('MYCN amplification')
+```
+
+```{r echo=FALSE, fig.width=12}
+plot_data2 <- as.data.frame(table(seu@meta.data$SampleID, seu$annotation_simple))
+colnames(plot_data2) <- c("SampleID", "Cell_type", "Count")
+plot_data2 <- merge(plot_data2, sample_metadata, by.x='SampleID', by.y='Sample_dataset')
+plot_data2$less18M <- ifelse(plot_data2$less18M, '<18M', '>18M')
+
+# Calculate the percentages
+plot_data2 <- plot_data2 %>%
+  group_by(SampleID) %>%
+  mutate(Percent = Count / sum(Count))
+
+plot_data2$Cell_type <- factor(plot_data2$Cell_type, levels = c("T-cells", "B-cells", "Myeloid cells", "Stromal cells", "Tumor cells"))
+
+tumor_percent <- plot_data2 %>%
+  filter(Cell_type == "Tumor cells") %>%
+  arrange(Percent)
+
+
+plot_data2$SampleID <- factor(plot_data2$SampleID, levels = tumor_percent$SampleID)
+
+ggplot(plot_data2, aes(x = SampleID, y = Percent, fill = Cell_type)) +
+  geom_bar(stat = "identity", position = "fill") +
+  scale_fill_manual(values = c("Stromal cells" = "#87CEEBFF", "Myeloid cells" = "#FFA07AFF", 
+                               "B-cells" = "#9ACD32FF", "T-cells" = "#FF69B4FF", 
+                               "Tumor cells" = "#FFDAB9FF")) +
+  labs(y = "Percent of cells", x = "SampleID") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  facet_grid2(~MYCN, scales = "free_x", space = "free_x", switch = "x",
+              strip = strip_themed(
+                background_x = elem_list_rect(
+                  fill = c("#6495EDFF", "#32CD32FF", '#DDA0DDFF'),
+                  color = c("#6495EDFF", "#32CD32FF", '#DDA0DDFF')),
+                text_x = elem_list_text(size=14))) +
+  ggtitle('MYCN amplification')
+```
+
+## Age 
+
+```{r fig.width=12}
+ggplot(plot_data, aes(x = SampleID, y = Percent, fill = Category)) +
+  geom_bar(stat = "identity", position = "fill") +
+  scale_fill_manual(values = c("normal cells" = "#87CEEBFF", "MLLT11" = "#FFA07AFF", "MYCN" = "#9ACD32FF", "MYCN+MLLT11" = "#FF69B4FF")) +
+  labs(y = "Percent of cells", x = "SampleID", title = "MYCN_MLLT11") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  facet_grid2(~less18M, scales = "free_x", space = "free_x", switch = "x",
+              strip = strip_themed(
+                background_x = elem_list_rect(
+                  fill = c("#6495EDFF", "#32CD32FF"),
+                  color = c("#6495EDFF", "#32CD32FF")),
+                text_x = elem_list_text(size=14))) +
+  ggtitle('Age')
+```
+
+```{r fig.width=12}
+ggplot(plot_data2, aes(x = SampleID, y = Percent, fill = Cell_type)) +
+  geom_bar(stat = "identity", position = "fill") +
+  scale_fill_manual(values = c("Stromal cells" = "#87CEEBFF", "Myeloid cells" = "#FFA07AFF", 
+                               "B-cells" = "#9ACD32FF", "T-cells" = "#FF69B4FF", 
+                               "Tumor cells" = "#FFDAB9FF")) +
+  labs(y = "Percent of cells", x = "SampleID") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  facet_grid2(~less18M, scales = "free_x", space = "free_x", switch = "x",
+              strip = strip_themed(
+                background_x = elem_list_rect(
+                  fill = c("#6495EDFF", "#32CD32FF"),
+                  color = c("#6495EDFF", "#32CD32FF")),
+                text_x = elem_list_text(size=14))) +
+  ggtitle('Age')
+```
+
+## Sirvival
+
+```{r fig.width=12}
+ggplot(plot_data, aes(x = SampleID, y = Percent, fill = Category)) +
+  geom_bar(stat = "identity", position = "fill") +
+  scale_fill_manual(values = c("normal cells" = "#87CEEBFF", "MLLT11" = "#FFA07AFF", "MYCN" = "#9ACD32FF", "MYCN+MLLT11" = "#FF69B4FF")) +
+  labs(y = "Percent of cells", x = "SampleID", title = "MYCN_MLLT11") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  facet_grid2(~Survival.Death, scales = "free_x", space = "free_x", switch = "x",
+              strip = strip_themed(
+                background_x = elem_list_rect(
+                  fill = c("#6495EDFF", "#32CD32FF", '#DDA0DDFF'),
+                  color = c("#6495EDFF", "#32CD32FF", '#DDA0DDFF')),
+                text_x = elem_list_text(size=14))) +
+  ggtitle('Survival')
+```
+
+```{r fig.width=12}
+ggplot(plot_data2, aes(x = SampleID, y = Percent, fill = Cell_type)) +
+  geom_bar(stat = "identity", position = "fill") +
+  scale_fill_manual(values = c("Stromal cells" = "#87CEEBFF", "Myeloid cells" = "#FFA07AFF", 
+                               "B-cells" = "#9ACD32FF", "T-cells" = "#FF69B4FF", 
+                               "Tumor cells" = "#FFDAB9FF")) +
+  labs(y = "Percent of cells", x = "SampleID") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  facet_grid2(~Survival.Death, scales = "free_x", space = "free_x", switch = "x",
+              strip = strip_themed(
+                background_x = elem_list_rect(
+                  fill = c("#6495EDFF", "#32CD32FF", '#DDA0DDFF'),
+                  color = c("#6495EDFF", "#32CD32FF", '#DDA0DDFF')),
+                text_x = elem_list_text(size=14))) +
+  ggtitle('Survival')
+```
+
+## INSS stage
+
+```{r fig.width=12}
+ggplot(plot_data, aes(x = SampleID, y = Percent, fill = Category)) +
+  geom_bar(stat = "identity", position = "fill") +
+  scale_fill_manual(values = c("normal cells" = "#87CEEBFF", "MLLT11" = "#FFA07AFF", "MYCN" = "#9ACD32FF", "MYCN+MLLT11" = "#FF69B4FF")) +
+  labs(y = "Percent of cells", x = "SampleID", title = "MYCN_MLLT11") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  facet_grid2(~INSS_stage, scales = "free_x", space = "free_x", switch = "x",
+              strip = strip_themed(
+                background_x = elem_list_rect(
+                  fill = c("#6495EDFF", "#32CD32FF", '#DDA0DDFF', 
+                           "#8FBC8BFF", "#40E0D0FF",  "#F0E68CFF"),
+                  color = c("#6495EDFF", "#32CD32FF", '#DDA0DDFF', 
+                            "#8FBC8BFF", "#40E0D0FF",  "#F0E68CFF")),
+                text_x = elem_list_text(size=11))) +
+  ggtitle('INSS stage')
+```
+
+```{r fig.width=12}
+ggplot(plot_data2, aes(x = SampleID, y = Percent, fill = Cell_type)) +
+  geom_bar(stat = "identity", position = "fill") +
+  scale_fill_manual(values = c("Stromal cells" = "#87CEEBFF", "Myeloid cells" = "#FFA07AFF", 
+                               "B-cells" = "#9ACD32FF", "T-cells" = "#FF69B4FF", 
+                               "Tumor cells" = "#FFDAB9FF")) +
+  labs(y = "Percent of cells", x = "SampleID") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  facet_grid2(~INSS_stage, scales = "free_x", space = "free_x", switch = "x",
+              strip = strip_themed(
+                background_x = elem_list_rect(
+                  fill = c("#6495EDFF", "#32CD32FF", '#DDA0DDFF', 
+                           "#8FBC8BFF", "#40E0D0FF",  "#F0E68CFF"),
+                  color = c("#6495EDFF", "#32CD32FF", '#DDA0DDFF', 
+                            "#8FBC8BFF", "#40E0D0FF",  "#F0E68CFF")),
+                text_x = elem_list_text(size=11))) +
+  ggtitle('INSS stage')
+```
+
+# Analysis of immune cells by age
+
+I perfomed differential expression analysis in immune cells by age using pseudobulk.
+
+```{r fig.height=8, fig.width=15}
+seu$less18M <- as.character(seu$less18M)
+bulk <- AggregateExpression(seu, return.seurat = T, slot = "counts", assays = "RNA", 
+                            group.by = c("annotation_simple", "SampleID", "less18M"))
+Idents(bulk) <- "less18M"
+
+t_cells.de.markers <- FindMarkers(subset(bulk, annotation_simple == 'T-cells'), 
+                                  ident.1 = "TRUE", ident.2 = "FALSE", slot = "counts",
+                                  test.use = "DESeq2", verbose = F)
+write.csv(t_cells.de.markers, paste0(PREPRDATADIR, 't_cells_de_markers_bulk.csv'))
+b_cells.de.markers <- FindMarkers(subset(bulk, annotation_simple == 'B-cells'), 
+                                  ident.1 = "TRUE", ident.2 = "FALSE", slot = "counts",
+                                  test.use = "DESeq2", verbose = F)
+write.csv(b_cells.de.markers, paste0(PREPRDATADIR, 'b_cells_de_markers_bulk.csv'))
+myeloid.de.markers <- FindMarkers(subset(bulk, annotation_simple == 'Myeloid cells'), 
+                                  ident.1 = "TRUE", ident.2 = "FALSE", slot = "counts",
+                                  test.use = "DESeq2", verbose = F)
+write.csv(myeloid.de.markers, paste0(PREPRDATADIR, 'myeloid_de_markers_bulk.csv'))
+
+volcano_plot <- function(de.markers) {
+  EnhancedVolcano(de.markers,
+    lab = rownames(de.markers),
+    x = 'avg_log2FC',
+    y = 'p_val',
+    col = c("grey30", "#9ACD32FF", "#6495EDFF", "#FF69B4FF"),
+    drawConnectors = TRUE,
+    pCutoff = 0.05) +
+  labs(subtitle = "< 18M vs > 18M")
+}
+
+plot_grid(volcano_plot(t_cells.de.markers) +
+            ggtitle('T-cells'),
+          volcano_plot(b_cells.de.markers) +
+            ggtitle('B-cells'),
+          volcano_plot(myeloid.de.markers) +
+            ggtitle('Myeloid cells'), 
+          nrow = 1)
+```
+
+## Enrichment analysis
+
+That's an enrichment analysis of genes **up**-regulated in patients that are younger 18 months
+
+```{r fig.height=4, fig.width=20}
+H_t2g <- msigdbr(species = "Homo sapiens", category = "H") %>% 
+  dplyr::select(gs_name, entrez_gene)
+
+
+enrichplot_pos <- function(de.markers) {
+  em <- enricher(de.markers %>% 
+                            filter(p_val_adj < 0.05 & avg_log2FC > 1) %>% 
+                            rownames() %>% 
+                            mapIds(org.Hs.eg.db, 
+                                   keys = .,
+                                   column = "ENTREZID",
+                                   keytype = "SYMBOL"),
+                       TERM2GENE=H_t2g)
+  barplot(em) 
+}
+
+plot_grid(enrichplot_pos(t_cells.de.markers) +
+            ggtitle('T-cells'),
+          enrichplot_pos(b_cells.de.markers) +
+            ggtitle('B-cells'),
+          enrichplot_pos(myeloid.de.markers) +
+            ggtitle('Myeloid cells'), 
+          nrow = 1)
+```
+
+That's an enrichment analysis of genes **down**-regulated in patients that are younger 18 months. There are not significant pathways for T-cells.  
+
+```{r fig.height=4, fig.width=20}
+enrichplot_neg <- function(de.markers) {
+  em <- enricher(de.markers %>% 
+                            filter(p_val_adj < 0.05 & avg_log2FC < -1) %>% 
+                            rownames() %>% 
+                            mapIds(org.Hs.eg.db, 
+                                   keys = .,
+                                   column = "ENTREZID",
+                                   keytype = "SYMBOL"),
+                       TERM2GENE=H_t2g)
+  barplot(em) 
+}
+
+plot_grid('',
+          '',
+          enrichplot_neg(myeloid.de.markers) +
+            ggtitle('Myeloid cells'), 
+          nrow = 1)
+```
+
+```{r}
+t_cells <- qread(paste0(PREPRDATADIR, 't_cells_v2_minusS2fetahu.qs'))
+b_cells <- qread(paste0(PREPRDATADIR, 'b_cells_v2_minusS2fetahu.qs'))
+myeloid <- qread(paste0(PREPRDATADIR, 'myeloid_cells_v2_minusS2fetahu.qs'))
+```
+
+Genes are **up**-regulated in patients that are younger 18 months.
+
+```{r fig.height=15, fig.width=20}
+heatmap_tcells <- dittoHeatmap(t_cells, t_cells.de.markers %>% 
+                            filter(p_val_adj < 0.05 & avg_log2FC > 1) %>% 
+                            dplyr::arrange(desc(avg_log2FC)) %>% 
+                            rownames(),
+             order.by = 'less18M', annot.by = c('less18M', 'Study', 'SampleID'), silent=T,
+             # annot.colors = c("#87CEEBFF", "#DDA0DDFF"), 
+             main = 'T cells', 
+             breaks=seq(-2, 2, 0.2), heatmap.colors = colorRampPalette(c("#6495EDFF", "white", "#FF69B4FF"))(length(seq(-2, 2, 0.2)))) 
+
+heatmap_bcells <- dittoHeatmap(b_cells, b_cells.de.markers %>% 
+                            filter(p_val_adj < 0.05 & avg_log2FC > 1) %>% 
+                            dplyr::arrange(desc(avg_log2FC)) %>% 
+                            rownames(),
+             order.by = 'less18M', annot.by = c('less18M', 'Study', 'SampleID'), silent=T,
+             # annot.colors = c("#87CEEBFF", "#DDA0DDFF"), 
+             main = 'B cells', 
+             breaks=seq(-2, 2, 0.2), heatmap.colors = colorRampPalette(c("#6495EDFF", "white", "#FF69B4FF"))(length(seq(-2, 2, 0.2)))) 
+
+heatmap_myeloid <- dittoHeatmap(myeloid, myeloid.de.markers %>% 
+                            filter(p_val_adj < 0.05 & avg_log2FC > 1) %>% 
+                            dplyr::arrange(desc(avg_log2FC)) %>% 
+                            rownames(),
+             order.by = 'less18M', annot.by = c('less18M', 'Study', 'SampleID'), silent=T,
+             # annot.colors = c("#87CEEBFF", "#DDA0DDFF"), 
+             main = 'Myeloid cells',
+             breaks=seq(-2, 2, 0.2), heatmap.colors = colorRampPalette(c("#6495EDFF", "white", "#FF69B4FF"))(length(seq(-2, 2, 0.2)))) 
+
+plot_grid(heatmap_tcells[[4]], heatmap_bcells[[4]], heatmap_myeloid[[4]], nrow = 1)
+```
+
+Genes are **down**-regulated in patients that are younger 18 months.
+
+```{r fig.height=15, fig.width=20}
+heatmap_tcells_neg <- dittoHeatmap(t_cells, t_cells.de.markers %>% 
+                            filter(p_val_adj < 0.05 & avg_log2FC < -1) %>% 
+                            dplyr::arrange(desc(avg_log2FC)) %>% 
+                            rownames(),
+             order.by = 'less18M', annot.by = c('less18M', 'Study', 'SampleID'), silent=T,
+             # annot.colors = c("#87CEEBFF", "#DDA0DDFF"), 
+             main = 'T cells', 
+             breaks=seq(-2, 2, 0.2), heatmap.colors = colorRampPalette(c("#6495EDFF", "white", "#FF69B4FF"))(length(seq(-2, 2, 0.2)))) 
+
+heatmap_bcells_neg <- dittoHeatmap(b_cells, b_cells.de.markers %>% 
+                            filter(p_val_adj < 0.05 & avg_log2FC < -1) %>% 
+                            dplyr::arrange(desc(avg_log2FC)) %>% 
+                            rownames(),
+             order.by = 'less18M', annot.by = c('less18M', 'Study', 'SampleID'), silent=T,
+             # annot.colors = c("#87CEEBFF", "#DDA0DDFF"), 
+             main = 'B cells', 
+             breaks=seq(-2, 2, 0.2), heatmap.colors = colorRampPalette(c("#6495EDFF", "white", "#FF69B4FF"))(length(seq(-2, 2, 0.2)))) 
+
+heatmap_myeloid_neg <- dittoHeatmap(myeloid, myeloid.de.markers %>% 
+                            filter(p_val_adj < 0.05 & avg_log2FC < -1) %>% 
+                            dplyr::arrange(desc(avg_log2FC)) %>% 
+                            rownames(),
+             order.by = 'less18M', annot.by = c('less18M', 'Study', 'SampleID'),silent=T,
+             # annot.colors = c("#87CEEBFF", "#DDA0DDFF"),
+             main = 'Myeloid cells',
+             breaks=seq(-2, 2, 0.2), heatmap.colors = colorRampPalette(c("#6495EDFF", "white", "#FF69B4FF"))(length(seq(-2, 2, 0.2)))) 
+
+plot_grid(heatmap_tcells_neg[[4]], heatmap_bcells_neg[[4]], heatmap_myeloid_neg[[4]], nrow = 1)
+```

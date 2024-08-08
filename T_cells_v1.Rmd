@@ -1,0 +1,332 @@
+---
+title: "T_cells_v1"
+author: "Kate Petrenko"
+date: "2024-07-01"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+	echo = FALSE,
+	message = FALSE,
+	warning = FALSE
+)
+library(data.table)
+library(Seurat)
+library(scDblFinder)
+library(DoubletFinder)
+library(dplyr)
+library(remotes)
+# remotes::install_github("carmonalab/STACAS")
+library(STACAS)
+library(SingleR)
+# install.packages("scGate")
+library(scGate)
+library(ggplot2)
+library(BiocParallel)
+library(harmony)
+library(RColorBrewer)
+library(stringr)
+library(cowplot)
+library(scuttle)
+# install.packages("devtools")
+# BiocManager::install("Homo.sapiens")
+# BiocManager::install("jpmam1/scalop") #forked copy of a really good guy 
+# devtools::install_github("jlaffy/infercna")
+library(infercna)
+library(infercnv)
+library(parallel)
+library(future)
+library(clustree)
+library(dittoSeq)
+# install.packages("ggh4x")
+library(ggh4x)
+library(EnhancedVolcano)
+library(clusterProfiler)
+library("org.Hs.eg.db")
+library(ReactomePA)
+library(msigdbr)
+library(qs)
+# BiocManager::install('multtest')
+# install.packages('metap')
+```
+
+```{r read data, include=FALSE}
+set.seed(100)
+DATADIR = '~/neuroblastoma/data/'
+WORKDIR = '~/neuroblastoma/'
+PREPRDATADIR = '~/neuroblastoma/preprocessing_data/'
+
+my_colors <- c("#9ACD32FF", "#4682B4FF",  "#DDA0DDFF", "#FFA07AFF", "#8FBC8BFF",
+               "#40E0D0FF",  "#F0E68CFF", "#5F9EA0FF", "#D2B48CFF",  
+               "#6495EDFF", "#FF69B4FF", "#BA55D3FF",  "#F08080FF", "#32CD32FF",  
+               "#FFDAB9FF",  "#87CEEBFF")
+
+t_cells <- qread(paste0(PREPRDATADIR, 't_cells_v2.qs'))
+```
+
+# Overview of all immune cells
+
+I decided to redo the analysis after reading a lot about integrated analysis. I discovered that it isn’t statistically correct to count differential expression (DE) by cells. They advised using pseudobulk for this purpose, so I did it. Here, I present DE by pseudobulk for each patient. 
+
+```{r fig.height=8, fig.width=15}
+t_cells.de.markers <- read.csv(paste0(PREPRDATADIR, 't_cells_de_markers_bulk.csv'), row.names = 1)
+b_cells.de.markers <- read.csv(paste0(PREPRDATADIR, 'b_cells_de_markers_bulk.csv'), row.names = 1)
+myeloid.de.markers <- read.csv(paste0(PREPRDATADIR, 'myeloid_de_markers_bulk.csv'), row.names = 1)
+
+volcano_plot <- function(de.markers) {
+  EnhancedVolcano(de.markers,
+    lab = rownames(de.markers),
+    x = 'avg_log2FC',
+    y = 'p_val_adj',
+    col = c("grey30", "#9ACD32FF", "#6495EDFF", "#FF69B4FF"),
+    drawConnectors = TRUE,
+    pCutoff = 0.05) +
+  labs(subtitle = "< 18M vs > 18M")
+}
+
+plot_grid(volcano_plot(t_cells.de.markers) +
+            ggtitle('T-cells'),
+          volcano_plot(b_cells.de.markers) +
+            ggtitle('B-cells'),
+          volcano_plot(myeloid.de.markers) +
+            ggtitle('Myeloid cells'), 
+          nrow = 1)
+```
+
+## Enrichment
+
+```{r include=FALSE}
+H_t2g <- msigdbr(species = "Homo sapiens", category = "H") %>% 
+  dplyr::select(gs_name, entrez_gene)
+
+ImmuneSigDB <- msigdbr(species = "Homo sapiens", category = "C5") %>% 
+  dplyr::select(gs_name, entrez_gene)
+
+enrichplot_pos <- function(de.markers, gene.set, logFC_treshlod=1) {
+  em <- enricher(de.markers %>% 
+                            filter(p_val_adj < 0.05 & avg_log2FC > logFC_treshlod) %>% 
+                            rownames() %>% 
+                            mapIds(org.Hs.eg.db, 
+                                   keys = .,
+                                   column = "ENTREZID",
+                                   keytype = "SYMBOL"),
+                       TERM2GENE=gene.set)
+  barplot(em) 
+}
+
+enrichplot_neg <- function(de.markers, gene.set, logFC_treshlod=-1) {
+  em <- enricher(de.markers %>% 
+                            filter(p_val_adj < 0.05 & avg_log2FC < logFC_treshlod) %>% 
+                            rownames() %>% 
+                            mapIds(org.Hs.eg.db, 
+                                   keys = .,
+                                   column = "ENTREZID",
+                                   keytype = "SYMBOL"),
+                       TERM2GENE=gene.set)
+  barplot(em) 
+}
+```
+
+```{r fig.height=7, fig.width=20}
+plot_grid(enrichplot_pos(t_cells.de.markers %>% 
+                            filter(p_val_adj < 0.05 & avg_log2FC > 1) %>% rownames(), H_t2g) +
+            ggtitle('Positive markers'), 
+          enrichplot_pos(t_cells.de.markers, ImmuneSigDB) +
+            ggtitle('Positive markers'), 
+          nrow = 1)
+```
+
+```{r fig.height=7, fig.width=20}
+plot_grid(enrichplot_neg(b_cells.de.markers, H_t2g) +
+            ggtitle('Negative markers'), 
+          enrichplot_neg(b_cells.de.markers1, ImmuneSigDB) +
+            ggtitle('Negative markers'), 
+          nrow = 1)
+```
+
+## DE
+```{r}
+plots <- VlnPlot(t_cells, features = c("LYZ", "ISG15", "CXCL10"), split.by = "stim", group.by = "seurat_annotations",
+    pt.size = 0, combine = FALSE)
+wrap_plots(plots = plots, ncol = 1)
+```
+
+# T-cells overview
+
+```{r include=FALSE}
+t_cells <- t_cells %>% 
+  FindNeighbors(reduction = "integrated.cca.tcells", dims = 1:20) %>%
+  FindClusters(resolution = c(0.2)) %>%
+  RunUMAP(reduction = "integrated.cca.tcells", dims = 1:15)
+
+clustree(t_cells)
+
+t_cells <- subset(t_cells, subset = RNA_snn_res.0.2 != '3')
+t_cells <- subset(t_cells, subset = RNA_snn_res.0.2 != '8')
+
+t_cells <- t_cells %>% 
+  FindNeighbors(reduction = "integrated.cca.tcells", dims = 1:20) %>%
+  FindClusters(resolution = c(0.1)) %>%
+  RunUMAP(reduction = "integrated.cca.tcells", dims = 1:15)
+
+Idents(t_cells) <- 'RNA_snn_res.0.1'
+
+DimPlot(t_cells, group.by = 'RNA_snn_res.0.1', cols = my_colors)
+```
+
+```{r fig.height=4, fig.width=10}
+plot_grid(#DimPlot(t_cells, group.by = 'celltype_humatlas_fine') + NoLegend(),
+          DimPlot(t_cells, group.by = 'Study', cols = my_colors),
+          #DimPlot(t_cells, group.by = 'scGate_multi'),
+          DimPlot(t_cells, group.by = 'less18M', cols = my_colors[10:12]), 
+          nrow=1)
+```
+
+```{r fig.height=4, fig.width=10}
+plot_grid(dittoBarPlot(t_cells, 'less18M', group.by = 'Study', color.panel = my_colors[2:3]),
+          dittoBarPlot(t_cells, 'less18M', group.by = 'sex', color.panel = my_colors[2:3]),
+          nrow = 1)
+```
+
+# Analysis by clusters
+
+Here I analyze cells by clusters. 
+
+On the plot B we can see phases of cell cycle that I calculated based on cell cycle genes.
+
+```{r fig.height=4, fig.width=10, message=FALSE, warning=FALSE}
+s.genes <- cc.genes$s.genes
+g2m.genes <- cc.genes$g2m.genes
+t_cells <- CellCycleScoring(t_cells, s.features = s.genes, g2m.features = g2m.genes)
+
+plot_grid(DimPlot(t_cells, cols = my_colors) + ggtitle('Clusters'),
+          DimPlot(t_cells, group.by = 'Phase', cols = my_colors),
+          labels = c('A', "B"))
+```
+
+Distribution of age by clusters.
+
+```{r fig.height=4, fig.width=10.5}
+p1 <- dittoBarPlot(t_cells, "less18M", group.by = "RNA_snn_res.0.1", color.panel = my_colors) +
+  ggtitle('') +
+  xlab('Clusters') +
+  NoLegend()
+p2 <- dittoBarPlot(t_cells, "less18M", group.by = "RNA_snn_res.0.1", 
+                   scale='count', color.panel = my_colors) +
+  ggtitle('') +
+  xlab('Clusters') +
+  guides(fill=guide_legend(title="< 18 months"))
+p3 <- dittoBarPlot(t_cells, "RNA_snn_res.0.1", group.by = "less18M", 
+                   color.panel = my_colors) +
+  ggtitle('') +
+  guides(fill=guide_legend(title="Clusters"))
+
+cowplot::plot_grid(p1, p2, p3, 
+          nrow=1, rel_widths = c(1, 1.5, 1),
+          labels = c('A', "B", "C"))
+```
+
+Distribution of studies by clusters. 
+
+```{r fig.height=4, fig.width=10.5}
+p1 <- dittoBarPlot(t_cells, "Study", group.by = "RNA_snn_res.0.1", color.panel = my_colors) +
+  ggtitle('') +
+  xlab('Clusters') +
+  NoLegend()
+p2 <- dittoBarPlot(t_cells, "Study", group.by = "RNA_snn_res.0.1", 
+                   scale='count', color.panel = my_colors) +
+  ggtitle('') +
+  xlab('Clusters') +
+  guides(fill=guide_legend(title="Study"))
+p3 <- dittoBarPlot(t_cells, "RNA_snn_res.0.1", group.by = "Study", 
+                   color.panel = my_colors) +
+  ggtitle('') +
+  guides(fill=guide_legend(title="Clusters"))
+
+cowplot::plot_grid(p1, p2, p3, 
+          nrow=1, rel_widths = c(1, 1.5, 1),
+          labels = c('A', "B", "C"))
+```
+
+Distribution of patients by clusters. 
+
+```{r fig.height=6, fig.width=10}
+dittoBarPlot(t_cells, "SampleID", group.by = "RNA_snn_res.0.1") +
+  ggtitle('By samples') +
+  xlab('Clusters') +
+  guides(fill=guide_legend(title="SampleID"))
+```
+
+## Cluster markers
+
+There are markers of our clusters. 
+
+```{r fig.height=4, fig.width=10, message=FALSE, warning=FALSE}
+t_cells.clusters.markers <- FindAllMarkers(t_cells, only.pos = TRUE, min.pct = 0.25,
+                                     logfc.threshold = 0.25)
+
+top5 <- t_cells.clusters.markers %>% 
+  dplyr::filter(p_val_adj < 0.05) %>% 
+  group_by(cluster) %>% 
+  top_n(n = 5, wt = avg_log2FC)
+
+
+dittoDotPlot(t_cells, vars = unique(top5$gene), group.by = "RNA_snn_res.0.1", 
+             max.color='#6495EDFF', min.color='white') +
+  ylab('Clusters') +
+  theme(axis.text.x = element_text(angle = 45, hjust=1))
+```
+
+## Enrichment analysis by clusters
+
+That's an enrichment analysis of cluster markers. I took all significnatn markers (not only 5 as in previous plot). We can describe subtypes of B-cells based on these plots. 
+
+Here I used hallmarks gene sets from Human MSigDB Collections as reference.
+
+```{r fig.height=12, fig.width=16}
+plot_grid(enrichplot_pos(t_cells.clusters.markers %>% 
+                           filter(cluster == '0') %>% 
+                           dplyr::filter(p_val_adj < 0.05), H_t2g, 0.5) +
+            ggtitle('Cluster 0'),
+          enrichplot_pos(t_cells.clusters.markers %>% 
+                           filter(cluster == '1') %>% 
+                           dplyr::filter(p_val_adj < 0.05), H_t2g, 0.1) +
+            ggtitle('Cluster 1'),
+          enrichplot_pos(t_cells.clusters.markers %>% 
+                           filter(cluster == '2') %>% 
+                           dplyr::filter(p_val_adj < 0.05), H_t2g, 0.1) +
+            ggtitle('Cluster 2'),
+          enrichplot_pos(t_cells.clusters.markers %>% 
+                           filter(cluster == '3') %>% 
+                           dplyr::filter(p_val_adj < 0.05), H_t2g, 0.5) +
+            ggtitle('Cluster 3'),
+          enrichplot_pos(t_cells.clusters.markers %>% 
+                           filter(cluster == '4') %>% 
+                           dplyr::filter(p_val_adj < 0.05), H_t2g, 0.5) +
+            ggtitle('Cluster 4'),
+          enrichplot_pos(t_cells.clusters.markers %>% 
+                           filter(cluster == '5') %>% 
+                           dplyr::filter(p_val_adj < 0.05), H_t2g, 0.5) +
+            ggtitle('Cluster 5'),
+          nrow = 3)
+```
+
+# Annotation 
+
+## T-cells common markers
+
+```{r}
+FeaturePlot(t_cells, c('CD3E', 'CD3D', 'CD3G'))
+```
+
+```{r fig.height=8, fig.width=10}
+FeaturePlot(t_cells, c('CD4', 'CD8A', 'CD8B'))
+```
+# Need to finish ^
+
+# Enrichment 
+
+
+
+

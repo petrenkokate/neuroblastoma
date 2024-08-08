@@ -1,0 +1,356 @@
+---
+title: "B_cells_v1"
+author: "Kate Petrenko"
+date: "2024-06-23"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+	echo = FALSE,
+	message = FALSE,
+	warning = FALSE
+)
+library(data.table)
+library(Seurat)
+library(scDblFinder)
+library(DoubletFinder)
+library(dplyr)
+library(remotes)
+# remotes::install_github("carmonalab/STACAS")
+library(STACAS)
+library(SingleR)
+# install.packages("scGate")
+library(scGate)
+library(ggplot2)
+library(BiocParallel)
+library(harmony)
+library(RColorBrewer)
+library(stringr)
+library(cowplot)
+library(scuttle)
+# install.packages("devtools")
+# BiocManager::install("Homo.sapiens")
+# BiocManager::install("jpmam1/scalop") #forked copy of a really good guy 
+# devtools::install_github("jlaffy/infercna")
+library(infercna)
+library(infercnv)
+library(parallel)
+library(future)
+library(clustree)
+library(dittoSeq)
+# install.packages("ggh4x")
+library(ggh4x)
+library(EnhancedVolcano)
+library(clusterProfiler)
+library("org.Hs.eg.db")
+library(ReactomePA)
+library(msigdbr)
+library(qs)
+```
+
+```{r read data, include=FALSE}
+set.seed(100)
+DATADIR = '~/neuroblastoma/data/'
+WORKDIR = '~/neuroblastoma/'
+PREPRDATADIR = '~/neuroblastoma/preprocessing_data/'
+
+my_colors <- c("#9ACD32FF", "#4682B4FF",  "#DDA0DDFF", "#FFA07AFF", "#8FBC8BFF",
+               "#40E0D0FF",  "#F0E68CFF", "#5F9EA0FF", "#D2B48CFF",  
+               "#6495EDFF", "#FF69B4FF", "#BA55D3FF",  "#F08080FF", "#32CD32FF",  
+               "#FFDAB9FF",  "#87CEEBFF")
+
+b_cells <- qread(paste0(PREPRDATADIR, 'b_cells.qs'))
+```
+
+# Data overview
+
+```{r include=FALSE}
+b_cells <- b_cells %>% 
+  FindNeighbors(dims = 1:20) %>%
+  FindClusters(resolution = c(0.1)) %>%
+  RunUMAP(reduction = "integrated.cca.bcells", dims = 1:15)
+
+Idents(b_cells) <- 'RNA_snn_res.0.1'
+```
+
+```{r fig.height=4, fig.width=10}
+plot_grid(#DimPlot(b_cells, group.by = 'celltype_humatlas_fine'),
+          DimPlot(b_cells, group.by = 'Study', cols = my_colors),
+          #DimPlot(b_cells, group.by = 'scGate_multi'),
+          DimPlot(b_cells, group.by = 'less18M', cols = my_colors[10:12]), 
+          nrow=1)
+```
+```{r fig.height=4, fig.width=10}
+plot_grid(dittoBarPlot(b_cells, 'less18M', group.by = 'Study', color.panel = my_colors[2:3]),
+          dittoBarPlot(b_cells, 'less18M', group.by = 'sex', color.panel = my_colors[2:3]),
+          nrow = 1)
+```
+
+# Markers of B-cells
+
+## B-cells
+
+```{r fig.height=8, fig.width=10}
+FeaturePlot(b_cells, c('IGHM', 'IGHD', 'CD19', 'MS4A1', 'CD79A', 'TNFRSF13C', 'CD24', 'CD52'))
+```
+
+## Plasma cells 
+
+```{r fig.height=8, fig.width=8}
+FeaturePlot(b_cells, c('MZB1', 'CD27', 'CD38', 'SDC1', 'SLAMF7'))
+```
+
+## Pro-B-cells
+
+```{r fig.height=8, fig.width=8}
+FeaturePlot(b_cells, c('DNTT', 'VPREB1', 'MME',  'SOX4', 'PTPRC', 'CD19', 'CD34'))
+```
+
+# Annotation
+
+```{r}
+new.cluster.ids <- c('0'='Mature B cells',
+                     '1'='Mature B cells',
+                     '2'='Mature B cells',
+                     '3'='Mature B cells',
+                     '4'='Pre/Pro B cells',
+                     '5'='Mature B cells',
+                     '6'='Plasma cells',
+                     '7'='Mature B cells',
+                     '8'='Mature B cells',
+                     '9'='Mature B cells',
+                     '10'='Mature B cells'
+)
+
+b_cells <- RenameIdents(b_cells, new.cluster.ids)
+
+b_cells$b_cells_manual_annot <- Idents(b_cells)
+DimPlot(b_cells, cols = my_colors)
+```
+
+```{r}
+
+dittoBarPlot(b_cells, 'less18M', group.by = 'b_cells_manual_annot', color.panel = my_colors)
+```
+
+# Differential expression analysis
+```{r fig.height=8, fig.width=7}
+b_cells.de.markers <- read.csv(paste0(PREPRDATADIR, 'b_cells_de_markers.csv'), row.names = 1)
+
+volcano_plot <- function(de.markers) {
+  EnhancedVolcano(de.markers,
+    lab = rownames(de.markers),
+    x = 'avg_log2FC',
+    y = 'p_val_adj',
+    col = c("grey30", "#9ACD32FF", "#6495EDFF", "#FF69B4FF"),
+    drawConnectors = TRUE,
+    pCutoff = 0.05) +
+  labs(subtitle = "< 18M vs > 18M")
+}
+
+volcano_plot(b_cells.de.markers) +
+            ggtitle('B-cells')
+```
+
+Genes are **up**-regulated in patients that are younger 18 months.
+
+```{r fig.height=13, fig.width=6}
+heatmap_bcells <- dittoHeatmap(b_cells, b_cells.de.markers %>% 
+                            filter(p_val_adj < 0.05 & avg_log2FC > 1) %>% 
+                            dplyr::arrange(desc(avg_log2FC)) %>% 
+                            rownames(),
+             order.by = 'less18M', annot.by = c('less18M', 'Study', 'sex'), silent=T,
+             annot.colors = c("#87CEEBFF", "#DDA0DDFF", "#9ACD32FF", "#4682B4FF", "#FFA07AFF", "#8FBC8BFF",
+                              "#BA55D3FF",  "#F08080FF", "#32CD32FF"), main = 'B cells', 
+             breaks=seq(-2, 2, 0.2), heatmap.colors = colorRampPalette(c("#6495EDFF", "white", "#FF69B4FF"))(length(seq(-2, 2, 0.2)))) 
+
+plot_grid(heatmap_bcells[[4]])
+```
+
+Genes are **down**-regulated in patients that are younger 18 months.
+
+```{r fig.height=8, fig.width=6}
+heatmap_bcells_neg <- dittoHeatmap(b_cells, b_cells.de.markers %>% 
+                            filter(p_val_adj < 0.05 & avg_log2FC < -1) %>% 
+                            dplyr::arrange(desc(avg_log2FC)) %>% 
+                            rownames(),
+             order.by = 'less18M', annot.by = c('less18M', 'Study', 'sex'), silent=T,
+             annot.colors = c("#87CEEBFF", "#DDA0DDFF", "#9ACD32FF", "#4682B4FF", "#FFA07AFF", "#8FBC8BFF",
+                              "#BA55D3FF",  "#F08080FF", "#32CD32FF"), main = 'B cells', 
+             breaks=seq(-2, 2, 0.2), heatmap.colors = colorRampPalette(c("#6495EDFF", "white", "#FF69B4FF"))(length(seq(-2, 2, 0.2)))) 
+
+plot_grid(heatmap_bcells_neg[[4]])
+```
+
+## Enrichment analysis
+
+That's an enrichment analysis of genes **up**-regulated in patients that are younger 18 months (Positive markers) and genes **down**-regulated in patients that are younger 18 months (Negative markers)
+
+```{r fig.height=7, fig.width=20}
+H_t2g <- msigdbr(species = "Homo sapiens", category = "H") %>% 
+  dplyr::select(gs_name, entrez_gene)
+
+ImmuneSigDB <- msigdbr(species = "Homo sapiens", category = "C5") %>% 
+  dplyr::select(gs_name, entrez_gene)
+
+enrichplot_pos <- function(de.markers, gene.set) {
+  em <- enricher(de.markers %>% 
+                            filter(p_val_adj < 0.05 & avg_log2FC > 1) %>% 
+                            rownames() %>% 
+                            mapIds(org.Hs.eg.db, 
+                                   keys = .,
+                                   column = "ENTREZID",
+                                   keytype = "SYMBOL"),
+                       TERM2GENE=gene.set)
+  barplot(em) 
+}
+
+enrichplot_neg <- function(de.markers, gene.set) {
+  em <- enricher(de.markers %>% 
+                            filter(p_val_adj < 0.05 & avg_log2FC < -1) %>% 
+                            rownames() %>% 
+                            mapIds(org.Hs.eg.db, 
+                                   keys = .,
+                                   column = "ENTREZID",
+                                   keytype = "SYMBOL"),
+                       TERM2GENE=gene.set)
+  barplot(em) 
+}
+
+plot_grid(enrichplot_pos(b_cells.de.markers, H_t2g) +
+            ggtitle('Positive markers'),
+          enrichplot_neg(b_cells.de.markers, H_t2g) +
+            ggtitle('Negative markers'), 
+          nrow = 1)
+
+plot_grid(enrichplot_neg(b_cells.de.markers, ImmuneSigDB) +
+            ggtitle('Negative markers') ,
+          nrow = 1)
+```
+
+# Enrichment score 
+
+We noticed that on the heatmap we have two groups of cells. We decided to calculate enrichment score for them. 
+
+Gene signature 1 - TUBB6, HERC5, PARP9, IFI44, MX2, OAS1, SAMD9, IFI44L, IFI6, ISG15 
+
+Gene signature 2 - LYZ, S100A8, S100A9, KANSL1-AS1, GNLY, AKT1, PHC2, MAZ, HMGB3, PHGDH, IGLL1, CENPU, KLF16, CBX4, ZNF280D, C16orf74, H2AC6, COLGALT1, KIN, SSBP3, KIAA2013, RIOK2, C3orf38, ADARB1, N4BP2L1, NTAN1, GAB1, MTHFD2L, PPP1R14B, PTP4A2, TLE5, CD81, CYB5R4, ATP8A1, TAPT1, OGFRL1, CSNK1E, CDKN2D, WASF1, CDC25B, NSMCE1, CMTM7, BCL7A, MME, SOX4, H1-10, TFDP2, TIFA, TCF3, ABHD15, APBB2, PCDH9, REXO2, CCDC112, ACSM3, DTX1, CCDC191, H1-2, LETM1, MID1IP1, ZNF880, CCDC71L, ZNF254, COG3, ELF2, ASXL1, TLE1, PCIF1, ATF7IP2, BRI3, JUND, UBALD2, MEX3C, EPC1, C16orf87, MAPRE1, MTRF1L, RASSF1, TRA2A, MYADM, YPEL5, HRK, FOXN3, IQGAP1, CYFIP2, DYRK2, UHRF2, TMEM243, SYF2, UBE2J1, CXXC5, MAP1LC3B, PPP2R2D, PGM2L1, ARL8A, MAF1, WWC3, S1PR1
+
+```{r fig.height=4, fig.width=10}
+markers1 <- b_cells.de.markers %>% 
+                            filter(p_val_adj < 0.05 & avg_log2FC > 1) %>% 
+                            dplyr::arrange(desc(avg_log2FC)) %>% 
+                            rownames() %>% 
+  .[heatmap_bcells$tree_row$order] %>% 
+  .[1:10]
+
+markers2 <- b_cells.de.markers %>% 
+                            filter(p_val_adj < 0.05 & avg_log2FC > 1) %>% 
+                            dplyr::arrange(desc(avg_log2FC)) %>% 
+                            rownames() %>% 
+  .[heatmap_bcells$tree_row$order] %>% 
+  .[11:108]
+
+b_cells <- AddModuleScore(b_cells,
+                  features = list(markers1, markers2),
+                  name="gene_signature")
+
+
+FeaturePlot(b_cells, c('gene_signature1', 'gene_signature2'))
+```
+
+
+# DE in mature B-cells
+
+Because gene signatures are enriched in mature B-cells I perform DE in this cell type only.
+
+```{r fig.height=8, fig.width=7}
+b_cells$annotation_age <- paste(b_cells$b_cells_manual_annot, b_cells$less18M, sep='_')
+Idents(b_cells) <- "annotation_age"
+b_cells.de.markers <- FindMarkers(b_cells, ident.1 = "Mature B cells_TRUE", ident.2 = "Mature B cells_FALSE") %>% 
+  dplyr::filter(pct.1 > 0.05 & pct.2 > 0.05)
+Idents(b_cells) <- "b_cells_manual_annot"
+
+
+volcano_plot(b_cells.de.markers) +
+            ggtitle('Mature B-cells')
+```
+
+Genes are **up**-regulated in patients that are younger 18 months.
+
+```{r fig.height=13, fig.width=6}
+heatmap_bcells <- dittoHeatmap(b_cells, b_cells.de.markers %>% 
+                            filter(p_val_adj < 0.05 & avg_log2FC > 1) %>% 
+                            dplyr::arrange(desc(avg_log2FC)) %>% 
+                            rownames(),
+             order.by = 'less18M', annot.by = c('less18M', 'Study', 'sex'), silent=T,
+             annot.colors = c("#87CEEBFF", "#DDA0DDFF", "#9ACD32FF", "#4682B4FF", "#FFA07AFF", "#8FBC8BFF",
+                              "#BA55D3FF",  "#F08080FF", "#32CD32FF"), main = 'Mature B cells', 
+             breaks=seq(-2, 2, 0.2), heatmap.colors = colorRampPalette(c("#6495EDFF", "white", "#FF69B4FF"))(length(seq(-2, 2, 0.2)))) 
+
+plot_grid(heatmap_bcells[[4]])
+```
+
+Genes are **down**-regulated in patients that are younger 18 months.
+
+```{r fig.height=8, fig.width=6}
+heatmap_bcells_neg <- dittoHeatmap(b_cells, b_cells.de.markers %>% 
+                            filter(p_val_adj < 0.05 & avg_log2FC < -1) %>% 
+                            dplyr::arrange(desc(avg_log2FC)) %>% 
+                            rownames(),
+             order.by = 'less18M', annot.by = c('less18M', 'Study', 'sex'), silent=T,
+             annot.colors = c("#87CEEBFF", "#DDA0DDFF", "#9ACD32FF", "#4682B4FF", "#FFA07AFF", "#8FBC8BFF",
+                              "#BA55D3FF",  "#F08080FF", "#32CD32FF"), main = 'B cells', 
+             breaks=seq(-2, 2, 0.2), heatmap.colors = colorRampPalette(c("#6495EDFF", "white", "#FF69B4FF"))(length(seq(-2, 2, 0.2)))) 
+
+plot_grid(heatmap_bcells_neg[[4]])
+```
+
+## Enrichment analysis
+
+That's an enrichment analysis of genes **up**-regulated in patients that are younger 18 months (Positive markers) and genes **down**-regulated in patients that are younger 18 months (Negative markers)
+
+```{r fig.height=7, fig.width=20}
+
+plot_grid(enrichplot_pos(b_cells.de.markers, H_t2g) +
+            ggtitle('Positive markers'),
+          enrichplot_neg(b_cells.de.markers, H_t2g) +
+            ggtitle('Negative markers'), 
+          nrow = 1)
+
+plot_grid(enrichplot_neg(b_cells.de.markers, ImmuneSigDB) +
+            ggtitle('Negative markers'),
+          nrow = 1)
+```
+
+# Enrichment score 
+
+We noticed that on the heatmap we have two groups of cells. We decided to calculate enrichment score for them. 
+
+Gene signature 1 - TUBB6, PARP9, PLSCR1, MX2, SAMD9L, IFI44L, IFI6, ISG15, IRF7, OAS1, EPSTI1
+
+Gene signature 2 - CCDC71L, N4BP2L1, PCIF1, DYRK2, PPP1R14B, ATF7IP2, BRI3, JUND, UBALD2, MEX3C, EPC1, WWC3, TRA2A, MYADM, YPEL5, HRK, FOXN3, IQGAP1, CDC14A, C3orf38, PPP2R2D, PGM2L1, MAF1, ARL8A, ELF2, LYRM1, CBX4, GADD45A, COG3, MAPRE1, ASXL1, C16orf87, XIST, MTRF1L, RASSF1, SUCLA2, KIAA2013, ADARB1, ATP8A1, CYB5R4, ACSS1, UNK, HMCES, FKBP1A, MID1IP1, NTAN1, C16orf74, TBC1D1, ZNF280D, LETM1, REPIN1, TFDP2, MIR181A1HG, CDKN2D, CD38, CD9, CDC25B, NSMCE1, CMTM7, CD24, MME, SOX4, H1-10, ABHD15, APBB2, PCDH9, REXO2, CCDC112, ACSM3, DTX1, H1-2, CCDC191, BCL7A, KIN, MTHFD2L, UHRF2, TMEM243, SYF2, UBE2J1, CXXC5, MAP1LC3B, CYFIP2, TAPT1, OGFRL1, CSNK1E, TIFA, TCF3, PTP4A2, TLE5, CD81, H2AC6, IGLC3, ITM2C, MZB1, CST3, LYZ, S100A8, S100A9
+
+```{r fig.height=4, fig.width=10}
+markers1 <- b_cells.de.markers %>% 
+                            filter(p_val_adj < 0.05 & avg_log2FC > 1) %>% 
+                            dplyr::arrange(desc(avg_log2FC)) %>% 
+                            rownames() %>% 
+  .[heatmap_bcells$tree_row$order] %>% 
+  .[1:11]
+
+markers2 <- b_cells.de.markers %>% 
+                            filter(p_val_adj < 0.05 & avg_log2FC > 1) %>% 
+                            dplyr::arrange(desc(avg_log2FC)) %>% 
+                            rownames() %>% 
+  .[heatmap_bcells$tree_row$order] %>% 
+  .[12:109]
+
+b_cells <- AddModuleScore(b_cells,
+                  features = list(markers1, markers2),
+                  name="gene_signature")
+
+
+FeaturePlot(b_cells, c('gene_signature1', 'gene_signature2'))
+```

@@ -1,0 +1,898 @@
+---
+title: "mouse_analysis"
+author: "Kate Petrenko"
+date: "2024-07-02"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+	echo = FALSE,
+	message = FALSE,
+	warning = FALSE
+)
+library(data.table)
+library(Seurat)
+library(scDblFinder)
+library(DoubletFinder)
+library(dplyr)
+library(remotes)
+# remotes::install_github("carmonalab/STACAS")
+library(STACAS)
+library(SingleR)
+# install.packages("scGate")
+library(scGate)
+library(ggplot2)
+library(BiocParallel)
+library(harmony)
+library(RColorBrewer)
+library(stringr)
+library(cowplot)
+library(scuttle)
+# install.packages("devtools")
+# BiocManager::install("Homo.sapiens")
+# BiocManager::install("jpmam1/scalop") #forked copy of a really good guy 
+# devtools::install_github("jlaffy/infercna")
+library(infercna)
+library(infercnv)
+library(parallel)
+library(future)
+library(clustree)
+library(dittoSeq)
+# install.packages("ggh4x")
+library(ggh4x)
+#BiocManager::install('EnhancedVolcano')
+library(EnhancedVolcano)
+library(clusterProfiler)
+# BiocManager::install('org.Mm.eg.db')
+library("org.Mm.eg.db")
+library(ReactomePA)
+library(msigdbr)
+# install.packages('qs')
+library(qs)
+```
+
+```{r global variables, include=FALSE}
+set.seed(100)
+DATADIR = '~/neuroblastoma/data/'
+WORKDIR = '~/neuroblastoma/'
+PREPRDATADIR = '~/neuroblastoma/preprocessing_data/'
+
+my_colors <- c("#9ACD32FF", "#4682B4FF",  "#DDA0DDFF", "#FFA07AFF", "#8FBC8BFF",
+               "#40E0D0FF",  "#F0E68CFF", "#5F9EA0FF", "#D2B48CFF",  
+               "#6495EDFF", "#FF69B4FF", "#BA55D3FF",  "#F08080FF", "#32CD32FF",  
+               "#FFDAB9FF",  "#87CEEBFF")
+```
+
+```{r download references, message=FALSE, warning=FALSE, include=FALSE}
+mouse_ref <- celldex::MouseRNAseqData()
+mouse_ref_imm <- celldex::ImmGenData()
+scGate_models_DB <- get_scGateDB()
+```
+
+```{r}
+
+annotate <- function(seu) {
+  
+  seu <- seu %>% 
+    NormalizeData() %>%
+    FindVariableFeatures()%>%
+    ScaleData() %>%
+    RunPCA() %>% 
+    RunUMAP(dims = 1:20) %>%
+    FindNeighbors(dims = 1:20) %>%
+    FindClusters(resolution = 1.5)
+  
+  sce <- as.SingleCellExperiment(seu)
+  colLabels(sce) <- seu$RNA_snn_res.1.5
+  Idents(seu) <- 'RNA_snn_res.1.5'
+  
+  # #cluster-wise annotation
+  pred_bped_main <- SingleR(test = sce, ref = mouse_ref, clusters=colLabels(sce),
+                            labels = mouse_ref$label.main, BPPARAM=MulticoreParam(30))
+  # # Create a named vector for RenameIdents
+  singleR_labels <- pred_bped_main$pruned.labels
+  names(singleR_labels) <- rownames(pred_bped_main)
+  
+  # Update cluster identities in Seurat object based on SingleR results
+  seu <- RenameIdents(seu, singleR_labels)
+  seu[['SingleR_labels']] <- Idents(seu)
+  
+  # define malignant cells
+  malignant_scGate_model <- gating_model(name = "Malignant", signature = c("MYCN"))
+  seu <- scGate(data = seu, model = malignant_scGate_model)
+  barcode_malignant <- unique(c(colnames(seu)[seu$is.pure == 'Pure']))
+  
+  # define stromal cells
+  stromal_scGate_model <- gating_model(name = "Stromal", 
+                                       signature = c('Mmp2', 'Col1a1', 'Col1a2', 'Col5a1', 'Lum', 'Pdgfra'), level = 1)
+  stromal_scGate_model <- gating_model(stromal_scGate_model, name = 'Epithelial', 
+                                      signature = c('Cdh1', 'Flt1'), level = 1)
+  seu <- scGate(seu, model = stromal_scGate_model)
+  barcode_stromal <- colnames(seu)[seu$is.pure == 'Pure']
+  
+  #define t-cells
+  seu <- scGate(seu, model = scGate_models_DB$mouse$generic$Tcell)
+  barcode_T <- colnames(seu)[seu$is.pure == 'Pure']
+  
+  #define b-cells
+  bcells_scGate_model <- gating_model(name = "PanBcell", signature = c('Cd79a'), level = 1)
+  bcells_scGate_model <- gating_model(bcells_scGate_model, name = 'Bcell', 
+                                      signature = c('Ms4a1', 'Bank1', 'Pax5', 'Cd19'), level = 2)
+  bcells_scGate_model <- gating_model(bcells_scGate_model, name = 'Plasma_cell', 
+                                      signature = c('Igkc', 'Ighg3', 'Ighg1', 'Igha', 'Cd19-'), level = 2)
+  seu <- scGate(seu, model = bcells_scGate_model)
+  barcode_B <- colnames(seu)[seu$is.pure == 'Pure']
+  
+  #define myeloid cells
+  seu <- scGate(seu, model = scGate_models_DB$mouse$generic$Myeloid)
+  barcode_myeloid <- colnames(seu)[seu$is.pure == 'Pure']
+  
+  seu <- scGate(seu, model = scGate_models_DB$mouse$generic$MoMacDC)
+  barcode_monocyte <- colnames(seu)[seu$is.pure == 'Pure']
+  
+  # Assign final labels
+  seu$final_labels <- "unknown"
+  seu$final_labels[colnames(seu) %in% barcode_malignant] <- "malignant_cells"
+  seu$final_labels[colnames(seu) %in% barcode_T] <- "T_cells"
+  seu$final_labels[colnames(seu) %in% barcode_B] <- "B_cells"
+  seu$final_labels[colnames(seu) %in% barcode_myeloid] <- "myeloid_cells"
+  seu$final_labels[colnames(seu) %in% barcode_monocyte] <- "myeloid_cells"
+  seu$final_labels[colnames(seu) %in% barcode_stromal] <- "stromal_cells"
+  
+  annot_comp <- c("Adipocytes" = 'weird',
+                  "Neurons" = 'malignant_cells',
+                  "Astrocytes" = 'weird',
+                  "Endothelial cells" = 'stromal_cells',
+                  "Erythrocytes" = 'weird',
+                  "Fibroblasts" = 'malignant_cells',      
+                  "Granulocytes" = 'myeloid_cells',
+                  "Macrophages" = 'myeloid_cells',
+                  "Microglia" = 'weird',
+                  "Monocytes" = 'myeloid_cells',
+                  "NK cells" = 'T_cells',
+                  "Oligodendrocytes" = 'weird',
+                  "T cells" = 'T_cells',
+                  "Dendritic cells" = 'weird',
+                  "Cardiomyocytes" = 'weird',
+                  "Hepatocytes" = 'weird',
+                  "B cells" = 'B_cells',
+                  "Epithelial cells" = 'stromal_cells', 
+                  'unknown' = 'unknown')
+  
+  pred_bped_main$pruned.labels[is.na(pred_bped_main$pruned.labels)] <- 'unknown'
+  
+  pred_bped_main$pruned.labels <- annot_comp[as.character(pred_bped_main$pruned.labels)]
+  
+  final_annotation_df <- data.frame(cluster = rownames(pred_bped_main),
+                                    annotation = '-')
+  # Compare SingleR and scGate
+  for (i in rownames(pred_bped_main)) {
+    
+    if (table(seu$RNA_snn_res.1.5)[i] == 0) {
+      next
+    }
+    
+    cells_cluster <- seu[, colnames(seu) %in%  colnames(seu)[seu$RNA_snn_res.1.5 == i]]
+    SingleR_title <- pred_bped_main$pruned.labels[rownames(pred_bped_main) == i]
+    scGate_max <- names(which.max(table(cells_cluster$final_labels)))
+    scGate_max2 <- names(table(cells_cluster$final_labels) %>% sort(decreasing = T))[2]
+    scGate_max2 <- ifelse(is.na(scGate_max2), 'unknown', scGate_max2)
+    
+    if (scGate_max == SingleR_title & scGate_max != 'unknown') {
+      final_annotation_df$annotation[final_annotation_df$cluster == i] <- scGate_max
+    } else if (scGate_max2 == SingleR_title & scGate_max2 != 'unknown') {
+      final_annotation_df$annotation[final_annotation_df$cluster == i] <- scGate_max2
+    } else if (scGate_max == 'unknown' & SingleR_title != 'unknown') {
+      final_annotation_df$annotation[final_annotation_df$cluster == i] <- SingleR_title
+    } else if (scGate_max != 'unknown' & SingleR_title == 'unknown') {
+      final_annotation_df$annotation[final_annotation_df$cluster == i] <- scGate_max
+    } else {
+      final_annotation_df$annotation[final_annotation_df$cluster == i] <- 'unresolved'
+    }
+    
+  }
+  
+  final_annotation <- final_annotation_df$annotation
+  names(final_annotation) <- final_annotation_df$cluster
+  
+  Idents(seu) <- 'RNA_snn_res.1.5'
+  seu <- RenameIdents(seu, final_annotation)
+  seu[['ANNOTATION_FINAL']] <- Idents(seu)
+  
+  return(seu)
+  
+}
+```
+
+# Read data
+```{r}
+young <- Read10X_h5(paste0(DATADIR,
+                           'mice_scRNA-seq_v1/20240625_YuvalShaked_Chen/CellRanger/Counting_2024A/P_2024A/filtered_feature_bc_matrix.h5'))
+adult <- Read10X_h5(paste0(DATADIR,
+                           'mice_scRNA-seq_v1/20240625_YuvalShaked_Chen/CellRanger/Counting_2024A/A_2024A/filtered_feature_bc_matrix.h5'))
+```
+
+# Young
+
+## Before
+
+```{r}
+young <- CreateSeuratObject(young, min.cells = 10, min.features = 200)
+young$age <- 'young'
+young[["percent.mt"]] <- PercentageFeatureSet(young, pattern = "^mt-")
+# young[["percent.ribo"]] <- PercentageFeatureSet(young, pattern = "^Rp[sl]")
+young[["complexity"]] <- log10(young$nFeature_RNA) / log10(young$nCount_RNA)
+VlnPlot(young, c("nFeature_RNA", "nCount_RNA", "percent.mt", "complexity"), ncol = 4)
+```
+
+```{r}
+young_ann <- annotate(young)
+
+DimPlot(young_ann, group.by = 'SingleR_labels')
+DimPlot(young_ann, group.by = 'final_labels')
+DimPlot(young_ann, group.by = 'ANNOTATION_FINAL')
+FeaturePlot(young_ann, 'Mycn')
+FeaturePlot(young_ann, 'complexity')
+FeaturePlot(young_ann, 'percent.mt')
+```
+
+## After
+
+```{r}
+young <- subset(young, subset = percent.mt < 15 & complexity > 0.7)
+VlnPlot(young, c("nFeature_RNA", "nCount_RNA", "percent.mt", "complexity"), ncol = 4)
+```
+
+# Adult 
+
+## Before
+
+```{r}
+adult <- CreateSeuratObject(adult, min.cells = 10, min.features = 200)
+adult$age <- 'adult'
+adult[["percent.mt"]] <- PercentageFeatureSet(adult, pattern = "^mt-")
+# adult[["percent.ribo"]] <- PercentageFeatureSet(adult, pattern = "^Rp[sl]")
+adult[["complexity"]] <- log10(adult$nFeature_RNA) / log10(adult$nCount_RNA)
+VlnPlot(adult, c("nFeature_RNA", "nCount_RNA", "percent.mt", "complexity"), ncol = 4)
+```
+
+```{r}
+adult_ann <- annotate(adult)
+
+DimPlot(adult_ann, group.by = 'SingleR_labels')
+DimPlot(adult_ann, group.by = 'final_labels')
+DimPlot(adult_ann, group.by = 'ANNOTATION_FINAL')
+FeaturePlot(adult_ann, 'Mycn')
+FeaturePlot(adult_ann, 'complexity')
+FeaturePlot(adult_ann, 'percent.mt')
+```
+
+## After
+
+```{r}
+adult <- subset(adult, subset = percent.mt < 15 & complexity > 0.8)
+VlnPlot(adult, c("nFeature_RNA", "nCount_RNA", "percent.mt", "complexity"), ncol = 4)
+```
+
+# Auto-annotation
+
+```{r}
+annotated_samples <- mclapply(list(young, adult),
+                              annotate, mc.cores = 2)
+
+names(annotated_samples) <- c('P', 'A')
+
+DimPlot(annotated_samples[[1]], group.by = 'ANNOTATION_FINAL')
+DimPlot(annotated_samples[[2]], group.by = 'ANNOTATION_FINAL')
+
+FeaturePlot(annotated_samples[[1]], 'Mycn')
+FeaturePlot(annotated_samples[[2]], 'Mycn')
+```
+
+```{r}
+seu <- merge(annotated_samples[[1]], annotated_samples[[2]], add.cell.ids = c("P", "A"))
+```
+
+## Integration
+
+```{r echo=FALSE}
+seu <- seu %>% 
+  NormalizeData() %>% 
+  FindVariableFeatures() %>% 
+  ScaleData() %>% 
+  RunPCA(verbose=FALSE)
+  
+# seu <- seu %>% 
+#   IntegrateLayers(
+#     object = ., method = CCAIntegration,
+#     orig.reduction = "pca", new.reduction = "integrated.cca",
+#     verbose = FALSE) %>% 
+#   RunUMAP(reduction = "integrated.cca", dims = 1:20) 
+
+seu <- seu %>% 
+  RunHarmony(., 'age',
+             lambda = 1, verbose = FALSE) %>% 
+  RunUMAP(reduction = "harmony", dims = 1:20, verbose=F) 
+
+seu <- JoinLayers(seu)
+
+DimPlot(seu, group.by = 'age', cols = my_colors) 
+DimPlot(seu, group.by = 'ANNOTATION_FINAL', cols = my_colors) 
+DimPlot(seu, group.by = 'SingleR_labels', cols = my_colors)
+DimPlot(seu, group.by = 'final_labels', cols = my_colors) 
+FeaturePlot(seu, 'Mycn')
+```
+
+```{r}
+seu <- seu %>% 
+  FindNeighbors(dims = 1:10) %>%
+  FindClusters(resolution = c(0.1, 0.2, 0.3, 0.4, 0.5)) 
+
+clustree(seu)
+
+Idents(object = seu) <- "RNA_snn_res.0.1"
+
+new.cluster.ids <- c('0'='malignant_cells',
+                     '1'='malignant_cells',
+                     '2'='T_cells',
+                     '3'='B_cells',
+                     '4'='myeloid_cells',
+                     '5'='stromal_cells',
+                     '6'='malignant_cells',
+                     '7'='stromal_cells',
+                     '8'='stromal_cells'
+)
+
+seu <- RenameIdents(seu, new.cluster.ids)
+seu$annotation <- Idents(seu)
+
+DimPlot(seu, cols = c("#FF69B4FF", "#40E0D0FF", "#6495EDFF",  "#9ACD32FF", "#BA55D3FF")) +
+  ggtitle("                                   Annotation")
+
+DimPlot(seu, group.by = 'age', cols = c("#6495EDFF", "#FF69B4FF")) +
+  ggtitle("            Age")
+```
+# Overview
+
+```{r fig.height=4, fig.width=13}
+s.genes <- cc.genes$s.genes
+g2m.genes <- cc.genes$g2m.genes
+seu <- CellCycleScoring(seu, s.features = s.genes, g2m.features = g2m.genes)
+
+plot_grid(dittoBarPlot(seu, 'age', group.by = 'annotation', color.panel = my_colors),
+          dittoBarPlot(seu, 'Phase', group.by = 'annotation', color.panel = my_colors),
+          dittoBarPlot(seu, 'annotation', group.by = 'age', color.panel = my_colors),
+          nrow = 1)
+```
+
+# Analysis
+
+```{r fig.height=8, fig.width=20}
+Idents(seu) <- "age"
+t_cells.de.markers <- FindMarkers(subset(seu, annotation == 'T_cells'), 
+                                  ident.1 = "young", ident.2 = "adult", 
+                                  min.pct = 0.25)
+
+b_cells.de.markers <- FindMarkers(subset(seu, annotation == 'B_cells'), 
+                                  ident.1 = "young", ident.2 = "adult", 
+                                  min.pct = 0.25)
+
+myeloid.de.markers <- FindMarkers(subset(seu, annotation == 'myeloid_cells'), 
+                                  ident.1 = "young", ident.2 = "adult", 
+                                  min.pct = 0.25)
+
+malignant.de.markers <- FindMarkers(subset(seu, annotation == 'malignant_cells'), 
+                                  ident.1 = "young", ident.2 = "adult", 
+                                  min.pct = 0.25)
+
+volcano_plot <- function(de.markers) {
+  EnhancedVolcano(de.markers,
+    lab = rownames(de.markers),
+    x = 'avg_log2FC',
+    y = 'p_val_adj',
+    col = c("grey30","#8FBC8BFF", "#6495EDFF", "#BA55D3FF"),
+    drawConnectors = TRUE,
+    pCutoff = 0.05, 
+    FCcutoff = 0.5,
+    max.overlaps = 30
+    ) +
+  labs(subtitle = "Young vs Adult")
+}
+
+plot_grid(volcano_plot(t_cells.de.markers) +
+            ggtitle('T-cells'),
+          volcano_plot(b_cells.de.markers) +
+            ggtitle('B-cells'),
+          volcano_plot(myeloid.de.markers) +
+            ggtitle('Myeloid cells'),
+          volcano_plot(malignant.de.markers) +
+            ggtitle('Malignant cells'),
+          nrow = 1)
+```
+
+# Scatter plots
+```{r echo=FALSE, fig.height=7, fig.width=7}
+seu$celltype.age <- paste(seu$annotation, seu$age, sep = "_")
+Idents(seu) <- "celltype.age"
+seu_bulk <- AggregateExpression(seu, group.by = c("annotation", "age"), return.seurat = TRUE)
+
+p1 <- CellScatter(seu_bulk, "T-cells_young", "T-cells_adult")
+p1 <- CellScatter(seu_bulk, "T-cells_young", "T-cells_adult", highlight = p1$data %>% filter(abs(T.cells_adult - T.cells_young) > 1) %>% rownames())
+p1 <- LabelPoints(plot = p1, points = p1$data %>% filter(abs(T.cells_adult - T.cells_young) > 1) %>% rownames(), repel = TRUE)
+
+p2 <- CellScatter(seu_bulk, "B-cells_young", "B-cells_adult")
+p2 <- CellScatter(seu_bulk, "B-cells_young", "B-cells_adult", highlight = p2$data %>% filter(abs(B.cells_adult - B.cells_young) > 1) %>% rownames())
+p2 <- LabelPoints(plot = p2, points = p2$data %>% filter(abs(B.cells_adult - B.cells_young) > 1) %>% rownames(), repel = TRUE)
+
+p3 <- CellScatter(seu_bulk, "myeloid-cells_young", "myeloid-cells_adult")
+p3 <- CellScatter(seu_bulk, "myeloid-cells_young", "myeloid-cells_adult", highlight = p3$data %>% filter(abs(myeloid.cells_adult - myeloid.cells_young) > 1) %>% rownames())
+p3 <- LabelPoints(plot = p3, points = p3$data %>% filter(abs(myeloid.cells_adult - myeloid.cells_young) > 1) %>% rownames(), repel = TRUE)
+
+p4 <- CellScatter(seu_bulk, "malignant-cells_young", "malignant-cells_adult")
+p4 <- CellScatter(seu_bulk, "malignant-cells_young", "malignant-cells_adult", highlight = p4$data %>% filter(abs(malignant.cells_adult - malignant.cells_young) > 1) %>% rownames())
+p4 <- LabelPoints(plot = p4, points =  p4$data %>% filter(abs(malignant.cells_adult - malignant.cells_young) > 1) %>% rownames(), repel = TRUE)
+
+p1 + p2 + p3 + p4
+```
+
+```{r eval=FALSE, include=FALSE}
+p1$data %>% 
+  dplyr::filter(colors != 'Unselected')
+```
+
+
+```{r}
+t_cells.de.markers %>% dplyr::filter(p_val_adj < 0.05 & abs(avg_log2FC) >= 0.5 )
+
+b_cells.de.markers %>% dplyr::filter(p_val_adj < 0.05 & abs(avg_log2FC) >= 0.5 )
+
+myeloid.de.markers %>% dplyr::filter(p_val_adj < 0.05 & abs(avg_log2FC) >= 0.5 )
+
+malignant.de.markers %>% dplyr::filter(p_val_adj < 0.05 & abs(avg_log2FC) >= 0.5 )
+
+```
+
+# Pseudobulk DE
+
+```{r create pseudoreplicates, include=FALSE}
+seu$rep <- NA
+create_pseudorep <- function(seu) {
+  
+  rep1 <- c()
+  rep2 <- c()
+  rep3 <- c()
+  reps <- list(rep1, rep2, rep3)
+  
+  samples <- seu$age %>% unique
+  cell_types <- seu$annotation %>% unique
+  sample_annot_table <- table(seu$annotation, seu$age)
+  for (sample in samples) {
+    for (celltype in cell_types) {
+      
+      if (sample_annot_table[celltype, sample] >= 150) {
+        
+        cells <- WhichCells(seu, expression = annotation ==  celltype & age == sample)
+        cells_split <- split(cells,  cut(seq_along(cells), 3, labels = FALSE))
+        reps[[1]] <- c(reps[[1]], cells_split[1])
+        reps[[2]] <- c(reps[[2]], cells_split[2])
+        reps[[3]] <- c(reps[[3]], cells_split[3])
+      }
+      else if (sample_annot_table[celltype, sample] >= 90) {
+        cells <- WhichCells(seu, expression = annotation ==  celltype & age == sample)
+        cells_split <- split(cells,  cut(seq_along(cells), 2, labels = FALSE))
+        reps[[1]] <- c(reps[[1]], cells_split[1])
+        reps[[2]] <- c(reps[[2]], cells_split[2])
+      }
+    }
+  }
+  return(reps)
+}
+
+replicates_list <- create_pseudorep(seu)
+
+for (i in seq_along(replicates_list)) {
+  replicate_name <- paste0("rep", i)
+  cells <- unlist(replicates_list[[i]])
+  seu$rep[cells] <- replicate_name
+}
+```
+
+```{r}
+seu_bulk <- subset(seu, rep %in% c('rep1', 'rep2', 'rep3'))
+seu_bulk <- AggregateExpression(seu_bulk, return.seurat = T, slot = "counts", assays = "RNA", 
+                            group.by = c("annotation", "age", 'rep'))
+```
+
+```{r fig.height=8, fig.width=20}
+Idents(seu_bulk) <- "age"
+t_cells.de.markers <- FindMarkers(subset(seu_bulk, annotation == 'T-cells'), 
+                                  ident.1 = "young", ident.2 = "adult", 
+                                  slot = "counts",
+                                  test.use = "DESeq2", verbose = F)
+
+b_cells.de.markers <- FindMarkers(subset(seu_bulk, annotation == 'B-cells'), 
+                                  ident.1 = "young", ident.2 = "adult", slot = "counts",
+                                  test.use = "DESeq2", verbose = F, 
+                                  min.cells.group = 2)
+
+myeloid.de.markers <- FindMarkers(subset(seu_bulk, annotation == 'myeloid-cells'), 
+                                  ident.1 = "young", ident.2 = "adult", slot = "counts",
+                                  test.use = "DESeq2", verbose = F)
+
+malignant.de.markers <- FindMarkers(subset(seu_bulk, annotation == 'malignant-cells'), 
+                                  ident.1 = "young", ident.2 = "adult", slot = "counts",
+                                  test.use = "DESeq2", verbose = F)
+
+plot_grid(volcano_plot(t_cells.de.markers) +
+            ggtitle('T-cells'),
+          volcano_plot(b_cells.de.markers) +
+            ggtitle('B-cells'),
+          volcano_plot(myeloid.de.markers) +
+            ggtitle('Myeloid cells'),
+          volcano_plot(malignant.de.markers) +
+            ggtitle('Malignant cells'),
+          nrow = 1)
+```
+
+# Heatmap
+
+```{r fig.height=20, fig.width=12}
+heatmap_tcells <- dittoHeatmap(subset(seu, annotation == 'T_cells'), t_cells.de.markers %>% 
+                            filter(p_val_adj < 0.05 & abs(avg_log2FC) > 1) %>% 
+                            dplyr::arrange(desc(avg_log2FC)) %>% 
+                            rownames(),
+             order.by = 'age', annot.by = 'age', silent=T,
+             annot.colors = c("#87CEEBFF", "#DDA0DDFF"), 
+             main = 'T cells', 
+             breaks=seq(-2, 2, 0.2), heatmap.colors = colorRampPalette(c("#6495EDFF", "white", "#FF69B4FF"))(length(seq(-2, 2, 0.2))))
+
+heatmap_bcells <- dittoHeatmap(subset(seu, annotation == 'B_cells'), b_cells.de.markers %>% 
+                            filter(p_val_adj < 0.05 & abs(avg_log2FC) > 0.5) %>% 
+                            dplyr::arrange(desc(avg_log2FC)) %>% 
+                            rownames(),
+             order.by = 'age', annot.by = 'age', silent=T,
+             annot.colors = c("#87CEEBFF", "#DDA0DDFF"), 
+             main = 'B cells', 
+             breaks=seq(-2, 2, 0.2), heatmap.colors = colorRampPalette(c("#6495EDFF", "white", "#FF69B4FF"))(length(seq(-2, 2, 0.2))))
+
+heatmap_myelcells <- dittoHeatmap(subset(seu, annotation == 'myeloid_cells'), myeloid.de.markers %>% 
+                            filter(p_val_adj < 0.05 & abs(avg_log2FC) > 0.8) %>% 
+                            dplyr::arrange(desc(avg_log2FC)) %>% 
+                            rownames(),
+             order.by = 'age', annot.by = 'age', silent=T,
+             annot.colors = c("#87CEEBFF", "#DDA0DDFF"), 
+             main = 'Myeloid cells', 
+             breaks=seq(-2, 2, 0.2), heatmap.colors = colorRampPalette(c("#6495EDFF", "white", "#FF69B4FF"))(length(seq(-2, 2, 0.2))))
+
+heatmap_maligcells <- dittoHeatmap(subset(seu, annotation == 'malignant_cells'), malignant.de.markers %>% 
+                            filter(p_val_adj < 0.05 & abs(avg_log2FC) > 0.5) %>% 
+                            dplyr::arrange(desc(avg_log2FC)) %>% 
+                            rownames(),
+             order.by = 'age', annot.by = 'age', silent=T,
+             annot.colors = c("#87CEEBFF", "#DDA0DDFF"), 
+             main = 'Malignant cells', 
+             breaks=seq(-2, 2, 0.2), heatmap.colors = colorRampPalette(c("#6495EDFF", "white", "#FF69B4FF"))(length(seq(-2, 2, 0.2))))
+
+plot_grid(heatmap_tcells[[4]], heatmap_maligcells[[4]], nrow=1)
+```
+
+```{r fig.height=12, fig.width=12}
+plot_grid(heatmap_bcells[[4]], heatmap_myelcells[[4]], nrow=1)
+```
+
+# T-cells
+
+```{r fig.height=10}
+ego_tcells <- enrichGO(gene          = t_cells.de.markers %>% 
+                            filter(p_val_adj < 0.05 & avg_log2FC > 1) %>% 
+                            rownames() %>% 
+                            mapIds(org.Mm.eg.db, 
+                                   keys = .,
+                                   column = "ENTREZID",
+                                   keytype = "SYMBOL"),
+                      OrgDb         = org.Mm.eg.db,
+                      ont           = "BP",
+                      pAdjustMethod = "BH",
+                      pvalueCutoff  = 0.05,
+                      qvalueCutoff  = 0.05,
+                      readable      = TRUE)
+
+barplot(ego_tcells, showCategory=20) 
+
+reactome_tcells <- enrichPathway(gene=t_cells.de.markers %>% 
+                            filter(p_val_adj < 0.05 & avg_log2FC > 1) %>% 
+                            rownames() %>% 
+                            mapIds(org.Mm.eg.db, 
+                                   keys = .,
+                                   column = "ENTREZID",
+                                   keytype = "SYMBOL"), pvalueCutoff = 0.05, readable=TRUE)
+
+barplot(reactome_tcells, showCategory=20) 
+```
+
+## Composition
+
+```{r  fig.height=5, fig.width=12}
+t_cells <- subset(seu, annotation == 'T_cells')
+
+t_cells <- t_cells %>% 
+  NormalizeData() %>% 
+  FindVariableFeatures() %>% 
+  ScaleData() %>% 
+  RunPCA(verbose=FALSE) %>% 
+  RunHarmony(., 'age',
+             lambda = 1, verbose = FALSE) %>% 
+  RunUMAP(reduction = "harmony", dims = 1:20, verbose=F) %>% 
+  FindNeighbors(dims = 1:20) %>%
+  FindClusters(resolution = seq(0.1, 1, 0.1))
+
+clustree(t_cells)
+
+Idents(t_cells) <- t_cells$RNA_snn_res.0.2
+plot_grid(DimPlot(t_cells, group.by = 'RNA_snn_res.0.2', cols = my_colors) +
+  ggtitle("Clusters"), 
+  DimPlot(t_cells, group.by = 'age', cols = c("#6495EDFF", "#FF69B4FF")) +
+  ggtitle("Age"),
+  nrow = 1)
+```
+
+```{r fig.height=4, fig.width=13}
+plot_grid(dittoBarPlot(t_cells, 'age', group.by = 'RNA_snn_res.0.2', color.panel = my_colors),
+          dittoBarPlot(t_cells, 'Phase', group.by = 'RNA_snn_res.0.2', color.panel = my_colors),
+          dittoBarPlot(t_cells, 'RNA_snn_res.0.2', group.by = 'age', color.panel = my_colors),
+          rel_widths = c(1, 1, 0.7),
+          nrow = 1)
+```
+
+```{r fig.height=6, fig.width=12}
+
+tcells.clusters.markers <- FindAllMarkers(t_cells, only.pos = TRUE, min.pct = 0.25)
+top5 <- tcells.clusters.markers %>%
+  dplyr::filter(p_val_adj < 0.05) %>% 
+  group_by(cluster) %>%
+  top_n(n = 7, wt = avg_log2FC)
+
+DotPlot(t_cells, top5$gene, cols = c('lightgrey', "#BA55D3FF")) +
+  RotatedAxis()
+```
+
+```{r fig.height=10, fig.width=9}
+FeaturePlot(t_cells, c('Cd69', 'Ctla4', 'Cd44', 'Pdcd1', 'Tbx21', 'Ptgdr2', 'Trac'))
+```
+
+```{r fig.height=10, fig.width=9}
+FeaturePlot(t_cells, c('Cd3e', 'Cd3d', 'Cd247', 'Klrb1c', 'Ncr1', 'Klrk1'))
+```
+
+```{r fig.height=10, fig.width=9}
+FeaturePlot(t_cells, c('Cd4', 'Cd8a', 'Cd8b1', 'Cd3e', 'Cd3d', 'Cd3g'))
+```
+
+```{r}
+FeaturePlot(t_cells, 'percent.mt')
+```
+
+### SingleR 
+
+```{r}
+sce <- as.SingleCellExperiment(t_cells)
+pred_main <- SingleR(test = sce, ref = mouse_ref_imm, 
+                     labels = mouse_ref_imm$label.main, 
+                     BPPARAM=MulticoreParam(10))
+t_cells[['pred_main']] <- pred_main$pruned.labels
+pred_fine <- SingleR(test = sce, ref = mouse_ref_imm, 
+                     labels = mouse_ref_imm$label.fine, 
+                     BPPARAM=MulticoreParam(10))
+t_cells[['pred_fine']] <- pred_fine$pruned.labels
+
+DimPlot(t_cells, group.by = 'pred_main')
+```
+
+```{r fig.height=10}
+ego_tcells <- enrichGO(gene          = tcells.clusters.markers %>% 
+                            filter(p_val_adj < 0.05) %>% 
+                         dplyr::filter(cluster == 2) %>% 
+                            .$gene %>% 
+                            mapIds(org.Mm.eg.db, 
+                                   keys = .,
+                                   column = "ENTREZID",
+                                   keytype = "SYMBOL"),
+                      OrgDb         = org.Mm.eg.db,
+                      ont           = "BP",
+                      pAdjustMethod = "BH",
+                      pvalueCutoff  = 0.05,
+                      qvalueCutoff  = 0.05,
+                      readable      = TRUE)
+
+barplot(ego_tcells, showCategory=20) 
+```
+
+## Annotation
+
+```{r}
+new.cluster.ids <- c('0'='CD4_cells',
+                     '1'='CD8_cells',
+                     '2'='NK_cells',
+                     '3'='CD4_Treg',
+                     '4'='CD4minCD8min_T_cells',
+                     '5'='ILC'
+)
+
+t_cells <- RenameIdents(t_cells, new.cluster.ids)
+t_cells$de_annotation <- Idents(t_cells)
+
+Idents(t_cells) <- 'RNA_snn_res.0.2'
+new.cluster.ids <- c('0'='CD4+ T cells',
+                     '1'='CD8+ T cells',
+                     '2'='NK cells',
+                     '3'='CD4+ Treg cells',
+                     '4'='CD4-CD8- T cells',
+                     '5'='ILC (probably)'
+)
+t_cells <- RenameIdents(t_cells, new.cluster.ids)
+t_cells$Annotation <- Idents(t_cells)
+
+DimPlot(t_cells, cols = my_colors)
+```
+
+```{r fig.height=4, fig.width=13}
+plot_grid(dittoBarPlot(t_cells, 'age', group.by = 'Annotation', color.panel = my_colors),
+          dittoBarPlot(t_cells, 'Phase', group.by = 'Annotation', color.panel = my_colors),
+          dittoBarPlot(t_cells, 'Annotation', group.by = 'age', color.panel = my_colors),
+          rel_widths = c(1, 1, 0.7),
+          nrow = 1)
+```
+## Scatter plots
+
+```{r echo=FALSE, fig.height=7, fig.width=7}
+t_cells$celltype.age <- paste(t_cells$de_annotation, t_cells$age, sep = "_")
+Idents(t_cells) <- "celltype.age"
+t_cells_bulk <- AggregateExpression(t_cells, group.by = c("de_annotation", "age"), return.seurat = TRUE)
+
+p1 <- CellScatter(t_cells_bulk, "CD4-cells_young", "CD4-cells_adult")
+p1 <- CellScatter(t_cells_bulk, "CD4-cells_young", "CD4-cells_adult", highlight = p1$data %>% filter(abs(`CD4.cells_young` - `CD4.cells_adult`) > 1) %>% rownames())
+p1 <- LabelPoints(plot = p1, points = p1$data %>% filter(abs(`CD4.cells_young` - `CD4.cells_adult`) > 1) %>% rownames(), repel = TRUE)
+
+p2 <- CellScatter(t_cells_bulk, "CD8-cells_young", "CD8-cells_adult")
+p2 <- CellScatter(t_cells_bulk, "CD8-cells_young", "CD8-cells_adult", highlight = p2$data %>% filter(abs(`CD8.cells_young` - `CD8.cells_adult`) > 1) %>% rownames())
+p2 <- LabelPoints(plot = p2, points = p2$data %>% filter(abs(`CD8.cells_young` - `CD8.cells_adult`) > 1) %>% rownames(), repel = TRUE)
+
+p3 <- CellScatter(t_cells_bulk, "NK-cells_young", "NK-cells_adult")
+p3 <- CellScatter(t_cells_bulk, "NK-cells_young", "NK-cells_adult", highlight = p3$data %>% filter(abs(NK.cells_young - NK.cells_adult) > 1) %>% rownames())
+p3 <- LabelPoints(plot = p3, points = p3$data %>% filter(abs(NK.cells_young - NK.cells_adult) > 1) %>% rownames(), repel = TRUE)
+
+p4 <- CellScatter(t_cells_bulk, "CD4-Treg_young", "CD4-Treg_adult")
+p4 <- CellScatter(t_cells_bulk, "CD4-Treg_young", "CD4-Treg_adult", highlight = p4$data %>% filter(abs(`CD4.Treg_young` - `CD4.Treg_adult`) > 1) %>% rownames())
+p4 <- LabelPoints(plot = p4, points =  p4$data %>% filter(abs(`CD4.Treg_young` - `CD4.Treg_adult`) > 1) %>% rownames(), repel = TRUE)
+
+p1 + p2 + p3 + p4
+```
+
+```{r}
+p3$data %>% 
+  dplyr::filter(colors!= 'Unselected')
+```
+
+## DE
+
+```{r fig.height=8, fig.width=16}
+nk_cells.de.markers <- FindMarkers(t_cells, 
+                                  ident.1 = "NK_cells_young", ident.2 = "NK_cells_adult", 
+                                  min.pct = 0.25)
+cd8_cells.de.markers <- FindMarkers(t_cells, 
+                                  ident.1 = "CD8_cells_young", ident.2 = "CD8_cells_adult", 
+                                  min.pct = 0.25)
+reg_cells.de.markers <- FindMarkers(t_cells, 
+                                  ident.1 = "CD4_Treg_young", ident.2 = "CD4_Treg_adult", 
+                                  min.pct = 0.25)
+
+plot_grid(volcano_plot(nk_cells.de.markers) +
+            ggtitle('NK cells'),
+          volcano_plot(cd8_cells.de.markers) +
+            ggtitle('CD8+ T cells'),
+          volcano_plot(reg_cells.de.markers) +
+            ggtitle('CD4+ Treg cells'),
+          nrow = 1)
+```
+
+```{r}
+reg_cells.de.markers %>% 
+  arrange(avg_log2FC) %>% 
+  dplyr::filter(p_val_adj < 0.05)
+```
+
+```{r}
+FeaturePlot(t_cells, c('Klrk1', 'Il7r'))
+```
+
+# B-cells
+
+```{r fig.height=10}
+ego_bcells <- enrichGO(gene          = b_cells.de.markers %>% 
+                            filter(p_val_adj < 0.05 & avg_log2FC > 1) %>% 
+                            rownames() %>% 
+                            mapIds(org.Mm.eg.db, 
+                                   keys = .,
+                                   column = "ENTREZID",
+                                   keytype = "SYMBOL"),
+                      OrgDb         = org.Mm.eg.db,
+                      ont           = "MF",
+                      pAdjustMethod = "BH",
+                      pvalueCutoff  = 0.05,
+                      qvalueCutoff  = 0.05,
+                      readable      = TRUE)
+
+barplot(ego_bcells, showCategory=20) 
+
+wp_bcells <- enrichWP(b_cells.de.markers %>% 
+                            filter(p_val_adj < 0.05 & avg_log2FC > 1) %>% 
+                            rownames() %>% 
+                            mapIds(org.Mm.eg.db, 
+                                   keys = .,
+                                   column = "ENTREZID",
+                                   keytype = "SYMBOL"), organism = "Mus musculus")
+
+barplot(wp_bcells, showCategory=20) 
+```
+
+
+# Myeloid cells
+
+```{r fig.height=10}
+ego_myelcells <- enrichGO(gene          = myeloid.de.markers %>% 
+                            filter(p_val_adj < 0.05 & avg_log2FC > 1) %>% 
+                            rownames() %>% 
+                            mapIds(org.Mm.eg.db, 
+                                   keys = .,
+                                   column = "ENTREZID",
+                                   keytype = "SYMBOL"),
+                      OrgDb         = org.Mm.eg.db,
+                      ont           = "MF",
+                      pAdjustMethod = "BH",
+                      pvalueCutoff  = 0.05,
+                      qvalueCutoff  = 0.05,
+                      readable      = TRUE)
+
+barplot(ego_myelcells, showCategory=20) 
+
+wp_myelcells <- enrichWP(myeloid.de.markers %>% 
+                            filter(p_val_adj < 0.05 & avg_log2FC > 1) %>% 
+                            rownames() %>% 
+                            mapIds(org.Mm.eg.db, 
+                                   keys = .,
+                                   column = "ENTREZID",
+                                   keytype = "SYMBOL"), organism = "Mus musculus")
+
+barplot(wp_myelcells, showCategory=20) 
+```
+
+# Malignant cells
+
+```{r fig.height=10}
+ego_maligcells <- enrichGO(gene          = malignant.de.markers %>% 
+                            filter(p_val_adj < 0.05 & avg_log2FC > 1) %>% 
+                            rownames() %>% 
+                            mapIds(org.Mm.eg.db, 
+                                   keys = .,
+                                   column = "ENTREZID",
+                                   keytype = "SYMBOL"),
+                      OrgDb         = org.Mm.eg.db,
+                      ont           = "MF",
+                      pAdjustMethod = "BH",
+                      pvalueCutoff  = 0.05,
+                      qvalueCutoff  = 0.05,
+                      readable      = TRUE)
+
+barplot(ego_maligcells, showCategory=20) 
+
+wp_maligcells <- enrichWP(malignant.de.markers %>% 
+                            filter(p_val_adj < 0.05 & avg_log2FC > 1) %>% 
+                            rownames() %>% 
+                            mapIds(org.Mm.eg.db, 
+                                   keys = .,
+                                   column = "ENTREZID",
+                                   keytype = "SYMBOL"), organism = "Mus musculus")
+
+barplot(wp_maligcells, showCategory=20) 
+```

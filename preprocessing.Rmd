@@ -1,0 +1,2299 @@
+---
+title: "collecting_data"
+output: html_document
+date: "2024-05-08"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+	echo = FALSE,
+	message = FALSE,
+	warning = FALSE
+)
+library(data.table)
+library(Seurat)
+library(scDblFinder)
+library(DoubletFinder)
+library(dplyr)
+library(remotes)
+# remotes::install_github("carmonalab/STACAS")
+library(STACAS)
+library(SingleR)
+# install.packages("scGate")
+library(scGate)
+library(ggplot2)
+library(BiocParallel)
+library(harmony)
+library(RColorBrewer)
+library(stringr)
+library(cowplot)
+library(scuttle)
+# install.packages("devtools")
+# BiocManager::install("Homo.sapiens")
+# BiocManager::install("jpmam1/scalop") #forked copy of a really good guy 
+# devtools::install_github("jlaffy/infercna")
+library(infercna)
+library(infercnv)
+library(parallel)
+library(future)
+library(clustree)
+library(dittoSeq)
+# install.packages("ggh4x")
+library(ggh4x)
+#BiocManager::install('EnhancedVolcano')
+library(EnhancedVolcano)
+library(clusterProfiler)
+library("org.Hs.eg.db")
+library(ReactomePA)
+library(msigdbr)
+# install.packages('qs')
+library(qs)
+library(DESeq2)
+library(magrittr)
+library(tibble)
+library(tidyr)
+library(pheatmap)
+# BiocManager::install('apeglm')
+# install.packages('ashr')
+```
+
+```{r global variables, include=FALSE}
+set.seed(100)
+DATADIR = '~/neuroblastoma/data/'
+WORKDIR = '~/neuroblastoma/'
+PREPRDATADIR = '~/neuroblastoma/preprocessing_data/'
+
+my_colors <- c("#9ACD32FF", "#4682B4FF",  "#DDA0DDFF", "#FFA07AFF", "#8FBC8BFF",
+               "#40E0D0FF",  "#F0E68CFF", "#5F9EA0FF", "#D2B48CFF",  
+               "#6495EDFF", "#FF69B4FF", "#BA55D3FF",  "#F08080FF", "#32CD32FF",  
+               "#FFDAB9FF",  "#87CEEBFF")
+```
+
+```{r download references, message=FALSE, warning=FALSE, include=FALSE}
+bped <- celldex::BlueprintEncodeData()
+hum_atlas_data <- celldex::HumanPrimaryCellAtlasData()
+s.genes <- cc.genes$s.genes
+g2m.genes <- cc.genes$g2m.genes 
+data(EnsemblGeneTable.Hs)
+scGate_models_DB <- get_scGateDB()
+```
+
+```{r include=FALSE}
+# seu <- readRDS(paste0(PREPRDATADIR, 'seu_integrated_cca_infercna_infercnv.rds'))
+# qsave(seu, paste0(PREPRDATADIR, 'seu_integrated_cca_infercna_infercnv.qs'))
+seu <- qread(paste0(PREPRDATADIR, 'seu_integrated_cca_infercna_infercnv.qs'))
+```
+
+# Download data
+
+```{r read data, eval=FALSE, include=FALSE}
+#Dong2020
+group1_dong <- ReadMtx(paste0(DATADIR, 'Dong2020/Group1/Exp_data_UMIcounts1.mtx'),
+                       paste0(DATADIR,'Dong2020/Group1/Cells1.csv'), 
+                       paste0(DATADIR,'Dong2020/Group1/Genes1.txt'), 
+                       feature.column=1, skip.cell=1, cell.sep =',')
+group1_meta <- fread(paste0(DATADIR, 'Dong2020/Group1/Cells1.csv'), sep = ',')
+
+group2_dong <- ReadMtx(paste0(DATADIR, 'Dong2020/Group2/Exp_data_UMIcounts2.mtx'),
+                       paste0(DATADIR,'Dong2020/Group2/Cells2.csv'), 
+                       paste0(DATADIR,'Dong2020/Group2/Genes2.txt'), 
+                       feature.column=1, skip.cell=1, cell.sep =',')
+group2_meta <- fread(paste0(DATADIR, 'Dong2020/Group2/Cells2.csv'), sep = ',')
+
+create_matrices_from_mtx<- function(meta_data, data_matrix, variable_name) {
+  sample_names <- unique(meta_data$sample)
+  invisible(lapply(sample_names, function(sample_name) {
+    sample_cells <- meta_data[sample == sample_name, cell_name]
+    sample_matrix <- data_matrix[, sample_cells, drop = FALSE]
+    assign(paste0(sample_name, variable_name), sample_matrix, envir = .GlobalEnv)
+  }))
+}
+
+create_matrices_from_mtx(group1_meta, group1_dong, '_dong')
+create_matrices_from_mtx(group2_meta, group2_dong, '_dong')
+rm(group1_meta, group2_meta, group1_dong, group2_dong)
+
+#Jansky2021
+matrix_jansky <- ReadMtx(paste0(DATADIR, 'Jansky2021/Exp_data_UMIcounts.mtx'),
+                       paste0(DATADIR,'Jansky2021/Cells.csv'), 
+                       paste0(DATADIR,'Jansky2021/Genes.txt'), 
+                       feature.column=1, skip.cell=1, cell.sep =',')
+jansky_meta <- fread(paste0(DATADIR, 'Jansky2021/Cells.csv'), sep = ',')
+
+create_matrices_from_mtx(jansky_meta, matrix_jansky, '_jansky')
+rm(jansky_meta, matrix_jansky)
+
+#Verhoeven2022
+load_matrices <- function(directory, pattern_files, sep, pattern_find, pattern_name) {
+  file_names <- list.files(path = directory, pattern = pattern_files, full.names = TRUE)
+  matrices <- lapply(file_names, function(file) {
+    mat <- as.matrix(fread(file, sep = sep), rownames = 1)
+    assign(gsub(pattern_find, pattern_name, basename(file)), mat, envir = .GlobalEnv)
+  })
+}
+
+load_matrices(paste0(DATADIR, 'Verhoeven_GSE147766/'), "\\.csv$", sep=',', ".*_(NB\\d+).count.csv$", "\\1_verhoeven")
+
+#Yuan2022
+
+load_matrices(paste0(DATADIR, 'Yuan_GSE192906/'), "\\.txt$", sep='\t', ".*_(NB\\d+|GNB\\d+|GN\\d+)_.*", "\\1_yuan")
+
+#Fetahu2023
+load_h5 <- function(directory, pattern_find, pattern_name) {
+  file_names <- list.files(path = directory, pattern = "\\_filtered_feature_bc_matrix.h5", full.names = TRUE)
+  matrices <- lapply(file_names, function(file) {
+    mat <- Read10X_h5(file)
+    assign(gsub(pattern_find, pattern_name, basename(file)), mat, envir = .GlobalEnv)
+  })
+}
+
+load_h5(paste0(DATADIR, 'Fetahu_GSE216176/'), ".*_(S\\d+|M\\d+|A\\d+|C\\d+|M\\da|M\\db)_.*", '\\1_fetahu')
+
+#create list of all samples
+all_samples <- ls()[!ls() %in% c("load_matrices", "create_matrices_from_mtx", "load_h5",
+                               "DATADIR", "WORKDIR", "PREPRDATADIR")]
+samples_list <- mget(all_samples)
+```
+
+```{r create seurat list, eval=FALSE, include=FALSE}
+seu_list <- lapply(names(samples_list), function(sample_name) {
+  sample <- samples_list[[sample_name]]
+  print(sample_name)
+  seu <- CreateSeuratObject(counts = sample, min.cells = 3, min.features = 200)
+  seu$SampleID <- sample_name
+  return(seu)
+})
+
+names(seu_list) <- names(samples_list)
+
+saveRDS(seu_list, paste0(PREPRDATADIR, 'seu_list_raw.rds'))
+```
+
+# Preprocessing data
+
+```{r data review, eval=FALSE, message=TRUE, warning=TRUE, include=FALSE}
+seu_list <- readRDS(paste0(PREPRDATADIR, 'seu_list_raw.rds'))
+
+seu_list <- lapply(seu_list, function(seu){
+  print(unique(seu$SampleID))
+  seu$percent_mito <- PercentageFeatureSet(seu, pattern = "^MT-")
+  seu$percent_ribo <- PercentageFeatureSet(seu, pattern = "^RP[SL]")
+  seu[["complexity"]] <- log10(seu$nFeature_RNA) / log10(seu$nCount_RNA)
+  message('Normalization is going on...')
+  seu <- seu %>% 
+    NormalizeData(verbose=F) %>% 
+    FindVariableFeatures(verbose=F) %>% 
+    ScaleData(vars.to.regress=c('nCount_RNA'), verbose=F) %>% 
+    RunPCA(verbose=F) %>% 
+    RunUMAP(dims = 1:20, verbose=F)
+  # identify doublets
+  # scDblFinder
+  message('scDblFinder is going on...')
+  sce <- as.SingleCellExperiment(seu)
+  sce <- scDblFinder(sce, dbr.sd=1, verbose=F)
+  seu[['scDblFinder.class']] <- sce$scDblFinder.class
+  # DoubletFinder
+  message('doubletFinder is going on...')
+  sweep.list <- paramSweep(seu, PCs = 1:10, sct = FALSE)
+  sweep.stats <- summarizeSweep(sweep.list, GT = FALSE)
+  bcmvn <- find.pK(sweep.stats)
+  pK <- bcmvn |>
+    arrange(desc(BCmetric))
+  pK <- pK[1, 'pK']
+  pK <- as.numeric(levels(pK[[1]]))[pK[[1]]]
+  nExp <- round(ncol(seu) * 0.08)
+  seu <- doubletFinder(seu, pN = 0.25, pK = pK, nExp = nExp, PCs = 1:10)
+  seu[['DoubletFinder.class']] <- seu@meta.data[, colnames(seu@meta.data)[grepl("DF.classification", colnames(seu@meta.data))]]
+  seu[[colnames(seu@meta.data)[grepl("DF.classification", colnames(seu@meta.data))]]] <- NULL
+  seu[[colnames(seu@meta.data)[grepl("pANN", colnames(seu@meta.data))]]] <- NULL
+  seu[['singlet']] <- ifelse(seu$scDblFinder.class=='doublet' & seu$DoubletFinder.class=='Doublet', 'no', 'yes')
+  
+  print(table(seu$singlet))
+  print(VlnPlot(seu, features = c("nFeature_RNA", "nCount_RNA", "percent_mito", "percent_ribo", "complexity"), ncol = 5) +
+          ggtitle(unique(seu$SampleID)))
+  
+  return(seu)
+})
+```
+
+```{r processing seurat list, eval=FALSE, include=FALSE}
+seu_list <- lapply(seu_list, function(seu) {
+  print(unique(seu$SampleID))
+  # filter low-quality cells and doublets
+  seu <- subset(seu, subset = nFeature_RNA > 200 & nFeature_RNA < 6000 & percent_mito < 20 & singlet =='yes' & complexity > 0.7)
+  seu <- StandardizeGeneSymbols(seu, slot = 'counts', EnsemblGeneTable=EnsemblGeneTable.Hs)
+  seu <- seu%>%
+    NormalizeData() |>
+    FindVariableFeatures() |> 
+    CellCycleScoring(s.features = s.genes, g2m.features = g2m.genes)
+  seu$CC.Difference <- seu$S.Score - seu$G2M.Score
+  # Preliminary annotation
+  message('SingleR is going...')
+  pred_bped_main <- SingleR(test = as.SingleCellExperiment(seu), ref = hum_atlas_data, labels = hum_atlas_data$label.main, BPPARAM=MulticoreParam(30))
+  seu[['celltype_humatlas_main']] <- pred_bped_main$pruned.labels
+  pred_bped_fine <- SingleR(test = as.SingleCellExperiment(seu), ref = hum_atlas_data, labels = hum_atlas_data$label.fine, BPPARAM=MulticoreParam(30))
+  seu[['celltype_humatlas_fine']] <- pred_bped_fine$pruned.labels
+  # scGate
+  message('scGate is going...')
+  seu <- scGate(seu, model = scGate_models_DB$human$TME_HiRes, ncores = 30)
+})
+
+saveRDS(seu_list, paste0(PREPRDATADIR, 'seu_list_proc.rds'))
+```
+
+
+We have 261568 cells in total after filtration. Before we had 318272.
+
+```{r first annotation check, eval=FALSE, include=FALSE}
+lapply(seu_list, function(seu) {
+  # return(seu$scGate_multi)
+  return(seu$celltype_humatlas_main)
+  # return(seu$celltype_humatlas_fine)
+}) %>% unlist %>% table()
+```
+
+# Sample filtration
+
+```{r sample quality check, eval=FALSE, include=FALSE}
+seu_list <- readRDS(paste0(PREPRDATADIR, 'seu_list_proc.rds'))
+samples_stats <- data.frame(
+  nfeature = sapply(seu_list, function(seu_obj){nfeature <- sum(Matrix::rowSums(seu_obj@assays$RNA$counts>0)>3)
+  return(nfeature)}),
+  ncell = sapply(seu_list, function(seu_obj){ncell <- ncol(seu_obj)
+  return(ncell)})
+)
+sample_rm <- rownames(filter(samples_stats, nfeature < 9000 | ncell < 200))
+
+seu_list <- seu_list[-which(names(seu_list) %in% sample_rm)]
+
+rm(sample_rm)
+```
+
+# Merging
+
+```{r merge samples, eval=FALSE, include=FALSE}
+seu <- merge(x=seu_list[[1]], y=seu_list[2:length(seu_list)], add.cell.ids = names(seu_list))
+rm(seu_list)
+sample_metadata <- sample_metadata %>% 
+  filter(Sample_dataset %in% c(unique(seu$SampleID), 'M2_fetahu'))
+seu$scGate_multi[is.na(seu$scGate_multi)] <- 'unknown'
+seu$celltype_humatlas_main[is.na(seu$celltype_humatlas_main)] <- 'unknown'
+seu$celltype_humatlas_fine[is.na(seu$celltype_humatlas_fine)] <- 'unknown'
+```
+
+```{r metadata load, include=FALSE}
+sample_metadata <- read.csv(paste0(DATADIR, 'samples_metadata_v2.csv'))
+sample_metadata[sample_metadata==""] <- NA
+
+rownames(sample_metadata) <- sample_metadata$Sample_dataset
+
+
+seu$sex <- sample_metadata[seu$SampleID,]$Sex
+seu$less18M <- sample_metadata[seu$SampleID,]$less18M
+seu$Survival.Death <- sample_metadata[seu$SampleID,]$Survival.Death
+seu$Site <- sample_metadata[seu$SampleID,]$Site
+seu$INSS_stage <- sample_metadata[seu$SampleID,]$INSS_stage
+
+seu$Study <- sapply(str_split(seu$SampleID, "_"), function(x) {
+  if (length(x) == 2) {
+    return(x[2])
+  } else if (length(x) == 3) {
+    return(x[3])
+  } else {
+    return(NA)
+  }
+})
+```
+
+# Processing - integration
+
+```{r eval=FALSE, include=FALSE}
+cells_names <- table(seu$celltype_humatlas_main) %>% 
+  as.data.frame %>% 
+  filter(Freq > 1500) 
+
+seu$celltype_humatlas_main_filt <- ifelse(seu$celltype_humatlas_main %in% cells_names[,1],
+                                          seu$celltype_humatlas_main, "unknown")
+```
+
+```{r eval=FALSE, include=FALSE}
+plan("multicore", workers = 20)
+options(future.globals.maxSize = 5 * 1024^3)
+        
+seu[["RNA"]] <- split(seu[["RNA"]], f = seu$Study)
+
+seu <- seu %>% 
+  NormalizeData() %>% 
+  FindVariableFeatures() %>% 
+  ScaleData() %>% 
+  RunPCA(verbose=FALSE)
+  
+seu_integ <- seu %>% 
+  IntegrateLayers(
+    object = ., method = CCAIntegration,
+    orig.reduction = "pca", new.reduction = "integrated.cca",
+    verbose = FALSE) %>% 
+  RunUMAP(reduction = "integrated.cca", dims = 1:30) 
+
+DimPlot(seu_integ, group.by = 'celltype_humatlas_main_filt', cols = my_colors) +
+  ggtitle('CCAIntegration')
+
+saveRDS(seu_integ, paste0(PREPRDATADIR, 'seu_integrated_cca.rds'))
+```
+
+```{r echo=FALSE, fig.width=12}
+DimPlot(seu, group.by = 'celltype_humatlas_main_filt', cols = my_colors) +
+  ggtitle('CCAIntegration')
+
+DimPlot(seu, group.by = 'Study', cols = my_colors) +
+  ggtitle('CCAIntegration')
+```
+
+
+```{r eval=FALSE, include=FALSE}
+# seu <- JoinLayers(seu)
+
+seu_samples <- mclapply(seu$SampleID %>% unique, function(sample) {
+  seu_sample <- subset(seu, SampleID == sample) %>% 
+    NormalizeData() %>% 
+    FindVariableFeatures() %>% 
+    ScaleData() %>% 
+    RunPCA(verbose=FALSE) %>% 
+    RunUMAP(reduction = "pca", dims = 1:10)
+}, mc.cores=25)
+
+lapply(seu_samples, function(x) {
+  DimPlot(x, group.by = 'celltype_humatlas_main_filt', cols = my_colors) +
+  ggtitle(x$SampleID %>% unique()) 
+})
+```
+
+# Cell types
+
+## Neuroblasts markers
+
+Expression of the neuroblast markers NEFM, GAP43, STMN2, ISL1 and ALK identified sympathetic neuroblasts. At later time points, neuroblasts showed increased expression of the differentiation markers SYN3 and IL7, whereas expression of the early neuroblast marker ALK declined.
+
+```{r echo=FALSE, fig.height=10, fig.width=12}
+FeaturePlot(seu, c('ALK', 'ISL1', 'NEFM', 'GAP43', 'STMN2', 'SYN3', 'IL7'))
+```
+
+## chromaffin cell markers
+
+Expression of the chromaffin markers TH, DBH, DDC and CHGA marked adrenal chromaffin cells. Chromaffin cells from later developmental time points formed a distinct cluster harboring cells that additionally expressed PNMT, encoding the enzyme catalyzing methylation of norepinephrine to form epinephrine 
+
+```{r echo=FALSE, fig.height=10, fig.width=10}
+FeaturePlot(seu, c('CHGA', 'DBH', 'TH', 'DDC', 'PNMT' ))
+```
+
+## 
+# CNV
+maybe it's malignant cells
+```{r echo=FALSE, fig.height=5, fig.width=12}
+FeaturePlot(seu, c('MYCN', 'SLC6A2'))
+```
+
+```{r}
+FeaturePlot(seu, c('ENO2', 'HRAS', 'MLLT11'))
+```
+
+```{r CNV, eval=FALSE, include=FALSE}
+# When using infercnv::run(), set 'cutoff=0.1' with 10xGenomics data, instead of the default (1) we tend to use with smartSeq2 and less sparse data.
+seu <- readRDS(paste0(PREPRDATADIR, 'seu_integrated_cca.rds'))
+seu <- JoinLayers(seu)
+
+options(scipen = 100)
+options(bitmapType="Xlib")
+options(bitmapType='cairo')
+plan("sequential")
+
+calculate_cnv <- function(sample) {
+  
+  seu_obj <- subset(seu, SampleID == sample)
+  print(paste(sample, 'is going on...'))
+  
+  # prepare annotation file
+  cell_annotations <- seu_obj$celltype_humatlas_main_filt
+  
+  # Create a data frame with cell names and their annotations
+  annotation_df <- data.frame(
+    CellName = names(cell_annotations),
+    CellType = cell_annotations,
+    stringsAsFactors = FALSE) %>% 
+    mutate(CellType = ifelse(CellType %in% c("Neurons", "Neuroepithelial_cell", "unknown"), 
+                             "malignant", CellType))
+    
+  malignant_count <- sum(annotation_df$CellType == "malignant")
+  
+  if (malignant_count < 2) {
+    print(paste(sample, 'SKIPPED'))
+    return(NULL)
+  }
+  
+  # Count the number of cells in each CellType
+  cell_type_counts <- annotation_df %>%
+    group_by(CellType) %>%
+    summarise(Count = n())
+  
+  # Find cell types with fewer than 2 cells
+  small_cell_types <- cell_type_counts %>%
+    filter(Count < 10) %>%
+    pull(CellType)
+  
+  # Update CellType to "unknown" for small cell types
+  annotation_df <- annotation_df %>%
+    mutate(CellType = ifelse(CellType %in% small_cell_types, "unknown", CellType))
+  
+  write.table(annotation_df, paste0(WORKDIR, "refs/", sample, "_annotation_file.txt"), 
+              sep = "\t", quote = FALSE, row.names = FALSE, col.names = FALSE)
+
+  cell_annotations <- annotation_df$CellType %>% unique() 
+  cell_annotations <- cell_annotations[!cell_annotations %in% c("malignant", "unknown")]
+  
+  # create the infercnv object
+  infercnv_obj = try(CreateInfercnvObject(raw_counts_matrix=seu_obj[["RNA"]]$counts %>% as.matrix(),
+                                      annotations_file=paste0(WORKDIR, "refs/", sample, "_annotation_file.txt"),
+                                      delim="\t",
+                                      gene_order_file=paste0(WORKDIR, 'refs/gencode_v19_gene_pos.txt'),
+                                      ref_group_names=cell_annotations))
+  
+  # perform infercnv operations to reveal cnv signal
+  infercnv_obj = try(infercnv::run(infercnv_obj,
+                               cutoff=0.1,  # use 1 for smart-seq, 0.1 for 10x-genomics
+                               out_dir=paste0(PREPRDATADIR, 'infercnv/', sample),  # dir is auto-created for storing outputs
+                               cluster_by_groups=F,   # cluster
+                               plot_steps = T,
+                               num_ref_groups = length(cell_annotations),
+                               analysis_mode='subclusters',
+                               denoise=T,
+                               HMM=T,
+                               num_threads = 40,
+                               png_res = 300,
+                               write_expr_matrix = T
+                               ) )
+  
+  return(infercnv_obj)
+  
+}
+
+infercnv_list <- lapply(seu$SampleID %>% unique, calculate_cnv)
+
+saveRDS(infercnv_list, paste0(PREPRDATADIR, 'infercnv_list.rds'))
+```
+
+```{r cnv score, eval=FALSE, include=FALSE}
+# Define the function to calculate CNV score
+calculate_cnv_score <- function(cell_data, reference_data) {
+  return(sum(abs(cell_data - reference_data)))
+}
+
+cnv_scores_allsamples <- function(sample) {
+  
+  obs_file <- paste0(PREPRDATADIR, 'infercnv/', sample, '/infercnv.observations.txt')
+  ref_file <- paste0(PREPRDATADIR, 'infercnv/', sample, '/infercnv.references.txt')
+  if (file.exists(obs_file) & file.exists(ref_file)) {
+    observations <- read.table(obs_file, header = TRUE) %>% as.matrix()
+    references <- read.table(ref_file, header = TRUE)  %>% as.matrix()
+
+    # Calculate CNV scores
+    reference_means <- rowMeans(references)
+    cnv_scores <- apply(observations, 2, calculate_cnv_score, reference_data = reference_means)
+
+    # Define a threshold for CNV score to identify malignant cells
+    threshold <- quantile(cnv_scores, 0.95)
+    malignant_cells <- names(cnv_scores[cnv_scores > threshold])
+    return(cnv_scores)
+  } 
+  else {
+    return(NULL)
+  }
+}
+
+cnv_scores_list <- mclapply(unique(seu$SampleID), cnv_scores_allsamples, mc.cores = 20)
+
+# Remove NULL entries and combine results
+cnv_scores_list <- cnv_scores_list[!sapply(cnv_scores_list, is.null)]
+all_malignant_cells <- unlist(cnv_scores_list)
+
+# infercnv_list[[1]]@tumor_subclusters$subclusters
+```
+
+
+```{r infercnv plot, echo=FALSE}
+DimPlot(seu, group.by='infercnv_result') +
+  scale_color_manual(values = c('#FF69B4FF', 'grey')) +
+  ggtitle('inferCNV')
+```
+
+## CNA
+
+```{r CNA, eval=FALSE, include=FALSE}
+seu <- readRDS(paste0(PREPRDATADIR, 'seu_integrated_cca.rds'))
+seu <- JoinLayers(seu)
+useGenome('hg19')
+
+#calculate cna table
+cna_calculate <- function(sample) {
+  
+  seu_obj = subset(seu, SampleID == sample)
+  print(paste(sample, 'is going on...'))
+  
+  ref_cells <- split(names(seu_obj$celltype_humatlas_main_filt), seu_obj$celltype_humatlas_main_filt) 
+  ref_cells["Neurons"] <- NULL
+  ref_cells["Neuroepithelial_cell"] <- NULL
+  ref_cells["unknown"] <- NULL
+  
+  tpm_counts <- scuttle::calculateTPM(seu_obj[["RNA"]]$counts)
+  
+  cna = infercna(m = tpm_counts %>% as.matrix(), refCells = ref_cells, 
+                 n = 5000, noise = 0.1, isLog = F, verbose = FALSE)
+  
+  return(cna)
+}
+
+malignant_def <- mclapply(seu$SampleID %>% unique, cna_calculate, mc.cores=25)
+names(malignant_def) <- seu$SampleID %>% unique
+
+#plot
+# lapply(malignant_def, function(x) {
+#   cnaScatterPlot(cna = x, main = names(x) %>% as.character())
+# })
+
+# define malignant cells
+malignant_def_label <- mclapply(malignant_def, function(x) {
+  
+  Modes = findMalignant(x, samples = NULL)
+  return(Modes)
+  
+}, mc.cores=65)
+
+malignant_cells_list <- mclapply(malignant_def_label, function(element) {
+  if (is.list(element) && "malignant" %in% names(element)) {
+    return(element$malignant)
+  } else {
+    return(NULL)
+  }
+}, mc.cores=20)
+
+# Combine all the malignant cells into a single vector
+malignant_cells <- unlist(malignant_cells_list, use.names = FALSE)
+cell_labels <- rep("nonmalignant", length(colnames(seu)))
+names(cell_labels) <- colnames(seu)
+
+# Set the labels to "malignant" for cells that are in the infercna result
+cell_labels[malignant_cells] <- "malignant"
+
+seu$infercna_result <- cell_labels
+
+saveRDS(seu, paste0(PREPRDATADIR, 'seu_integrated_cca_infercna.rds'))
+
+DimPlot(seu, group.by = 'infercna_result', cols = my_colors) +
+    ggtitle('inferCNA')
+
+DimPlot(seu, cells.highlight = malignant_cells) +
+  NoLegend() +
+  ggtitle('inferCNA')
+
+
+```
+
+```{r infercna plot, echo=FALSE}
+DimPlot(seu, group.by='infercna_result') +
+  ggtitle('inferCNA') +
+  scale_color_manual(values = c('#FF69B4FF', 'grey'))
+```
+
+# Annotation
+
+Tumor_cells (all malignant cells and all neurons)
+T_cells (NK + T)
+B_cells (preB, proB, B-cells)
+Myeloid cells (monocytes, macrophages and dendritic cells (DCs))
+Stromal cells - (Fibroblasts, Endothelial cells, Tissue stem cells, Smooth muscle cells) 
+
+```{r}
+seu <- seu %>% 
+  FindNeighbors(dims = 1:30) %>%
+  FindClusters(resolution = c(0.1, 0.2, 0.3, 0.4, 0.5)) %>%
+  RunUMAP(reduction = "integrated.cca", dims = 1:15)
+
+Idents(object = seu) <- "RNA_snn_res.0.1"
+
+DimPlot(seu, group.by = 'celltype_humatlas_main_filt', cols = my_colors)
+
+DimPlot(seu, group.by = 'scGate_multi', cols = my_colors)
+
+DimPlot(seu, group.by = 'infercnv_result', cols = my_colors)
+
+DimPlot(seu, group.by = 'Study', cols = my_colors) 
+```
+
+```{r}
+
+DimPlot(seu, cells.highlight = WhichCells(seu, idents = "31")) +
+  NoLegend() 
+```
+
+
+```{r}
+new.cluster.ids <- c('0'='T-cells',
+                     '1'='Tumor cells',
+                     '2'='T-cells',
+                     '3'='Tumor cells',
+                     '4'='Tumor cells',
+                     '5'='B-cells',
+                     '6'='Myeloid cells',
+                     '7'='Tumor cells',
+                     '8'='Tumor cells',
+                     '9'='Myeloid cells',
+                     '10'='Tumor cells',
+                     '11'='Tumor cells',
+                     '12'='Stromal cells',
+                     '13'='T-cells',
+                     '14'='Tumor cells',
+                     '15'='Tumor cells',
+                     '16'='Tumor cells',
+                     '17'='Tumor cells',
+                     '18'='Tumor cells',
+                     '19'='Tumor cells',
+                     '20'='Stromal cells',
+                     '21'='Stromal cells',
+                     '22'='Tumor cells',
+                     '23'='Tumor cells',
+                     '24'='Tumor cells',
+                     '25'='Myeloid cells',
+                     '26'='Stromal cells',
+                     '27'='B-cells',
+                     '28'='Tumor cells',
+                     '29'='Tumor cells',
+                     '30'='Tumor cells',
+                     '31'='Tumor cells'
+)
+
+seu <- RenameIdents(seu, new.cluster.ids)
+
+DimPlot(seu, cols = my_colors)
+```
+
+
+T-cells
+
+```{r t cells}
+FeaturePlot(seu, 'CD7')
+```
+
+B-cells
+
+```{r t cells}
+FeaturePlot(seu, 'CD79A')
+```
+
+Myeloid cells
+
+```{r}
+FeaturePlot(seu, c('CD14', 'CD141', 'CD1C'))
+```
+
+# Analysis by sample
+```{r echo=FALSE, fig.width=12}
+express_MYCN <- seu@assays$RNA$counts["MYCN", ] > 0
+express_MLLT11 <- seu@assays$RNA$counts["MLLT11", ] > 0
+
+cell_categories <- rep("normal cells", ncol(seu))
+cell_categories[express_MYCN & !express_MLLT11] <- "MYCN"
+cell_categories[!express_MYCN & express_MLLT11] <- "MLLT11"
+cell_categories[express_MYCN & express_MLLT11] <- "MYCN+MLLT11"
+seu$MYCN_MLLT11 <- cell_categories
+
+# saveRDS(seu, paste0(PREPRDATADIR, 'seu_MYCN_MLLT11.rds'))
+plot_data <- as.data.frame(table(seu@meta.data$SampleID, seu$MYCN_MLLT11))
+colnames(plot_data) <- c("SampleID", "Category", "Count")
+plot_data <- merge(plot_data, sample_metadata, by.x='SampleID', by.y='Sample_dataset')
+plot_data$less18M <- ifelse(plot_data$less18M, '<18M', '>18M')
+
+# Calculate the percentages
+plot_data <- plot_data %>%
+  group_by(SampleID) %>%
+  mutate(Percent = Count / sum(Count))
+
+healthy_percent <- plot_data %>%
+  filter(Category == "normal cells") %>%
+  arrange(Percent)
+
+# Order the SampleID factor levels by the percentage of healthy cells
+plot_data$SampleID <- factor(plot_data$SampleID, levels = healthy_percent$SampleID)
+
+ggplot(plot_data, aes(x = SampleID, y = Percent, fill = Category)) +
+  geom_bar(stat = "identity", position = "fill") +
+  scale_fill_manual(values = c("normal cells" = "#87CEEBFF", "MLLT11" = "#FFA07AFF", "MYCN" = "#9ACD32FF", "MYCN+MLLT11" = "#FF69B4FF")) +
+  labs(y = "Percent of cells", x = "SampleID", title = "MYCN_MLLT11") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  facet_grid2(~MYCN, scales = "free_x", space = "free_x", switch = "x",
+              strip = strip_themed(
+                background_x = elem_list_rect(
+                  fill = c("#6495EDFF", "#32CD32FF"),
+                  color = c("#6495EDFF", "#32CD32FF")),
+                text_x = elem_list_text(size=14)))
+```
+
+# DE by cell types
+
+## T-cells
+
+```{r fig.height=8, fig.width=7}
+# seu_v2 <- subset(seu, SampleID != 'S2_fetahu')
+t_cells <- subset(seu, idents = 'T-cells')
+
+t_cells <- subset(t_cells, 
+                  subset = SampleID %in% as.vector(table(t_cells$SampleID)[table(t_cells$SampleID) > 30] %>% names()))
+
+t_cells[["RNA"]] <- split(t_cells[["RNA"]], f = t_cells$SampleID)
+
+t_cells <- t_cells %>% 
+  NormalizeData() %>% 
+  FindVariableFeatures() %>% 
+  ScaleData() %>% 
+  RunPCA(verbose=FALSE)
+  
+t_cells <- t_cells %>% 
+  IntegrateLayers(
+    object = ., method = CCAIntegration,
+    orig.reduction = "pca", new.reduction = "integrated.cca.tcells",
+    verbose = FALSE, k.weight = min(table(t_cells$SampleID))) %>%
+  RunUMAP(reduction = "integrated.cca.tcells", dims = 1:10) 
+
+DimPlot(t_cells, group.by = 'celltype_humatlas_main_filt')
+DimPlot(t_cells, group.by = 'Study')
+DimPlot(t_cells, group.by = 'scGate_multi')
+DimPlot(t_cells, group.by = 'less18M')
+
+t_cells <- JoinLayers(t_cells)
+t_cells$less18M <- as.character(t_cells$less18M)
+Idents(t_cells) <- "less18M"
+t_cells.de.markers <- FindMarkers(t_cells, ident.1 = "TRUE", ident.2 = "FALSE") %>%
+  dplyr::filter(pct.1 > 0.05 & pct.2 > 0.05)
+# write.csv(t_cells.de.markers, paste0(PREPRDATADIR, 't_cells_de_markers_v2.csv'))
+
+EnhancedVolcano(t_cells.de.markers,
+    lab = rownames(t_cells.de.markers),
+    x = 'avg_log2FC',
+    y = 'p_val_adj',
+    drawConnectors = TRUE,
+    pCutoff = 0.05) +
+  labs(title = "T-cells",
+       subtitle = "< 18M vs > 18M")
+
+
+t_cells_reactome <- enrichPathway(gene  = t_cells.de.markers %>% 
+                            filter(p_val_adj < 0.05 & avg_log2FC > 1) %>% 
+                            rownames() %>% 
+                            mapIds(org.Hs.eg.db, 
+                                   keys = .,
+                                   column = "ENTREZID",
+                                   keytype = "SYMBOL"),
+                 pvalueCutoff = 0.05, 
+                 readable=TRUE)
+
+
+H_t2g <- msigdbr(species = "Homo sapiens", category = "H") %>% 
+  dplyr::select(gs_name, entrez_gene)
+t_cells_em <- enricher(t_cells.de.markers %>% 
+                            filter(p_val_adj < 0.05 & avg_log2FC > 1) %>% 
+                            rownames() %>% 
+                            mapIds(org.Hs.eg.db, 
+                                   keys = .,
+                                   column = "ENTREZID",
+                                   keytype = "SYMBOL"),
+                       TERM2GENE=H_t2g)
+
+# barplot(t_cells_em) 
+
+t_cells_em_neg <- enricher(t_cells.de.markers %>% 
+                            filter(p_val_adj < 0.05 & avg_log2FC < -1) %>% 
+                            rownames() %>% 
+                            mapIds(org.Hs.eg.db, 
+                                   keys = .,
+                                   column = "ENTREZID",
+                                   keytype = "SYMBOL"),
+                       TERM2GENE=H_t2g)
+
+# barplot(t_cells_em_neg) 
+
+qsave(t_cells, paste0(PREPRDATADIR, 't_cells_v2.qs'))
+```
+
+```{r}
+FeaturePlot(t_cells, 'KIR2DL4')
+```
+
+## B-cells
+
+```{r fig.height=8, fig.width=7}
+b_cells <- subset(seu, idents = 'B-cells')
+b_cells <- subset(b_cells, 
+                  subset = SampleID %in% as.vector(table(b_cells$SampleID)[table(b_cells$SampleID) > 30] %>% names()))
+
+b_cells[["RNA"]] <- split(b_cells[["RNA"]], f = b_cells$SampleID)
+
+b_cells <- b_cells %>% 
+  NormalizeData() %>% 
+  FindVariableFeatures() %>% 
+  ScaleData() %>% 
+  RunPCA(verbose=FALSE)
+  
+b_cells <- b_cells %>% 
+  IntegrateLayers(
+    object = ., method = CCAIntegration,
+    orig.reduction = "pca", new.reduction = "integrated.cca.bcells",
+    verbose = FALSE, k.weight = min(table(b_cells$SampleID))) %>%
+  RunUMAP(reduction = "integrated.cca.bcells", dims = 1:10) 
+
+DimPlot(b_cells, group.by = 'celltype_humatlas_main_filt')
+DimPlot(b_cells, group.by = 'Study')
+DimPlot(b_cells, group.by = 'scGate_multi')
+DimPlot(b_cells, group.by = 'less18M')
+
+b_cells <- JoinLayers(b_cells)
+b_cells$less18M <- as.character(b_cells$less18M)
+Idents(b_cells) <- "less18M"
+b_cells.de.markers <- FindMarkers(b_cells, ident.1 = "TRUE", ident.2 = "FALSE") %>% 
+  dplyr::filter(pct.1 > 0.05 & pct.2 > 0.05)
+# write.csv(b_cells.de.markers, paste0(PREPRDATADIR, 'b_cells_de_markers_v2.csv'))
+
+EnhancedVolcano(b_cells.de.markers,
+    lab = rownames(b_cells.de.markers),
+    x = 'avg_log2FC',
+    y = 'p_val_adj',
+    drawConnectors = TRUE,
+    pCutoff = 0.05) +
+  labs(title = "B-cells",
+       subtitle = "< 18M vs > 18M")
+
+b_cells_em <- enricher(b_cells.de.markers %>% 
+                            filter(p_val_adj < 0.05 & avg_log2FC > 1) %>% 
+                            rownames() %>% 
+                            mapIds(org.Hs.eg.db, 
+                                   keys = .,
+                                   column = "ENTREZID",
+                                   keytype = "SYMBOL"),
+                       TERM2GENE=H_t2g)
+
+# barplot(b_cells_em) 
+
+b_cells_em_neg <- enricher(b_cells.de.markers %>% 
+                            filter(p_val_adj < 0.05 & avg_log2FC < -1) %>% 
+                            rownames() %>% 
+                            mapIds(org.Hs.eg.db, 
+                                   keys = .,
+                                   column = "ENTREZID",
+                                   keytype = "SYMBOL"),
+                       TERM2GENE=H_t2g)
+
+# barplot(b_cells_em_neg) 
+
+qsave(b_cells, paste0(PREPRDATADIR, 'b_cells_v2.qs'))
+```
+
+
+## Myeloid cells 
+
+```{r fig.height=8, fig.width=7}
+myeloid <- subset(seu, idents = 'Myeloid cells')
+myeloid <- subset(myeloid, 
+                  subset = SampleID %in% as.vector(table(myeloid$SampleID)[table(myeloid$SampleID) > 30] %>% names()))
+
+
+myeloid[["RNA"]] <- split(myeloid[["RNA"]], f = myeloid$SampleID)
+
+myeloid <- myeloid %>% 
+  NormalizeData() %>% 
+  FindVariableFeatures() %>% 
+  ScaleData() %>% 
+  RunPCA(verbose=FALSE)
+  
+myeloid <- myeloid %>% 
+  IntegrateLayers(
+    object = ., method = CCAIntegration,
+    orig.reduction = "pca", new.reduction = "integrated.cca.myeloid",
+    verbose = FALSE, k.weight = min(table(myeloid$SampleID))) %>%
+  RunUMAP(reduction = "integrated.cca.myeloid", dims = 1:10) 
+
+DimPlot(myeloid, group.by = 'celltype_humatlas_main_filt')
+DimPlot(myeloid, group.by = 'Study')
+DimPlot(myeloid, group.by = 'scGate_multi')
+DimPlot(myeloid, group.by = 'less18M')
+
+myeloid <- JoinLayers(myeloid)
+myeloid$less18M <- as.character(myeloid$less18M)
+Idents(myeloid) <- "less18M"
+myeloid.de.markers <- FindMarkers(myeloid, ident.1 = "TRUE", ident.2 = "FALSE") %>% 
+  dplyr::filter(pct.1 > 0.05 & pct.2 > 0.05)
+write.csv(myeloid.de.markers, paste0(PREPRDATADIR, 'myeloid_de_markers_minusS2fetahu.csv'))
+
+EnhancedVolcano(myeloid.de.markers,
+    lab = rownames(myeloid.de.markers),
+    x = 'avg_log2FC',
+    y = 'p_val_adj',
+    drawConnectors = TRUE,
+    pCutoff = 0.05) +
+  labs(title = "Myeloid cells",
+       subtitle = "< 18M vs > 18M")
+
+myeloid_cells_em <- enricher(myeloid.de.markers %>% 
+                            filter(p_val_adj < 0.05 & avg_log2FC > 1) %>% 
+                            rownames() %>% 
+                            mapIds(org.Hs.eg.db, 
+                                   keys = .,
+                                   column = "ENTREZID",
+                                   keytype = "SYMBOL"),
+                       TERM2GENE=H_t2g)
+
+# barplot(myeloid_cells_em) 
+
+myeloid_cells_em_neg <- enricher(myeloid.de.markers %>% 
+                            filter(p_val_adj < 0.05 & avg_log2FC < -1) %>% 
+                            rownames() %>% 
+                            mapIds(org.Hs.eg.db, 
+                                   keys = .,
+                                   column = "ENTREZID",
+                                   keytype = "SYMBOL"),
+                       TERM2GENE=H_t2g)
+
+# barplot(myeloid_cells_em_neg) 
+
+qsave(myeloid, paste0(PREPRDATADIR, 'myeloid_cells_v2.qs'))
+```
+
+
+# Multiple
+```{r multiple refs - bped, eval=FALSE, include=FALSE, jansky, include=FALSE}
+jansky_ref_counts <- readRDS(paste0(WORKDIR, 'refs/adrenal_gland_counts.Rds'))
+jansky_ref_annot <- readRDS(paste0(WORKDIR, 'refs/adrenal_gland_annot.Rds'))
+jansky_ref <- CreateSeuratObject(jansky_ref_counts, assay = "RNA",  meta.data = jansky_ref_annot) %>% as.SingleCellExperiment(); rm(jansky_ref_counts, jansky_ref_annot)
+jansky_ref <- scuttle::logNormCounts(jansky_ref)
+
+pred_bped_main <- SingleR(test = as.SingleCellExperiment(seu), 
+                          ref = list(bped, jansky_ref), 
+                          labels = list(bped$label.main, jansky_ref_annot$med_idents),
+                          BPPARAM=MulticoreParam(30))
+seu[['multiple_bped_jansky']] <- pred_bped_main$pruned.labels
+
+saveRDS(seu, paste0(PREPRDATADIR, 'seu_integrated_annotated_bped_jansky.rds'))
+```
+
+```{r eval=FALSE, fig.height=5, fig.width=10, include=FALSE}
+seu$bped <- pred_bped_main$orig.results$ref1$pruned.labels
+seu$jansky <- pred_bped_main$orig.results$ref2$pruned.labels
+DimPlot(seu, group.by = 'bped', cols = getPalette(length(unique(seu$bped))))
+DimPlot(seu, group.by = 'jansky', cols = getPalette(length(unique(seu$jansky))))
+
+```
+
+
+# Zhongyang's annotation try
+
+```{r eval=FALSE, include=FALSE}
+# T_NK 
+ref_T <- qread("/bigdata/zlin/Melanoma_meta/data/Ref_SingleR/T_ref.qs")
+ref_CD4 <- qread("/bigdata/zlin/Melanoma_meta/data/Ref_SingleR/T_CD4_ref.qs")
+ref_CD8 <- qread("/bigdata/zlin/Melanoma_meta/data/Ref_SingleR/T_CD8_ref.qs")
+ref_main_NK <- qread("/bigdata/zlin/Melanoma_meta/data/Ref_SingleR/NK_main_ref.qs")
+ref_fine_NK <- qread("/bigdata/zlin/Melanoma_meta/data/Ref_SingleR/NK_fine_ref.qs")
+
+```
+
+# Bulk
+
+```{r}
+seu$less18M <- as.character(seu$less18M)
+bulk <- AggregateExpression(seu, return.seurat = T, slot = "counts", assays = "RNA", 
+                            group.by = c("annotation_simple", "SampleID", "less18M"))
+
+cd14.bulk <- subset(bulk, celltype.full == "CD14 Mono")
+  Idents(cd14.bulk) <- "disease"
+  de_markers <- FindMarkers(cd14.bulk, ident.1 = "D", ident.2 = "H", slot = "counts", test.use = "DESeq2",
+      verbose = F)
+  de_markers$gene <- rownames(de_markers)
+```
+
+
+# Auto annotation pipeline
+
+```{r}
+#malignant cells signature
+malignant_scGate_model <- gating_model(name = "Malignant", signature = c("MYCN","MLLT11", "SLC6A2"))
+seu2 <- scGate(data = seu, model = malignant_scGate_model)
+
+DimPlot(seu2, group.by = "is.pure")
+DimPlot(seu2$, group.by='Malignant_UCell')
+```
+
+
+```{r}
+
+annotate <- function(sample) {
+  
+  seu <- subset(seu_all, SampleID == sample) %>% 
+    NormalizeData() %>%
+    FindVariableFeatures()%>%
+    ScaleData() %>%
+    RunPCA() %>% 
+    RunUMAP(dims = 1:20) %>%
+    FindNeighbors(dims = 1:20) %>%
+    FindClusters(resolution = 1.5)
+  
+  sce <- as.SingleCellExperiment(seu)
+  colLabels(sce) <- seu$RNA_snn_res.1.5
+  Idents(seu) <- 'RNA_snn_res.1.5'
+  
+  # #cluster-wise annotation
+  pred_bped_main <- SingleR(test = sce, ref = hum_atlas_data, clusters=colLabels(sce),
+                            labels = hum_atlas_data$label.main, BPPARAM=MulticoreParam(30))
+  # # Create a named vector for RenameIdents
+  singleR_labels <- pred_bped_main$pruned.labels
+  names(singleR_labels) <- rownames(pred_bped_main)
+  
+  # Update cluster identities in Seurat object based on SingleR results
+  seu <- RenameIdents(seu, singleR_labels)
+  seu[['SingleR_labels']] <- Idents(seu)
+  
+  # define immune cells
+  seu <- scGate(seu, model = scGate_models_DB$human$TME_broad$Immune)
+  barcode_immune <- colnames(seu)[seu$is.pure == 'Pure']
+  
+  # define stromal cells
+  seu <- scGate(seu, model = scGate_models_DB$human$generic$Stromal)
+  barcode_stromal <- colnames(seu)[seu$is.pure == 'Pure']
+  seu <- scGate(seu, model = scGate_models_DB$human$generic$Endothelial)
+  barcode_endo <- colnames(seu)[seu$is.pure == 'Pure']
+  
+  # define malignant cells
+  malignant_scGate_model <- gating_model(name = "Malignant", signature = c("MYCN","MLLT11", "SLC6A2"))
+  seu <- scGate(data = seu, model = malignant_scGate_model)
+  barcode_malignant <- unique(c(colnames(seu)[seu$is.pure == 'Pure'],
+                         colnames(seu)[seu$infercnv_result == 'malignant']))
+  
+  #define t-cells
+  seu <- scGate(seu, model = scGate_models_DB$human$generic$Tcell)
+  barcode_T <- colnames(seu)[seu$is.pure == 'Pure']
+  
+  seu <- scGate(seu, model = scGate_models_DB$human$generic$NK)
+  barcode_NK <- colnames(seu)[seu$is.pure == 'Pure']
+  
+  #define b-cells
+  seu <- scGate(seu, model = scGate_models_DB$human$generic$Bcell)
+  barcode_B <- colnames(seu)[seu$is.pure == 'Pure']
+  seu <- scGate(seu, model = scGate_models_DB$human$generic$PlasmaCell)
+  barcode_plasma <- colnames(seu)[seu$is.pure == 'Pure']
+  
+  #define myeloid cells
+  seu <- scGate(seu, model = scGate_models_DB$human$generic$Myeloid)
+  barcode_myeloid <- colnames(seu)[seu$is.pure == 'Pure']
+  
+  seu <- scGate(seu, model = scGate_models_DB$human$generic$Monocyte)
+  barcode_monocyte <- colnames(seu)[seu$is.pure == 'Pure']
+  
+  # Assign final labels
+  seu$final_labels <- "unknown"
+  seu$final_labels[colnames(seu) %in% barcode_malignant] <- "malignant_cells"
+  seu$final_labels[colnames(seu) %in% barcode_T] <- "T_cells"
+  seu$final_labels[colnames(seu) %in% barcode_NK] <- "T_cells"
+  seu$final_labels[colnames(seu) %in% barcode_B] <- "B_cells"
+  seu$final_labels[colnames(seu) %in% barcode_plasma] <- "B_cells"
+  seu$final_labels[colnames(seu) %in% barcode_myeloid] <- "myeloid_cells"
+  seu$final_labels[colnames(seu) %in% barcode_monocyte] <- "myeloid_cells"
+  seu$final_labels[colnames(seu) %in% barcode_stromal] <- "stromal_cells"
+  seu$final_labels[colnames(seu) %in% barcode_endo] <- "endothelial_cells"
+  
+  annot_comp <- c("DC" = 'myeloid_cells',
+                  "Smooth_muscle_cells" = "stromal_cells",
+                  "Epithelial_cells" = "stromal_cells",
+                  "B_cell" = "B_cells",
+                  "Neutrophils" = 'myeloid_cells',
+                  "T_cells" = "T_cells",
+                  "Monocyte" = 'myeloid_cells',
+                  "Erythroblast" = 'weird',
+                  "BM & Prog." = 'weird',
+                  "Endothelial_cells" = "endothelial_cells",
+                  "Gametocytes" = 'weird',
+                  "Neurons" = "malignant_cells",
+                  "Keratinocytes" = 'weird',
+                  "HSC_-G-CSF" = 'myeloid_cells',
+                  "Macrophage" = 'myeloid_cells',
+                  "NK_cell" = "T_cells",
+                  "Embryonic_stem_cells" = 'weird',
+                  "Tissue_stem_cells" = "stromal_cells", 
+                  "Chondrocytes" = 'weird',
+                  "Osteoblasts" = 'weird',
+                  "BM" = 'weird',
+                  "Platelets" = 'weird',
+                  "Fibroblasts" = "stromal_cells",
+                  "iPS_cells" = 'weird',
+                  "Hepatocytes" = 'weird',
+                  "MSC" = "stromal_cells",
+                  "Neuroepithelial_cell" = "malignant_cells",
+                  "Astrocyte" = "malignant_cells",
+                  "HSC_CD34+" = 'weird',
+                  "CMP" = 'myeloid_cells',
+                  "GMP" = 'myeloid_cells',
+                  "MEP" = 'weird',
+                  "Myelocyte" = 'myeloid_cells',
+                  "Pre-B_cell_CD34-" = "B_cells",
+                  "Pro-B_cell_CD34+" = "B_cells",
+                  "Pro-Myelocyte" = 'myeloid_cells',
+                  'unknown' = 'unknown')
+  
+  pred_bped_main$pruned.labels[is.na(pred_bped_main$pruned.labels)] <- 'unknown'
+  
+  pred_bped_main$pruned.labels <- annot_comp[as.character(pred_bped_main$pruned.labels)]
+  
+  final_annotation_df <- data.frame(cluster = rownames(pred_bped_main),
+                                    annotation = '-')
+  # Compare SingleR and scGate
+  for (i in rownames(pred_bped_main)) {
+    
+    if (table(seu$RNA_snn_res.1.5)[i] == 0) {
+      next
+    }
+    
+    cells_cluster <- seu[, colnames(seu) %in%  colnames(seu)[seu$RNA_snn_res.1.5 == i]]
+    SingleR_title <- pred_bped_main$pruned.labels[rownames(pred_bped_main) == i]
+    scGate_max <- names(which.max(table(cells_cluster$final_labels)))
+    scGate_max2 <- names(table(cells_cluster$final_labels) %>% sort(decreasing = T))[2]
+    scGate_max2 <- ifelse(is.na(scGate_max2), 'unknown', scGate_max2)
+    
+    if (scGate_max == SingleR_title & scGate_max != 'unknown') {
+      final_annotation_df$annotation[final_annotation_df$cluster == i] <- scGate_max
+    } else if (scGate_max2 == SingleR_title & scGate_max2 != 'unknown') {
+      final_annotation_df$annotation[final_annotation_df$cluster == i] <- scGate_max2
+    } else if (scGate_max == 'unknown' & SingleR_title != 'unknown') {
+      final_annotation_df$annotation[final_annotation_df$cluster == i] <- SingleR_title
+    } else if (scGate_max != 'unknown' & SingleR_title == 'unknown') {
+      final_annotation_df$annotation[final_annotation_df$cluster == i] <- scGate_max
+    } else {
+      final_annotation_df$annotation[final_annotation_df$cluster == i] <- 'unresolved'
+    }
+    
+  }
+  
+  final_annotation <- final_annotation_df$annotation
+  names(final_annotation) <- final_annotation_df$cluster
+  
+  Idents(seu) <- 'RNA_snn_res.1.5'
+  seu <- RenameIdents(seu, final_annotation)
+  seu[['ANNOTATION_FINAL']] <- Idents(seu)
+  
+  seu$immune_labels <- "unknown"
+  seu$immune_labels[colnames(seu) %in% barcode_immune] <- "immune"
+  
+  seu$malignant_labels <- "unknown"
+  seu$malignant_labels[colnames(seu) %in% barcode_malignant] <- "malignant"
+  return(seu)
+  
+}
+```
+
+```{r}
+annotated_samples <- mclapply(seu_all$SampleID %>% unique,
+                              annotate, mc.cores = 5)
+
+names(annotated_samples) <- seu_all$SampleID %>% unique
+
+qsave(annotated_samples, paste0(PREPRDATADIR, 'seu_list_mypipelineannot_v1.qs'))
+
+
+```
+
+```{r}
+annotated_samples <- qread(paste0(PREPRDATADIR, 'seu_list_mypipelineannot_v1.qs'))
+```
+
+```{r}
+lapply(annotated_samples, function(x) {
+  DimPlot(x, group.by='ANNOTATION_FINAL') +
+  ggtitle(x$SampleID %>% unique())
+  # DimPlot(x, group.by='immune_labels') +
+  #   ggtitle(x$SampleID %>% unique())
+  # DimPlot(x, group.by='malignant_labels') +
+  #   ggtitle(x$SampleID %>% unique())
+})
+```
+
+
+```{r}
+seu_new <- merge(annotated_samples[[1]], annotated_samples[-1])
+
+table(seu_new$ANNOTATION_FINAL)
+```
+
+## Integration
+
+```{r eval=FALSE, include=FALSE}
+plan("multicore", workers = 20)
+options(future.globals.maxSize = 5 * 1024^3)
+        
+seu_new <- seu_new %>% 
+  NormalizeData() %>% 
+  FindVariableFeatures() %>% 
+  ScaleData() %>% 
+  RunPCA(verbose=FALSE)
+  
+seu_new <- seu_new %>% 
+  IntegrateLayers(
+    object = ., method = CCAIntegration,
+    orig.reduction = "pca", new.reduction = "integrated.cca",
+    verbose = FALSE) %>% 
+  RunUMAP(reduction = "integrated.cca", dims = 1:20) 
+
+seu_new <- JoinLayers(seu_new)
+
+DimPlot(seu_new, group.by = 'ANNOTATION_FINAL', cols = my_colors) +
+  ggtitle('CCAIntegration')
+
+qsave(seu_new, paste0(PREPRDATADIR, 'seu_integrated_mypipelineannot_v1.qs'))
+```
+
+```{r}
+seu <- qread( paste0(PREPRDATADIR, 'seu_integrated_mypipelineannot_v1.qs'))
+
+
+DimPlot(seu, group.by='ANNOTATION_FINAL')
+
+seu %>% 
+  RunUMAP(reduction = "pca", dims = 1:20, verbose=F) %>% 
+  DimPlot(group.by='ANNOTATION_FINAL')
+```
+
+```{r}
+seu <- seu %>% 
+  RunHarmony(., 'SampleID',
+             lambda = 1, verbose = FALSE) %>% 
+  RunUMAP(reduction = "harmony", dims = 1:20, verbose=F) 
+
+seu$ANNOTATION_FINAL <- ifelse(seu$ANNOTATION_FINAL == "endothelial_cells", "stromal_cells", seu$ANNOTATION_FINAL)
+seu <- subset(seu, ANNOTATION_FINAL %in% c("myeloid_cells", "B_cells", "T_cells",
+                                           "malignant_cells","stromal_cells"))
+
+seu %>% 
+  DimPlot(group.by='ANNOTATION_FINAL', cols = c("#9ACD32FF", "#FF69B4FF", "#DDA0DDFF", "#4682B4FF",  "#87CEEBFF")) +
+  ggtitle('Annotation')
+seu %>% 
+  DimPlot(group.by='Study', cols = c("#9ACD32FF", "#FF69B4FF", "#DDA0DDFF", "#4682B4FF",  "#87CEEBFF")) +
+  ggtitle('Study')
+```
+
+## DE
+
+### Pseudobulk
+
+
+I perfomed differential expression analysis in immune cells by age using pseudobulk.
+
+```{r fig.height=8, fig.width=15}
+seu$less18M <- as.character(seu$less18M)
+bulk <- AggregateExpression(subset(seu, Study != 'jansky'), return.seurat = T, slot = "counts", assays = "RNA", 
+                            group.by = c("ANNOTATION_FINAL", "SampleID", "less18M"))
+Idents(bulk) <- "less18M"
+
+t_cells.de.markers <- FindMarkers(subset(bulk, ANNOTATION_FINAL == 'T-cells'), 
+                                  ident.1 = "TRUE", ident.2 = "FALSE", slot = "counts",
+                                  test.use = "DESeq2", verbose = F)
+write.csv(t_cells.de.markers, paste0(PREPRDATADIR, 't_cells_de_markers_bulk_v2.csv'))
+b_cells.de.markers <- FindMarkers(subset(bulk, ANNOTATION_FINAL == 'B-cells'), 
+                                  ident.1 = "TRUE", ident.2 = "FALSE", slot = "counts",
+                                  test.use = "DESeq2", verbose = F)
+write.csv(b_cells.de.markers, paste0(PREPRDATADIR, 'b_cells_de_markers_bulk_v2.csv'))
+myeloid.de.markers <- FindMarkers(subset(bulk, ANNOTATION_FINAL == 'myeloid-cells'), 
+                                  ident.1 = "TRUE", ident.2 = "FALSE", slot = "counts",
+                                  test.use = "DESeq2", verbose = F)
+write.csv(myeloid.de.markers, paste0(PREPRDATADIR, 'myeloid_de_markers_bulk_v2.csv'))
+
+volcano_plot <- function(de.markers) {
+  EnhancedVolcano(de.markers,
+    lab = rownames(de.markers),
+    x = 'avg_log2FC',
+    y = 'p_val_adj',
+    col = c("grey30","#8FBC8BFF", "#6495EDFF", "#BA55D3FF"),
+    drawConnectors = TRUE,
+    pCutoff = 0.05, 
+    max.overlaps = 30
+    # ,
+    # ylim = c(0, 10)
+    ) +
+  labs(subtitle = "< 18M vs > 18M")
+}
+
+plot_grid(volcano_plot(t_cells.de.markers) +
+            ggtitle('T-cells'),
+          volcano_plot(b_cells.de.markers) +
+            ggtitle('B-cells'),
+          volcano_plot(myeloid.de.markers) +
+            ggtitle('Myeloid cells'), 
+          nrow = 1)
+```
+
+```{r}
+b_cells <- subset(seu, ANNOTATION_FINAL == 'B_cells')
+Idents(b_cells) <- 'SampleID'
+RidgePlot(b_cells, features = c('TRIM58', 'AMPD1'), ncol = 2)
+
+VlnPlot(b_cells, features = c('TRIM58', 'AMPD1'), split.by = "less18M")
+```
+
+### Pseudobulk v2
+
+#### Create pseudo replicates
+```{r}
+seu$less18M <- as.character(seu$less18M)
+seu$rep <- NA
+create_pseudorep <- function(seu) {
+  
+  rep1 <- c()
+  rep2 <- c()
+  rep3 <- c()
+  reps <- list(rep1, rep2, rep3)
+  
+  samples <- seu$SampleID %>% unique
+  cell_types <- seu$ANNOTATION_FINAL %>% unique
+  sample_annot_table <- table(seu$ANNOTATION_FINAL, seu$SampleID)
+  for (sample in samples) {
+    for (celltype in cell_types) {
+      
+      if (sample_annot_table[celltype, sample] >= 150) {
+        
+        cells <- WhichCells(seu, expression = ANNOTATION_FINAL ==  celltype & SampleID == sample)
+        cells_split <- split(cells,  cut(seq_along(cells), 3, labels = FALSE))
+        reps[[1]] <- c(reps[[1]], cells_split[1])
+        reps[[2]] <- c(reps[[2]], cells_split[2])
+        reps[[3]] <- c(reps[[3]], cells_split[3])
+      }
+      else if (sample_annot_table[celltype, sample] >= 90) {
+        cells <- WhichCells(seu, expression = ANNOTATION_FINAL ==  celltype & SampleID == sample)
+        cells_split <- split(cells,  cut(seq_along(cells), 2, labels = FALSE))
+        reps[[1]] <- c(reps[[1]], cells_split[1])
+        reps[[2]] <- c(reps[[2]], cells_split[2])
+      }
+    }
+  }
+  return(reps)
+}
+
+replicates_list <- create_pseudorep(seu)
+
+for (i in seq_along(replicates_list)) {
+  replicate_name <- paste0("rep", i)
+  cells <- unlist(replicates_list[[i]])
+  seu$rep[cells] <- replicate_name
+}
+```
+
+#### Count matrix
+
+```{r}
+seu_bulk <- subset(seu, Study != 'jansky')
+seu_bulk <- subset(seu_bulk, rep %in% c('rep1', 'rep2', 'rep3'))
+bulk <- AggregateExpression(seu_bulk, return.seurat = T, slot = "counts", assays = "RNA", 
+                            group.by = c("ANNOTATION_FINAL", "SampleID", "less18M", 'rep'))
+Idents(bulk) <- "less18M"
+
+cts <- bulk[["RNA"]]$counts %>% as.matrix()
+
+coldata <- bulk@meta.data 
+
+coldata$Study <- sapply(str_split(coldata$SampleID, "-"), function(x) {
+  if (length(x) == 2) {
+    return(x[2])
+  } else if (length(x) == 3) {
+    return(x[3])
+  } else {
+    return(NA)
+  }
+})
+
+coldata$Technology <- '10x'
+coldata$Technology[coldata$Study == 'yuan'] <- 'Smart-seq2'
+
+## SPLIT MATRIX BY CELL TYPE
+# transpose
+cts.t <- t(cts)
+# convert to data.frame
+cts.t <- as.data.frame(cts.t)
+# get values where to split
+splitRows <- gsub('_.*', '', rownames(cts.t))
+# split data.frame
+cts.split <- split.data.frame(cts.t,
+                 f = factor(splitRows))
+
+# fix colnames and transpose
+cts.split.modified <- lapply(cts.split, function(x){
+  rownames(x) <- rownames(x) %>% str_extract("[A-Za-z0-9-]+_(.*)", group = 1)
+  t(x)
+
+})
+
+```
+
+#### DEseq
+
+##### B-cells
+
+```{r}
+numericContrast <- function(object, 
+                            group1,
+                            group2){
+  # get logical vector for each group
+  group1_condition <- eval(substitute(group1), colData(object), parent.frame())
+  group2_condition <- eval(substitute(group2), colData(object), parent.frame())
+  
+  # extract the model matrix from the object
+  modmat <- model.matrix(design(object), colData(object))
+  
+  # is this approach fine when there are different number of replicates in groups? - I don't think so, see function below instead
+  group1_coef <- colMeans(modmat[group1_condition, , drop=FALSE])
+  group2_coef <- colMeans(modmat[group2_condition, , drop=FALSE])
+  
+  # return numeric contrast
+  return(group1_coef - group2_coef)
+}
+
+getNumericCoef <- function(object, subset, weighted = FALSE){
+  # logical vector of rows
+  rows <- eval(substitute(subset), colData(object), parent.frame())
+  stopifnot(is.logical(rows))
+  
+  # get model matrix
+  modmat <- model.matrix(design(object), colData(object))
+  stopifnot(!is.null(modmat))
+  
+  # subset matrix
+  modmat <- modmat[rows, , drop=FALSE]
+  
+  # calculate vector
+  if(!weighted){
+    modmat <- modmat[!duplicated(modmat), , drop=FALSE]
+  } 
+  
+  return(colMeans(modmat))
+  
+}
+group1_vec <- coldata %>% dplyr::filter(ANNOTATION_FINAL == 'B-cells') %>%
+                                 set_rownames(rownames(.) %>% str_extract("[A-Za-z0-9-]+_(.*)",
+                                                                          group = 1)) %>% 
+                                  filter(less18M == 'TRUE') %>% .$SampleID
+group2_vec <- coldata %>% dplyr::filter(ANNOTATION_FINAL == 'B-cells') %>%
+                                 set_rownames(rownames(.) %>% str_extract("[A-Za-z0-9-]+_(.*)",
+                                                                          group = 1)) %>% 
+                                  filter(less18M == 'FALSE') %>% .$SampleID
+group1 <- getNumericCoef(dds, SampleID %in% group1_vec)
+group2 <- getNumericCoef(dds, SampleID %in% group2_vec)
+res <- results(dds, contrast = group1 - group2)
+res <- lfcShrink(dds,
+                 contrast= group1 - group2,
+                 type='ashr',
+                 res=res)
+```
+
+
+```{r fig.height=8, fig.width=10}
+## DE
+dds <- DESeqDataSetFromMatrix(as.matrix(cts.split.modified$`B-cells`), 
+                              colData = coldata %>% dplyr::filter(ANNOTATION_FINAL == 'B-cells') %>%
+                                set_rownames(rownames(.) %>% str_extract("[A-Za-z0-9-]+_(.*)",
+                                                                         group = 1)), 
+                              design = ~ Study + less18M)
+rld <- vst(dds, blind=TRUE)
+
+DESeq2::plotPCA(rld, intgroup=c("less18M", "Study"))
+dds <- DESeq(dds)
+plotDispEsts(dds)
+resultsNames(dds)
+res <- results(dds)
+res <- lfcShrink(dds,
+                 contrast= 'less18M_TRUE_vs_FALSE',
+                 type='ashr',
+                 res=res)
+res_tbl <- res %>%
+        data.frame() %>%
+        rownames_to_column(var="gene") %>%
+        as_tibble()
+
+sig_res <- dplyr::filter(res_tbl, padj < 0.05) %>%
+        dplyr::arrange(padj)
+
+## ggplot of top genes
+normalized_counts <- counts(dds, 
+                            normalized = TRUE)
+
+## Order results by padj values
+top20_sig_genes <- sig_res %>%
+        dplyr::arrange(padj) %>%
+        dplyr::pull(gene) %>%
+        head(n=20)
+
+
+top20_sig_norm <- data.frame(normalized_counts) %>%
+        rownames_to_column(var = "gene") %>%
+        dplyr::filter(gene %in% top20_sig_genes)
+
+gathered_top20_sig <- top20_sig_norm %>%
+        gather(colnames(top20_sig_norm)[2:length(colnames(top20_sig_norm))], key = "SampleID", value = "normalized_counts")
+        
+gathered_top20_sig <- inner_join(coldata %>% dplyr::filter(ANNOTATION_FINAL == 'B-cells') %>%
+                                set_rownames(rownames(.) %>% str_extract("[A-Za-z0-9-]+_(.*)",
+                                                                         group = 1)) %>% 
+                                  mutate(SampleID = gsub('-', '.', rownames(.)) ) %>% 
+                                  .[, c("SampleID", "less18M" )], gathered_top20_sig, by = c("SampleID"))
+
+## plot using ggplot2
+ggplot(gathered_top20_sig) +
+        geom_point(aes(x = gene, 
+                       y = normalized_counts, 
+                       color = less18M), 
+                   position=position_jitter(w=0.1,h=0)) +
+        scale_y_log10() +
+        xlab("Genes") +
+        ylab("log10 Normalized Counts") +
+        ggtitle("Top 20 Significant DE Genes") +
+        theme_bw() +
+        theme(axis.text.x = element_text(angle = 45, hjust = 1)) + 
+        theme(plot.title = element_text(hjust = 0.5))
+
+
+sig_norm <- data.frame(normalized_counts) %>%
+        rownames_to_column(var = "gene") %>%
+        dplyr::filter(gene %in% sig_res$gene)
+      
+# Set a color palette
+heat_colors <- brewer.pal(6, "RdBu")
+
+# Run pheatmap using the metadata data frame for the annotation
+pheatmap(sig_norm[ , 2:length(colnames(sig_norm))], 
+    color = heat_colors, 
+    breaks = seq(-2, 2, length.out = 6),
+    cluster_rows = T, 
+    show_rownames = F,
+    annotation = coldata %>% dplyr::filter(ANNOTATION_FINAL == 'B-cells') %>%
+                                set_rownames(rownames(.) %>% str_extract("[A-Za-z0-9-]+_(.*)",
+                                                                         group = 1)) %>% 
+      set_rownames(gsub('-', '.', rownames(.))) %>% .[, c("SampleID","less18M" )], 
+    border_color = NA, 
+    fontsize = 10, 
+    scale = "row", 
+    fontsize_row = 10, 
+    height = 20)        
+```
+
+##### T-cells
+
+```{r fig.height=8, fig.width=10}
+## DE
+dds_t <- DESeqDataSetFromMatrix(as.matrix(cts.split.modified$`T-cells`), 
+                              colData = coldata %>% dplyr::filter(ANNOTATION_FINAL == 'T-cells') %>%
+                                set_rownames(rownames(.) %>% str_extract("[A-Za-z0-9-]+_(.*)",
+                                                                         group = 1)), 
+                              design = ~ Study + less18M)
+vst_t <- vst(dds_t, blind=TRUE)
+
+DESeq2::plotPCA(vst_t, intgroup=c("less18M", "Study"))
+
+dds_t <- DESeq(dds_t)
+plotDispEsts(dds_t)
+resultsNames(dds_t)
+res_t <- results(dds_t)
+res_t <- lfcShrink(dds_t,
+                 contrast='less18M_TRUE_vs_FALSE',
+                 type='ashr',
+                 res=res_t)
+res_tbl_t <- res_t %>%
+        data.frame() %>%
+        rownames_to_column(var="gene") %>%
+        as_tibble()
+
+sig_res_t <- dplyr::filter(res_tbl_t, padj < 0.05) %>%
+        dplyr::arrange(padj)
+
+## ggplot of top genes
+normalized_counts_t <- counts(dds_t, 
+                            normalized = TRUE)
+
+## Order results by padj values
+top20_sig_genes_t <- sig_res_t %>%
+        dplyr::arrange(padj) %>%
+        dplyr::pull(gene) %>%
+        head(n=20)
+
+
+top20_sig_norm_t <- data.frame(normalized_counts_t) %>%
+        rownames_to_column(var = "gene") %>%
+        dplyr::filter(gene %in% top20_sig_genes_t)
+
+gathered_top20_sig_t <- top20_sig_norm_t %>%
+        gather(colnames(top20_sig_norm_t)[2:length(colnames(top20_sig_norm_t))], key = "SampleID", value = "normalized_counts")
+        
+gathered_top20_sig_t <- inner_join(coldata %>% dplyr::filter(ANNOTATION_FINAL == 'T-cells') %>%
+                                set_rownames(rownames(.) %>% str_extract("[A-Za-z0-9-]+_(.*)",
+                                                                         group = 1)) %>% 
+                                  mutate(SampleID = gsub('-', '.', rownames(.)) ) %>% 
+                                  .[, c("SampleID", "less18M" )], gathered_top20_sig_t, by = c("SampleID"))
+
+## plot using ggplot2
+ggplot(gathered_top20_sig_t) +
+        geom_point(aes(x = gene, 
+                       y = normalized_counts, 
+                       color = less18M), 
+                   position=position_jitter(w=0.1,h=0)) +
+        scale_y_log10() +
+        xlab("Genes") +
+        ylab("log10 Normalized Counts") +
+        ggtitle("Top 20 Significant DE Genes") +
+        theme_bw() +
+        theme(axis.text.x = element_text(angle = 45, hjust = 1)) + 
+        theme(plot.title = element_text(hjust = 0.5))
+
+
+sig_norm_t <- data.frame(normalized_counts_t) %>%
+        rownames_to_column(var = "gene") %>%
+        dplyr::filter(gene %in% sig_res_t$gene)
+      
+# Set a color palette
+heat_colors <- brewer.pal(6, "RdBu")
+
+# Run pheatmap using the metadata data frame for the annotation
+pheatmap(sig_norm_t[ , 2:length(colnames(sig_norm_t))], 
+    color = heat_colors, 
+    breaks = seq(-2, 2, length.out = 6),
+    cluster_rows = F, 
+    show_rownames = F,
+    annotation = coldata %>% dplyr::filter(ANNOTATION_FINAL == 'T-cells') %>%
+                                set_rownames(rownames(.) %>% str_extract("[A-Za-z0-9-]+_(.*)",
+                                                                         group = 1)) %>% 
+      set_rownames(gsub('-', '.', rownames(.))) %>% .[, c("SampleID","less18M" )], 
+    border_color = NA, 
+    fontsize = 10, 
+    scale = "row", 
+    fontsize_row = 10, 
+    height = 20)        
+```
+
+##### Myeloid cells
+
+```{r fig.height=8, fig.width=10}
+## DE
+dds_m <- DESeqDataSetFromMatrix(as.matrix(cts.split.modified$`myeloid-cells`), 
+                              colData = coldata %>% dplyr::filter(ANNOTATION_FINAL == 'myeloid-cells') %>%
+                                set_rownames(rownames(.) %>% str_extract("[A-Za-z0-9-]+_(.*)",
+                                                                         group = 1)), 
+                              design = ~ Study + less18M)
+vst_m <- vst(dds_m, blind=TRUE)
+
+DESeq2::plotPCA(vst_m, intgroup=c("less18M", "Study"))
+
+dds_m <- DESeq(dds_m)
+plotDispEsts(dds_m)
+resultsNames(dds_m)
+res_m <- results(dds_m)
+res_m <- lfcShrink(dds_m,
+                 contrast='less18M_TRUE_vs_FALSE',
+                 type='ashr',
+                 res=res_m)
+res_tbl_m <- res_m %>%
+        data.frame() %>%
+        rownames_to_column(var="gene") %>%
+        as_tibble()
+
+sig_res_m <- dplyr::filter(res_tbl_m, padj < 0.05) %>%
+        dplyr::arrange(padj)
+
+## ggplot of top genes
+normalized_counts_m <- counts(dds_m, 
+                            normalized = TRUE)
+
+## Order results by padj values
+top20_sig_genes_m <- sig_res_m %>%
+        dplyr::arrange(padj) %>%
+        dplyr::pull(gene) %>%
+        head(n=20)
+
+
+top20_sig_norm_m <- data.frame(normalized_counts_m) %>%
+        rownames_to_column(var = "gene") %>%
+        dplyr::filter(gene %in% top20_sig_genes_m)
+
+gathered_top20_sig_m <- top20_sig_norm_m %>%
+        gather(colnames(top20_sig_norm_m)[2:length(colnames(top20_sig_norm_m))], key = "SampleID", value = "normalized_counts")
+        
+gathered_top20_sig_m <- inner_join(coldata %>% dplyr::filter(ANNOTATION_FINAL == 'myeloid-cells') %>%
+                                set_rownames(rownames(.) %>% str_extract("[A-Za-z0-9-]+_(.*)",
+                                                                         group = 1)) %>% 
+                                  mutate(SampleID = gsub('-', '.', rownames(.)) ) %>% 
+                                  .[, c("SampleID", "less18M" )], gathered_top20_sig_m, by = c("SampleID"))
+
+## plot using ggplot2
+ggplot(gathered_top20_sig_m) +
+        geom_point(aes(x = gene, 
+                       y = normalized_counts, 
+                       color = less18M), 
+                   position=position_jitter(w=0.1,h=0)) +
+        scale_y_log10() +
+        xlab("Genes") +
+        ylab("log10 Normalized Counts") +
+        ggtitle("Top 20 Significant DE Genes") +
+        theme_bw() +
+        theme(axis.text.x = element_text(angle = 45, hjust = 1)) + 
+        theme(plot.title = element_text(hjust = 0.5))
+
+
+sig_norm_m <- data.frame(normalized_counts_m) %>%
+        rownames_to_column(var = "gene") %>%
+        dplyr::filter(gene %in% sig_res_m$gene)
+      
+# Set a color palette
+heat_colors <- brewer.pal(6, "RdBu")
+
+# Run pheatmap using the metadata data frame for the annotation
+pheatmap(sig_norm_m[ , 2:length(colnames(sig_norm_m))], 
+    color = heat_colors, 
+    breaks = seq(-2, 2, length.out = 6),
+    cluster_rows = T, 
+    show_rownames = F,
+    annotation = coldata %>% dplyr::filter(ANNOTATION_FINAL == 'myeloid-cells') %>%
+                                set_rownames(rownames(.) %>% str_extract("[A-Za-z0-9-]+_(.*)",
+                                                                         group = 1)) %>% 
+      set_rownames(gsub('-', '.', rownames(.))) %>% .[, c("SampleID","less18M" )], 
+    border_color = NA, 
+    fontsize = 10, 
+    scale = "row", 
+    fontsize_row = 10, 
+    height = 20)        
+```
+
+```{r}
+mat <- assay(rld)
+plotPCA(rld, intgroup=c("less18M", "Study"))
+mm <- model.matrix(~less18M, colData(rld))
+mat <- limma::removeBatchEffect(mat, batch=rld$Study, design=mm)
+assay(rld) <- mat
+plotPCA(rld, intgroup=c("less18M", "Study"))
+
+mat <- assay(vst_t)
+plotPCA(vst_t, intgroup=c("less18M", "Study"))
+mm <- model.matrix(~less18M, colData(vst_t))
+mat <- limma::removeBatchEffect(mat, batch=vst_t$Study, design=mm)
+assay(vst_t) <- mat
+plotPCA(vst_t, intgroup=c("less18M", "Study"))
+
+mat <- assay(vst_m)
+plotPCA(vst_m, intgroup=c("less18M", "Study"))
+mm <- model.matrix(~less18M, colData(vst_m))
+mat <- limma::removeBatchEffect(mat, batch=vst_m$Study, design=mm)
+assay(vst_m) <- mat
+plotPCA(vst_m, intgroup=c("less18M", "Study"))
+```
+
+#### Combat + DEseq
+
+```{r}
+# devtools::install_github("zhangyuqing/sva-devel")
+library(sva)
+plotPCA(rld, intgroup=c("less18M", "Study"))
+count_matrix <- as.matrix(cts.split.modified$`B-cells`)
+adjusted_counts <- ComBat_seq(count_matrix, batch=sub(".*-([a-zA-Z]+)_.*", "\\1", colnames(count_matrix)),
+                              group=sub(".*_([a-zA-Z]+)_.*", "\\1", colnames(count_matrix)))
+
+
+plotPCA(vst_t, intgroup=c("less18M", "Study"))
+count_matrix <- as.matrix(cts.split.modified$`T-cells`)
+adjusted_counts_t <- ComBat_seq(count_matrix, batch=sub(".*-([a-zA-Z]+)_.*", "\\1", colnames(count_matrix)),
+                              group=sub(".*_([a-zA-Z]+)_.*", "\\1", colnames(count_matrix)))
+
+plotPCA(vst_m, intgroup=c("less18M", "Study"))
+count_matrix <- as.matrix(cts.split.modified$`myeloid-cells`)
+adjusted_counts_m <- ComBat_seq(count_matrix, batch=sub(".*-([a-zA-Z]+)_.*", "\\1", colnames(count_matrix)),
+                              group=sub(".*_([a-zA-Z]+)_.*", "\\1", colnames(count_matrix)))
+```
+
+##### B-cells
+
+```{r fig.height=8, fig.width=10}
+## DE
+dds <- DESeqDataSetFromMatrix(adjusted_counts, 
+                              colData = coldata %>% dplyr::filter(ANNOTATION_FINAL == 'B-cells') %>%
+                                set_rownames(rownames(.) %>% str_extract("[A-Za-z0-9-]+_(.*)",
+                                                                         group = 1)), 
+                              design = ~less18M)
+rld <- vst(dds, blind=TRUE)
+
+DESeq2::plotPCA(rld, intgroup=c("less18M", "Study"))
+dds <- DESeq(dds)
+plotDispEsts(dds)
+resultsNames(dds)
+res <- results(dds)
+res <- lfcShrink(dds,
+                 contrast= 'less18M_TRUE_vs_FALSE',
+                 type='ashr',
+                 res=res)
+res_tbl <- res %>%
+        data.frame() %>%
+        rownames_to_column(var="gene") %>%
+        as_tibble()
+
+sig_res <- dplyr::filter(res_tbl, padj < 0.05) %>%
+        dplyr::arrange(padj)
+
+## ggplot of top genes
+normalized_counts <- counts(dds, 
+                            normalized = TRUE)
+
+## Order results by padj values
+top20_sig_genes <- sig_res %>%
+        dplyr::arrange(padj) %>%
+        dplyr::pull(gene) %>%
+        head(n=20)
+
+
+top20_sig_norm <- data.frame(normalized_counts) %>%
+        rownames_to_column(var = "gene") %>%
+        dplyr::filter(gene %in% top20_sig_genes)
+
+gathered_top20_sig <- top20_sig_norm %>%
+        gather(colnames(top20_sig_norm)[2:length(colnames(top20_sig_norm))], key = "SampleID", value = "normalized_counts")
+        
+gathered_top20_sig <- inner_join(coldata %>% dplyr::filter(ANNOTATION_FINAL == 'B-cells') %>%
+                                set_rownames(rownames(.) %>% str_extract("[A-Za-z0-9-]+_(.*)",
+                                                                         group = 1)) %>% 
+                                  mutate(SampleID = gsub('-', '.', rownames(.)) ) %>% 
+                                  .[, c("SampleID", "less18M" )], gathered_top20_sig, by = c("SampleID"))
+
+## plot using ggplot2
+ggplot(gathered_top20_sig) +
+        geom_point(aes(x = gene, 
+                       y = normalized_counts, 
+                       color = less18M), 
+                   position=position_jitter(w=0.1,h=0)) +
+        scale_y_log10() +
+        xlab("Genes") +
+        ylab("log10 Normalized Counts") +
+        ggtitle("Top 20 Significant DE Genes") +
+        theme_bw() +
+        theme(axis.text.x = element_text(angle = 45, hjust = 1)) + 
+        theme(plot.title = element_text(hjust = 0.5))
+
+
+sig_norm <- data.frame(normalized_counts) %>%
+        rownames_to_column(var = "gene") %>%
+        dplyr::filter(gene %in% sig_res$gene)
+      
+# Set a color palette
+heat_colors <- brewer.pal(6, "RdBu")
+
+# Run pheatmap using the metadata data frame for the annotation
+pheatmap(sig_norm[ , 2:length(colnames(sig_norm))], 
+    color = heat_colors, 
+    breaks = seq(-2, 2, length.out = 6),
+    cluster_rows = T, 
+    show_rownames = F,
+    annotation = coldata %>% dplyr::filter(ANNOTATION_FINAL == 'B-cells') %>%
+                                set_rownames(rownames(.) %>% str_extract("[A-Za-z0-9-]+_(.*)",
+                                                                         group = 1)) %>% 
+      set_rownames(gsub('-', '.', rownames(.))) %>% .[, c("SampleID","less18M" )], 
+    border_color = NA, 
+    fontsize = 10, 
+    scale = "row", 
+    fontsize_row = 10, 
+    height = 20)        
+```
+
+##### T-cells
+
+```{r fig.height=8, fig.width=10}
+## DE
+dds_t <- DESeqDataSetFromMatrix(adjusted_counts_t, 
+                              colData = coldata %>% dplyr::filter(ANNOTATION_FINAL == 'T-cells') %>%
+                                set_rownames(rownames(.) %>% str_extract("[A-Za-z0-9-]+_(.*)",
+                                                                         group = 1)), 
+                              design = ~less18M)
+vst_t <- vst(dds_t, blind=TRUE)
+
+DESeq2::plotPCA(vst_t, intgroup=c("less18M", "Study"))
+
+dds_t <- DESeq(dds_t)
+plotDispEsts(dds_t)
+resultsNames(dds_t)
+res_t <- results(dds_t)
+res_t <- lfcShrink(dds_t,
+                 contrast='less18M_TRUE_vs_FALSE',
+                 type='ashr',
+                 res=res_t)
+res_tbl_t <- res_t %>%
+        data.frame() %>%
+        rownames_to_column(var="gene") %>%
+        as_tibble()
+
+sig_res_t <- dplyr::filter(res_tbl_t, padj < 0.05) %>%
+        dplyr::arrange(padj)
+
+## ggplot of top genes
+normalized_counts_t <- counts(dds_t, 
+                            normalized = TRUE)
+
+## Order results by padj values
+top20_sig_genes_t <- sig_res_t %>%
+        dplyr::arrange(padj) %>%
+        dplyr::pull(gene) %>%
+        head(n=20)
+
+
+top20_sig_norm_t <- data.frame(normalized_counts_t) %>%
+        rownames_to_column(var = "gene") %>%
+        dplyr::filter(gene %in% top20_sig_genes_t)
+
+gathered_top20_sig_t <- top20_sig_norm_t %>%
+        gather(colnames(top20_sig_norm_t)[2:length(colnames(top20_sig_norm_t))], key = "SampleID", value = "normalized_counts")
+        
+gathered_top20_sig_t <- inner_join(coldata %>% dplyr::filter(ANNOTATION_FINAL == 'T-cells') %>%
+                                set_rownames(rownames(.) %>% str_extract("[A-Za-z0-9-]+_(.*)",
+                                                                         group = 1)) %>% 
+                                  mutate(SampleID = gsub('-', '.', rownames(.)) ) %>% 
+                                  .[, c("SampleID", "less18M" )], gathered_top20_sig_t, by = c("SampleID"))
+
+## plot using ggplot2
+ggplot(gathered_top20_sig_t) +
+        geom_point(aes(x = gene, 
+                       y = normalized_counts, 
+                       color = less18M), 
+                   position=position_jitter(w=0.1,h=0)) +
+        scale_y_log10() +
+        xlab("Genes") +
+        ylab("log10 Normalized Counts") +
+        ggtitle("Top 20 Significant DE Genes") +
+        theme_bw() +
+        theme(axis.text.x = element_text(angle = 45, hjust = 1)) + 
+        theme(plot.title = element_text(hjust = 0.5))
+
+
+sig_norm_t <- data.frame(normalized_counts_t) %>%
+        rownames_to_column(var = "gene") %>%
+        dplyr::filter(gene %in% sig_res_t$gene)
+      
+# Set a color palette
+heat_colors <- brewer.pal(6, "RdBu")
+
+# Run pheatmap using the metadata data frame for the annotation
+pheatmap(sig_norm_t[ , 2:length(colnames(sig_norm_t))], 
+    color = heat_colors, 
+    breaks = seq(-2, 2, length.out = 6),
+    cluster_rows = F, 
+    show_rownames = F,
+    annotation = coldata %>% dplyr::filter(ANNOTATION_FINAL == 'T-cells') %>%
+                                set_rownames(rownames(.) %>% str_extract("[A-Za-z0-9-]+_(.*)",
+                                                                         group = 1)) %>% 
+      set_rownames(gsub('-', '.', rownames(.))) %>% .[, c("SampleID","less18M" )], 
+    border_color = NA, 
+    fontsize = 10, 
+    scale = "row", 
+    fontsize_row = 10, 
+    height = 20)        
+```
+
+##### Myeloid cells
+
+```{r fig.height=8, fig.width=10}
+## DE
+dds_m <- DESeqDataSetFromMatrix(adjusted_counts_m, 
+                              colData = coldata %>% dplyr::filter(ANNOTATION_FINAL == 'myeloid-cells') %>%
+                                set_rownames(rownames(.) %>% str_extract("[A-Za-z0-9-]+_(.*)",
+                                                                         group = 1)), 
+                              design = ~ less18M)
+vst_m <- vst(dds_m, blind=TRUE)
+
+DESeq2::plotPCA(vst_m, intgroup=c("less18M", "Study"))
+
+dds_m <- DESeq(dds_m)
+plotDispEsts(dds_m)
+resultsNames(dds_m)
+res_m <- results(dds_m)
+res_m <- lfcShrink(dds_m,
+                 contrast='less18M_TRUE_vs_FALSE',
+                 type='ashr',
+                 res=res_m)
+res_tbl_m <- res_m %>%
+        data.frame() %>%
+        rownames_to_column(var="gene") %>%
+        as_tibble()
+
+sig_res_m <- dplyr::filter(res_tbl_m, padj < 0.05) %>%
+        dplyr::arrange(padj)
+
+## ggplot of top genes
+normalized_counts_m <- counts(dds_m, 
+                            normalized = TRUE)
+
+## Order results by padj values
+top20_sig_genes_m <- sig_res_m %>%
+        dplyr::arrange(padj) %>%
+        dplyr::pull(gene) %>%
+        head(n=20)
+
+
+top20_sig_norm_m <- data.frame(normalized_counts_m) %>%
+        rownames_to_column(var = "gene") %>%
+        dplyr::filter(gene %in% top20_sig_genes_m)
+
+gathered_top20_sig_m <- top20_sig_norm_m %>%
+        gather(colnames(top20_sig_norm_m)[2:length(colnames(top20_sig_norm_m))], key = "SampleID", value = "normalized_counts")
+        
+gathered_top20_sig_m <- inner_join(coldata %>% dplyr::filter(ANNOTATION_FINAL == 'myeloid-cells') %>%
+                                set_rownames(rownames(.) %>% str_extract("[A-Za-z0-9-]+_(.*)",
+                                                                         group = 1)) %>% 
+                                  mutate(SampleID = gsub('-', '.', rownames(.)) ) %>% 
+                                  .[, c("SampleID", "less18M" )], gathered_top20_sig_m, by = c("SampleID"))
+
+## plot using ggplot2
+ggplot(gathered_top20_sig_m) +
+        geom_point(aes(x = gene, 
+                       y = normalized_counts, 
+                       color = less18M), 
+                   position=position_jitter(w=0.1,h=0)) +
+        scale_y_log10() +
+        xlab("Genes") +
+        ylab("log10 Normalized Counts") +
+        ggtitle("Top 20 Significant DE Genes") +
+        theme_bw() +
+        theme(axis.text.x = element_text(angle = 45, hjust = 1)) + 
+        theme(plot.title = element_text(hjust = 0.5))
+
+
+sig_norm_m <- data.frame(normalized_counts_m) %>%
+        rownames_to_column(var = "gene") %>%
+        dplyr::filter(gene %in% sig_res_m$gene)
+      
+# Set a color palette
+heat_colors <- brewer.pal(6, "RdBu")
+
+# Run pheatmap using the metadata data frame for the annotation
+pheatmap(sig_norm_m[ , 2:length(colnames(sig_norm_m))], 
+    color = heat_colors, 
+    breaks = seq(-2, 2, length.out = 6),
+    cluster_rows = T, 
+    show_rownames = F,
+    annotation = coldata %>% dplyr::filter(ANNOTATION_FINAL == 'myeloid-cells') %>%
+                                set_rownames(rownames(.) %>% str_extract("[A-Za-z0-9-]+_(.*)",
+                                                                         group = 1)) %>% 
+      set_rownames(gsub('-', '.', rownames(.))) %>% .[, c("SampleID","less18M" )], 
+    border_color = NA, 
+    fontsize = 10, 
+    scale = "row", 
+    fontsize_row = 10, 
+    height = 20)        
+```
+
+### Single-cell
+
+```{r fig.height=8, fig.width=15}
+t_cells <- subset(seu, ANNOTATION_FINAL == 'T_cells')
+b_cells <- subset(seu, ANNOTATION_FINAL == 'B_cells')
+myeloid_cells <- subset(seu, ANNOTATION_FINAL == 'myeloid_cells')
+
+b_cells$less18M <- as.character(b_cells$less18M)
+Idents(b_cells) <- "less18M"
+b_cells.de.markers <- FindMarkers(b_cells, ident.1 = "TRUE", ident.2 = "FALSE") %>%
+  dplyr::filter(pct.1 > 0.05 & pct.2 > 0.05)
+
+t_cells$less18M <- as.character(t_cells$less18M)
+Idents(t_cells) <- "less18M"
+t_cells.de.markers <- FindMarkers(t_cells, ident.1 = "TRUE", ident.2 = "FALSE") %>%
+  dplyr::filter(pct.1 > 0.05 & pct.2 > 0.05)
+
+myeloid_cells$less18M <- as.character(myeloid_cells$less18M)
+Idents(myeloid_cells) <- "less18M"
+myeloid.de.markers <- FindMarkers(myeloid_cells, ident.1 = "TRUE", ident.2 = "FALSE") %>%
+  dplyr::filter(pct.1 > 0.05 & pct.2 > 0.05)
+
+plot_grid(volcano_plot(t_cells.de.markers) +
+            ggtitle('T-cells'),
+          volcano_plot(b_cells.de.markers) +
+            ggtitle('B-cells'),
+          volcano_plot(myeloid.de.markers) +
+            ggtitle('Myeloid cells'), 
+          nrow = 1)
+```
+
+```{r fig.height=15, fig.width=20}
+
+
+heatmap_tcells <- dittoHeatmap(t_cells, t_cells.de.markers %>% 
+                            filter(p_val_adj < 0.05 & avg_log2FC > 1) %>% 
+                            dplyr::arrange(desc(avg_log2FC)) %>% 
+                            rownames(),
+             order.by = 'less18M', annot.by = c('less18M', 'Study', 'SampleID'), silent=T,
+             # annot.colors = c("#87CEEBFF", "#DDA0DDFF"), 
+             main = 'T cells', 
+             breaks=seq(-2, 2, 0.2), heatmap.colors = colorRampPalette(c("#6495EDFF", "white", "#FF69B4FF"))(length(seq(-2, 2, 0.2)))) 
+
+heatmap_bcells <- dittoHeatmap(b_cells, b_cells.de.markers %>% 
+                            filter(p_val_adj < 0.05 & avg_log2FC > 1) %>% 
+                            dplyr::arrange(desc(avg_log2FC)) %>% 
+                            rownames(),
+             order.by = 'less18M', annot.by = c('less18M', 'Study', 'SampleID'), silent=T,
+             # annot.colors = c("#87CEEBFF", "#DDA0DDFF"), 
+             main = 'B cells', 
+             breaks=seq(-2, 2, 0.2), heatmap.colors = colorRampPalette(c("#6495EDFF", "white", "#FF69B4FF"))(length(seq(-2, 2, 0.2)))) 
+
+heatmap_myeloid <- dittoHeatmap(myeloid_cells, myeloid.de.markers %>% 
+                            filter(p_val_adj < 0.05 & avg_log2FC > 1) %>% 
+                            dplyr::arrange(desc(avg_log2FC)) %>% 
+                            rownames(),
+             order.by = 'less18M', annot.by = c('less18M', 'Study', 'SampleID'), silent=T,
+             # annot.colors = c("#87CEEBFF", "#DDA0DDFF"), 
+             main = 'Myeloid cells',
+             breaks=seq(-2, 2, 0.2), heatmap.colors = colorRampPalette(c("#6495EDFF", "white", "#FF69B4FF"))(length(seq(-2, 2, 0.2)))) 
+
+plot_grid(heatmap_tcells[[4]], heatmap_bcells[[4]], heatmap_myeloid[[4]], nrow = 1)
+```
+
+# Scatter plots
+
+```{r echo=FALSE, fig.height=7, fig.width=7}
+
+
+scatterplot_by_study <- function(seu_h, study) {
+  seu_h$less18M <- as.character(seu_h$less18M)
+  
+  seu_h$celltype.age <- paste(seu_h$ANNOTATION_FINAL, seu_h$less18M, sep = "_")
+  Idents(seu_h) <- "celltype.age"
+  seu_bulk_h <- AggregateExpression(subset(seu_h, Study == study), group.by = c("ANNOTATION_FINAL", "less18M"), return.seurat = TRUE)
+  
+  p1 = ''
+  p2 = ''
+  p3 = ''
+  p4 = ''
+  
+  try({
+    p1 <- CellScatter(seu_bulk_h, "T-cells_TRUE", "T-cells_FALSE")
+  p1 <- CellScatter(seu_bulk_h, "T-cells_TRUE", "T-cells_FALSE", highlight = p1$data %>% filter(abs(T.cells_TRUE - T.cells_FALSE) > 0.5) %>% rownames())
+  p1 <- LabelPoints(plot = p1, points = p1$data %>% filter(abs(T.cells_TRUE - T.cells_FALSE) > 0.5) %>% rownames(), repel = TRUE)
+  }, silent=T)
+  
+  try({
+  p2 <- CellScatter(seu_bulk_h, "B-cells_TRUE", "B-cells_FALSE")
+  p2 <- CellScatter(seu_bulk_h, "B-cells_TRUE", "B-cells_FALSE", highlight = p2$data %>% filter(abs(B.cells_FALSE - B.cells_TRUE) > 0.5) %>% rownames())
+  p2 <- LabelPoints(plot = p2, points = p2$data %>% filter(abs(B.cells_FALSE - B.cells_TRUE) > 0.5) %>% rownames(), repel = TRUE)
+  }, silent=T)
+  
+  try({
+  p3 <- CellScatter(seu_bulk_h, "myeloid-cells_TRUE", "myeloid-cells_FALSE")
+  p3 <- CellScatter(seu_bulk_h, "myeloid-cells_TRUE", "myeloid-cells_FALSE", highlight = p3$data %>% filter(abs(myeloid.cells_FALSE - myeloid.cells_TRUE) > 0.5) %>% rownames())
+  p3 <- LabelPoints(plot = p3, points = p3$data %>% filter(abs(myeloid.cells_FALSE - myeloid.cells_TRUE) > 0.5) %>% rownames(), repel = TRUE)
+  }, silent=T)
+  
+  try({
+  p4 <- CellScatter(seu_bulk_h, "malignant-cells_TRUE", "malignant-cells_FALSE")
+  p4 <- CellScatter(seu_bulk_h, "malignant-cells_TRUE", "malignant-cells_FALSE", highlight = p4$data %>% filter(abs(malignant.cells_FALSE - malignant.cells_TRUE) > 0.5) %>% rownames())
+  p4 <- LabelPoints(plot = p4, points =  p4$data %>% filter(abs(malignant.cells_FALSE - malignant.cells_TRUE) > 0.5) %>% rownames(), repel = TRUE)
+  }, silent=T)
+  
+  return(list(p1, p2, p3, p4))
+  
+}
+
+scatter_fetahu <- scatterplot_by_study(seu, 'fetahu')
+scatter_yuan <- scatterplot_by_study(seu, 'yuan')
+scatter_jansky <- scatterplot_by_study(seu, 'jansky')
+scatter_verhoeven <- scatterplot_by_study(seu, 'verhoeven')
+scatter_dong <- scatterplot_by_study(seu, 'dong')
+```
+
+```{r fig.height=10, fig.width=10}
+scatter_fetahu[[1]] + scatter_fetahu[[2]] + scatter_fetahu[[3]] + scatter_fetahu[[4]]
+scatter_yuan[[3]]
+scatter_jansky[[3]] + scatter_jansky[[4]]
+scatter_verhoeven[[1]] + scatter_verhoeven[[2]] + scatter_verhoeven[[3]] + scatter_verhoeven[[4]]
+scatter_dong[[1]] + scatter_dong[[3]] + scatter_dong[[4]]
+```
+
+```{r}
+scatter_fetahu[[1]]$data %>% 
+  dplyr::filter(colors != 'Unselected')
+```
+
+# T-cells
+
+```{r}
+t_cells_h <- subset(seu, ANNOTATION_FINAL == 'T_cells')
+
+t_cells_list <- lapply(t_cells_h$SampleID %>% unique, function(sample) {
+  
+  t_cell_sample <- subset(t_cells_h, SampleID == sample) %>% 
+    NormalizeData() %>%
+    FindVariableFeatures()%>%
+    ScaleData() %>%
+    RunPCA() %>% 
+    RunUMAP(dims = 1:20) %>%
+    FindNeighbors(dims = 1:20) %>%
+    FindClusters(resolution = 1.5)
+  
+  sce <- as.SingleCellExperiment(t_cell_sample)
+  colLabels(sce) <- t_cell_sample$RNA_snn_res.1.5
+  Idents(t_cell_sample) <- 'RNA_snn_res.1.5'
+  
+  # #cluster-wise annotation
+  pred_bped_main <- SingleR(test = sce, ref = bped, clusters=colLabels(sce),
+                            labels = bped$label.main, BPPARAM=MulticoreParam(15))
+  # # Create a named vector for RenameIdents
+  singleR_labels <- pred_bped_main$pruned.labels
+  names(singleR_labels) <- rownames(pred_bped_main)
+  
+  # Update cluster identities in Seurat object based on SingleR results
+  t_cell_sample <- RenameIdents(t_cell_sample, singleR_labels)
+  t_cell_sample[['SingleR_main']] <- Idents(t_cell_sample)
+  
+  Idents(t_cell_sample) <- 'RNA_snn_res.1.5'
+  # #cluster-wise annotation
+  pred_bped_fine <- SingleR(test = sce, ref = bped, clusters=colLabels(sce),
+                            labels = bped$label.fine, BPPARAM=MulticoreParam(15))
+  # # Create a named vector for RenameIdents
+  singleR_labels <- pred_bped_fine$pruned.labels
+  names(singleR_labels) <- rownames(pred_bped_fine)
+  
+  # Update cluster identities in Seurat object based on SingleR results
+  t_cell_sample <- RenameIdents(t_cell_sample, singleR_labels)
+  t_cell_sample[['SingleR_fine']] <- Idents(t_cell_sample)
+  
+  # scGate
+  message('scGate is going...')
+  t_cell_sample <- scGate(t_cell_sample, model = scGate_models_DB$human$TME_HiRes, ncores = 15)
+  
+  return(t_cell_sample)
+})
+
+qsave(t_cells_list, paste0(PREPRDATADIR, 't_cells_human_list_annotation.qs'))
+```
+
+```{r}
+t_cells_h <- t_cells_h %>%
+  NormalizeData() %>%
+  FindVariableFeatures() %>%
+  ScaleData() %>%
+  RunPCA(verbose=FALSE) %>%
+  RunHarmony(., 'SampleID',
+             lambda = 1, verbose = FALSE) %>%
+  RunUMAP(reduction = "harmony", dims = 1:20, verbose=F) %>%
+  FindNeighbors(dims = 1:20) %>%
+  FindClusters(resolution = seq(0.1, 1, 0.1))
+
+
+clustree(t_cells_h)
+DimPlot(t_cells_h, group.by = 'RNA_snn_res.0.2')
+DimPlot(t_cells_h, group.by = 'Study', cols = my_colors)
+DimPlot(t_cells_h, group.by = 'SampleID')
+
+t_cells_h <- scGate(t_cells_h, model = scGate_models_DB$human$TME_HiRes, ncores = 30)
+
+DimPlot(t_cells_h, group.by = 'scGate_multi')
+```
+
+```{r fig.height=10, fig.width=9}
+FeaturePlot(t_cells_h, c('CD3E', 'CD3D', 'CD4', 'NCR1', 'CD8A', 'NCAM1'))
+```
+
