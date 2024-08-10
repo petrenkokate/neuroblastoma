@@ -845,14 +845,14 @@ plot_grid(volcano_plot(nk_cells.de.markers) +
             ggtitle('CD8+ T cells'),
           volcano_plot(cd4_cells.de.markers) +
             ggtitle('CD4+ T cells') +
-          volcano_plot(reg_cells.de.markers) +
+          volcano_plot(ctla_cells.de.markers) +
             ggtitle('CD4+CTLA4+ T cells'),
           nrow = 1, rel_widths = c(0.5, 0.5, 1, 1))
 ```
 
 # Malignant cells
 
-```{r  fig.height=5, fig.width=12}
+```{r echo=FALSE, fig.height=5, fig.width=12, message=FALSE, warning=FALSE}
 malig_cells <- subset(seu, annotation == 'malignant_cells')
 
 malig_cells <- malig_cells %>% 
@@ -883,7 +883,7 @@ malig_cells <- malig_cells %>%
 # 
 malig_cells <- subset(malig_cells, RNA_snn_res.0.1 != 3)
 
-clustree(malig_cells)
+# clustree(malig_cells)
 Idents(malig_cells) <- malig_cells$RNA_snn_res.0.1
 plot_grid(DimPlot(malig_cells, group.by = 'RNA_snn_res.0.1', cols = my_colors) +
   ggtitle("Clusters"), 
@@ -980,22 +980,27 @@ GS.tf <- getGeneSets(species = 'Mus musculus', library = "C3", subcategory = 'GT
 malig_cells <- escape::runEscape(malig_cells, 
                         method = "GSVA",
                         gene.sets = GS.hallmark, 
-                        groups = 2802, 
+                        groups = 6000, 
                         min.size = 5,
                         new.assay.name = "hallmark.GSVA")
+
+qsave(malig_cells, paste0(PREPRDATADIR, 'malig_cells_mouse_gsvas1.qs'))
 
 malig_cells <- escape::runEscape(malig_cells, 
                         method = "GSVA",
                         gene.sets = GS.reactome, 
-                        groups = 2802, 
+                        groups = 6000, 
                         min.size = 5,
                         new.assay.name = "reactome.GSVA")
+qsave(malig_cells, paste0(PREPRDATADIR, 'malig_cells_mouse_gsvas2.qs'))
 
 malig_cells <- escape::runEscape(malig_cells, 
                         method = "GSVA",
                         gene.sets = GS.tf, 
-                        groups = 2802, 
+                        groups = 6000, 
                         min.size = 5,
                         new.assay.name = "tf.GSVA")
+
+qsave(malig_cells, paste0(PREPRDATADIR, 'malig_cells_mouse_gsvas3.qs'))
 ```
 
