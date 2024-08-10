@@ -611,6 +611,21 @@ reactome_tcells <- enrichPathway(gene=t_cells.de.markers %>%
 # barplot(reactome_tcells, showCategory=20) 
 ```
 
+# Some immune genes
+
+```{r}
+genes <- 'Ccr7/Ccr2/Il7r/Klrk1/Il2rb/Il6st/Ifngr2/Fcer1g/Ccr5/Il21r/Il18rap/Klrc2/Il10ra/Cxcr4/Lilrb4a/Il4ra' %>% str_split(., '/') %>% .[[1]]
+genes <- c(genes, 'Grap2/Cd3g/Cd3d/Cd3e/Cd28/Lck/Ctla4/Icos/Btla/Ppp2r5a/Map3k14' %>% str_split(., '/') %>% .[[1]],  'Itgb1/Cd3g/Cd8b1/Cd3d/Klrk1/Cd3e/Slamf6/H2-Q7/Sell/Raet1e/Ifitm2/Itga4/Cd8a' %>% str_split(., '/') %>% .[[1]] ) %>% unique
+
+heatmap_tcells_immune <- dittoHeatmap(subset(seu, annotation == 'T_cells'), genes,
+             order.by = 'age', annot.by = 'age', silent=T,
+             annot.colors = c("#87CEEBFF", "#DDA0DDFF"), 
+             main = 'T cells', 
+             breaks=seq(-2, 2, 0.2), heatmap.colors = colorRampPalette(c("#6495EDFF", "white", "#FF69B4FF"))(length(seq(-2, 2, 0.2))))
+
+plot_grid(heatmap_tcells_immune[[4]])
+```
+
 ## Composition
 
 ```{r  fig.height=5, fig.width=12}
@@ -882,7 +897,7 @@ wp_bcells <- enrichWP(b_cells.de.markers %>%
                                    column = "ENTREZID",
                                    keytype = "SYMBOL"), organism = "Mus musculus")
 
-barplot(wp_bcells, showCategory=20) 
+# barplot(wp_bcells, showCategory=20) 
 ```
 
 ## Composition
@@ -1179,7 +1194,7 @@ VlnPlot(malig_cells, c('Fos', 'Junb'))
 FeaturePlot(malig_cells, c('Fos', 'Junb'))
 ```
 
-```{r}
+```{r eval=FALSE, include=FALSE}
 library("pathview")
 gene.data <- subset(seu_bulk, annotation == 'malignant-cells')
 
@@ -1206,16 +1221,17 @@ mmu04010  <- pathview(gene.data  = gene.data,
                      species    = "mouse")
 ```
 
-```{r}
+# ```{r}
+# 
+# viewPathway("c-FOS activation by phospho ERK1/2", 
+#             readable = TRUE, 
+#             organism = 'mouse',
+#             foldChange = geneList)
+# 
+# 
+# R-MMU-450325.1
+# ```
 
-viewPathway("c-FOS activation by phospho ERK1/2", 
-            readable = TRUE, 
-            organism = 'mouse',
-            foldChange = geneList)
-
-
-R-MMU-450325.1
-```
 ## Enrichment
 
 ```{r fig.height=9}
@@ -1279,8 +1295,8 @@ reactome_malcells_neg <- enrichPathway(gene=malignant.de.markers %>%
 barplot(reactome_malcells_pos, showCategory=20) +
   ggtitle('Malignant (positive)')
 
-barplot(reactome_malcells_neg, showCategory=20) +
-  ggtitle('Malignant (negative)')
+# barplot(reactome_malcells_neg, showCategory=20) +
+#   ggtitle('Malignant (negative)')
 
 library(enrichR)
 DEenrichRPlot(malig_cells, ident.1 = 'young', ident.2 = 'adult',
@@ -1318,6 +1334,7 @@ ggplot(ent.data, aes(x=cluster, y=entropy)) +
     geom_violin() +
     stat_summary(fun=median, geom="point")
 ```
+
 ```{r}
 dittoBarPlot(malig_cells, 'Phase', group.by = 'age', color.panel = my_colors)
 ```
