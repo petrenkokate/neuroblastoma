@@ -737,11 +737,6 @@ plot_grid(DimPlot(t_cells, group.by = 'RNA_snn_res.0.2', cols = my_colors) +
   nrow = 1, rel_widths = c(0.95, 1))
 ```
 
-
-```{r fig.height=19}
-DimHeatmap(t_cells, dims = 1:20, cells = 500, balanced = TRUE)
-```
-
 ```{r fig.height=6, fig.width=12}
 
 tcells.clusters.markers <- FindAllMarkers(t_cells, only.pos = TRUE, min.pct = 0.25)
@@ -938,6 +933,14 @@ ego_nkcells_pos <- enrichGO(gene = malignant.de.markers %>%
                       qvalueCutoff  = 0.05,
                       readable      = TRUE)
 
+barplot(ego_nkcells_pos, showCategory=10, font.size = 14) +
+  scale_fill_gradient(low = "#FF69B4FF", high = "#6495EDFF") +
+  ggtitle('Malignant (positive)') +
+  theme(plot.title = element_text(size=22),
+        legend.text = element_text(size=12),
+         legend.title = element_text(size=14),
+        legend.key.size = unit(1, 'cm'))
+
 ego_nkcells_neg <- enrichGO(gene = malignant.de.markers %>% 
                             filter(p_val_adj < 0.05 & avg_log2FC < -0.5) %>% 
                             rownames() %>% 
@@ -951,14 +954,6 @@ ego_nkcells_neg <- enrichGO(gene = malignant.de.markers %>%
                       pvalueCutoff  = 0.05,
                       qvalueCutoff  = 0.05,
                       readable      = TRUE)
-
-barplot(ego_nkcells_pos, showCategory=10, font.size = 14) +
-  scale_fill_gradient(low = "#FF69B4FF", high = "#6495EDFF") +
-  ggtitle('Malignant (positive)') +
-  theme(plot.title = element_text(size=22),
-        legend.text = element_text(size=12),
-         legend.title = element_text(size=14),
-        legend.key.size = unit(1, 'cm'))
 
 barplot(ego_nkcells_neg, showCategory=10, font.size = 14) +
   scale_fill_gradient(low = "#FF69B4FF", high = "#6495EDFF") +
