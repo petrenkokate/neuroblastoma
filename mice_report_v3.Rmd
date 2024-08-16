@@ -52,6 +52,7 @@ library(msigdbr)
 library(qs)
 # devtools::install_github("ncborcherding/escape")
 # devtools::install_github("rcastelo/GSVA")
+library(escape)
 ```
 
 ```{r global variables, include=FALSE}
@@ -77,8 +78,6 @@ young <- Read10X_h5(paste0(DATADIR,
                            'mice_scRNA-seq_v1/20240625_YuvalShaked_Chen/CellRanger/Counting_2024A/P_2024A/filtered_feature_bc_matrix.h5'))
 adult <- Read10X_h5(paste0(DATADIR,
                            'mice_scRNA-seq_v1/20240625_YuvalShaked_Chen/CellRanger/Counting_2024A/A_2024A/filtered_feature_bc_matrix.h5'))
-
-'/bigdata/katepetre'
 ```
 
 # QC - Filtration
@@ -286,7 +285,7 @@ annotate <- function(seu) {
 }
 ```
 
-```{r include=FALSE}
+```{r eval=FALSE, include=FALSE}
 annotated_samples <- mclapply(list(young, adult),
                               annotate, mc.cores = 2)
 
@@ -295,7 +294,7 @@ names(annotated_samples) <- c('P', 'A')
 seu <- merge(annotated_samples[[1]], annotated_samples[[2]], add.cell.ids = c("P", "A"))
 ```
 
-```{r include=FALSE}
+```{r eval=FALSE, include=FALSE}
 seu <- seu %>% 
   NormalizeData() %>% 
   FindVariableFeatures() %>% 
@@ -317,7 +316,7 @@ seu <- seu %>%
 seu <- JoinLayers(seu)
 ```
 
-```{r echo=FALSE, fig.height=5, fig.width=12}
+```{r eval=FALSE, fig.height=5, fig.width=12, include=FALSE}
 seu <- seu %>% 
   FindNeighbors(dims = 1:10) %>%
   FindClusters(resolution = 0.1) 
@@ -338,6 +337,14 @@ new.cluster.ids <- c('0'='malignant_cells',
 seu <- RenameIdents(seu, new.cluster.ids)
 seu$annotation <- Idents(seu)
 
+# qsave(seu, paste0(PREPRDATADIR, 'seu_mouse.qs'))
+```
+
+```{r echo=FALSE, fig.height=5, fig.width=12}
+seu <- qread(paste0(PREPRDATADIR, 'seu_mouse.qs'))
+
+Idents(object = seu) <- "annotation"
+
 plot_grid(DimPlot(seu, cols = c("#FF69B4FF", "#40E0D0FF", "#6495EDFF",  "#9ACD32FF", "#BA55D3FF")) +
   ggtitle("Annotation"), 
   DimPlot(seu, group.by = 'age', cols = c("#6495EDFF", "#FF69B4FF")) +
@@ -353,11 +360,13 @@ FeaturePlot(seu, 'Mycn')
 
 We observe more malignant cells in adult mice and a higher proportion of immune cells in young mice. However, comparing B cells between age groups is challenging due to the low number of B cells in adult mice.
 
-```{r fig.height=4, fig.width=13}
+```{r eval=FALSE, include=FALSE}
 s.genes <- cc.genes$s.genes
 g2m.genes <- cc.genes$g2m.genes
 seu <- CellCycleScoring(seu, s.features = s.genes, g2m.features = g2m.genes)
+```
 
+```{r fig.height=4, fig.width=13}
 plot_grid(dittoBarPlot(seu, 'age', group.by = 'annotation', color.panel = my_colors),
           dittoBarPlot(seu, 'Phase', group.by = 'annotation', color.panel = my_colors),
           dittoBarPlot(seu, 'annotation', group.by = 'age', color.panel = my_colors),
@@ -487,7 +496,7 @@ for (i in seq_along(replicates_list)) {
 }
 ```
 
-```{r}
+```{r include=FALSE}
 seu_bulk <- subset(seu, rep %in% c('rep1', 'rep2', 'rep3'))
 seu_bulk <- AggregateExpression(seu_bulk, return.seurat = T, slot = "counts", assays = "RNA", 
                             group.by = c("annotation", "age", 'rep'))
@@ -575,6 +584,12 @@ plot_grid(heatmap_bcells[[4]], heatmap_myelcells[[4]], nrow=1)
 ```
 
 # T-cells
+
+```{r fig.height=12, fig.width=8}
+volcano_plot(t_cells.de.markers) +
+            ggtitle('T-cells') +
+  ylim(c(0, 75))
+```
 
 ## Positive 
 
@@ -685,7 +700,7 @@ barplot(reactome_tcells, showCategory=10, font.size = 14) +
 
 We found 4 clusters of T-cells.
 
-```{r  fig.height=5, fig.width=12}
+```{r eval=FALSE, fig.height=5, fig.width=12, include=FALSE}
 t_cells <- subset(seu, annotation == 'T_cells')
 
 t_cells <- t_cells %>% 
@@ -728,6 +743,10 @@ t_cells <- subset(t_cells, RNA_snn_res.0.2 != 5)
 t_cells <- subset(t_cells, RNA_snn_res.0.2 != 4)
 
 # clustree(t_cells)
+```
+
+```{r echo=FALSE, fig.height=5, fig.width=12}
+t_cells <- qread(paste0(PREPRDATADIR, 't_cells_mouse_ssGSEAs3.qs'))
 
 Idents(t_cells) <- t_cells$RNA_snn_res.0.2
 plot_grid(DimPlot(t_cells, group.by = 'RNA_snn_res.0.2', cols = my_colors) +
@@ -750,18 +769,26 @@ DotPlot(t_cells, top5$gene, cols = c('lightgrey', "#BA55D3FF")) +
 ```
 
 
+## DEG by age
+
+```{r fig.height=6, fig.width=8}
+Idents(t_cells) <- 'age'
+VlnPlot(t_cells, c('Cd4', 'Cd8a', 'Cd8b1', 'Ctla4', 'Ncr1', 'Klrk1'), cols=c("#FF69B4FF", "#6495EDFF"), ncol = 3)
+```
+
 ## Annotation
 
 ```{r fig.height=10, fig.width=10}
+Idents(t_cells) <- t_cells$RNA_snn_res.0.2
 VlnPlot(t_cells, c('Cd3e', 'Cd3d', 'Cd3g', 'Klrb1c', 'Ncr1', 'Klrk1', 'Cd4', 'Cd8a', 'Cd8b1',
                    'Tbx21', 'Cxcr3', 'Il2ra', 'Entpd1', 'Foxp3','Ctla4'))
 ```
 
-```{r}
+```{r include=FALSE}
 new.cluster.ids <- c('0'='CD4_Tcells',
                      '1'='CD8_Tcells',
                      '2'='NK_cells',
-                     '3'='CD4_CTLA4_Tcells'
+                     '3'='CD4_Tcells'
 )
 
 t_cells <- RenameIdents(t_cells, new.cluster.ids)
@@ -779,6 +806,14 @@ t_cells$Annotation <- Idents(t_cells)
 DimPlot(t_cells, cols = my_colors)
 ```
 
+```{r echo=FALSE, fig.height=5, fig.width=12}
+plot_grid(DimPlot(t_cells, group.by = 'Annotation', cols = my_colors) +
+  ggtitle("Annotation"), 
+  DimPlot(t_cells, group.by = 'age', cols = c("#6495EDFF", "#FF69B4FF")) +
+  ggtitle("Age"),
+  nrow = 1, rel_widths = c(1, 0.85))
+```
+
 ```{r fig.height=4, fig.width=13}
 plot_grid(dittoBarPlot(t_cells, 'age', group.by = 'Annotation', color.panel = my_colors),
           dittoBarPlot(t_cells, 'Phase', group.by = 'Annotation', color.panel = my_colors),
@@ -788,11 +823,12 @@ plot_grid(dittoBarPlot(t_cells, 'age', group.by = 'Annotation', color.panel = my
 
 # qsave(t_cells, paste0(PREPRDATADIR, 't_cells_mouse_v2.qs'))
 ```
+
 ## Scatter plots
 
 The plots compare gene expression between adult and young mice across different cell types, showing a strong overall correlation. The difference in hemoglobin gene expression in CD4+ T cells can likely be attributed to the small number of cells.
 
-```{r echo=FALSE, fig.height=7, fig.width=7}
+```{r echo=FALSE, fig.height=5, fig.width=15}
 t_cells$celltype.age <- paste(t_cells$de_annotation, t_cells$age, sep = "_")
 Idents(t_cells) <- "celltype.age"
 t_cells_bulk <- AggregateExpression(t_cells, group.by = c("de_annotation", "age"), return.seurat = TRUE)
@@ -809,11 +845,7 @@ p3 <- CellScatter(t_cells_bulk, "NK-cells_young", "NK-cells_adult")
 p3 <- CellScatter(t_cells_bulk, "NK-cells_young", "NK-cells_adult", highlight = p3$data %>% filter(abs(NK.cells_young - NK.cells_adult) > 1) %>% rownames())
 p3 <- LabelPoints(plot = p3, points = p3$data %>% filter(abs(NK.cells_young - NK.cells_adult) > 1) %>% rownames(), repel = TRUE)
 
-p4 <- CellScatter(t_cells_bulk, "CD4-CTLA4-Tcells_young", "CD4-CTLA4-Tcells_adult")
-p4 <- CellScatter(t_cells_bulk, "CD4-CTLA4-Tcells_young", "CD4-CTLA4-Tcells_adult", highlight = p4$data %>% filter(abs(`CD4.CTLA4.Tcells_young` - `CD4.CTLA4.Tcells_adult`) > 1) %>% rownames())
-p4 <- LabelPoints(plot = p4, points =  p4$data %>% filter(abs(`CD4.CTLA4.Tcells_young` - `CD4.CTLA4.Tcells_adult`) > 1) %>% rownames(), repel = TRUE)
-
-p1 + p2 + p3 + p4
+p1 + p2 + p3 
 ```
 
 ## DE based on single-cell level
@@ -830,24 +862,194 @@ cd8_cells.de.markers <- FindMarkers(t_cells,
 cd4_cells.de.markers <- FindMarkers(t_cells, 
                                   ident.1 = "CD4_Tcells_young", ident.2 = "CD4_Tcells_adult", 
                                   min.pct = 0.25)
-ctla_cells.de.markers <- FindMarkers(t_cells, 
-                                  ident.1 = "CD4_CTLA4_Tcells_young", ident.2 = "CD4_CTLA4_Tcells_adult", 
-                                  min.pct = 0.25)
 
 plot_grid(volcano_plot(nk_cells.de.markers) +
             ggtitle('NK cells'),
           volcano_plot(cd8_cells.de.markers) +
             ggtitle('CD8+ T cells'),
           volcano_plot(cd4_cells.de.markers) +
-            ggtitle('CD4+ T cells') +
-          volcano_plot(ctla_cells.de.markers) +
-            ggtitle('CD4+CTLA4+ T cells'),
-          nrow = 1, rel_widths = c(0.5, 0.5, 1, 1))
+            ggtitle('CD4+ T cells'),
+          nrow = 1, rel_widths = c(1, 0.5, 1))
+```
+
+## Single-cell Gene Set Enrichment Analysis
+
+### NK cells
+
+```{r include=FALSE}
+GS.hallmark <- getGeneSets(species = 'Mus musculus', library = "H")
+GS.reactome <- getGeneSets(species = 'Mus musculus', library = "C2", subcategory = 'CP:REACTOME')
+GS.tf <- getGeneSets(species = 'Mus musculus', library = "C3", subcategory = 'GTRD')
+```
+
+```{r include=FALSE}
+t_cells <- performNormalization(t_cells, 
+                                      assay = "hallmark.ssGSEA", 
+                                      gene.sets = GS.hallmark, 
+                                      scale.factor = t_cells$nFeature_RNA)
+hallmark.markers <- FindMarkers(t_cells, 
+                              assay = "hallmark.ssGSEA_normalized", 
+                              ident.1 = "NK_cells_young", ident.2 = "NK_cells_adult",
+                              min.pct = 0,
+                              logfc.threshold = 0)
+
+t_cells <- performNormalization(t_cells, 
+                                      assay = "reactome.ssGSEA", 
+                                      gene.sets = GS.reactome, 
+                                      scale.factor = t_cells$nFeature_RNA)
+reactome.markers <- FindMarkers(t_cells, 
+                              assay = "reactome.ssGSEA_normalized", 
+                              ident.1 = "NK_cells_young", ident.2 = "NK_cells_adult",
+                              min.pct = 0,
+                              logfc.threshold = 0)
+
+t_cells <- performNormalization(t_cells, 
+                                      assay = "tf.ssGSEA", 
+                                      gene.sets = GS.tf, 
+                                      scale.factor = t_cells$nFeature_RNA)
+tf.markers <- FindMarkers(t_cells, 
+                              assay = "tf.ssGSEA_normalized", 
+                              ident.1 = "NK_cells_young", ident.2 = "NK_cells_adult",
+                              min.pct = 0,
+                              logfc.threshold = 0)
+```
+
+**TGF-Beta Signaling:** Enriched in NK cells from adult mice. TGF-beta signaling is known to suppress NK cell activity, which could suggest a more immunosuppressive environment in adult mice’s tumors.
+
+**NF-kB Activation (TRAF6 mediated):** Enriched in adult mice, a pathway that is often associated with inflammatory responses and could suggest heightened activity in NK cells from adult tumors.
+
+```{r fig.width=13}
+heatmapEnrichment(subset(t_cells, de_annotation == 'NK_cells'), 
+                  group.by = "age",
+                  gene.set.use = hallmark.markers %>% 
+                    dplyr::filter(p_val_adj < 0.05) %>% 
+                    dplyr::top_n(10, wt = abs(avg_log2FC)) %>% 
+                    rownames(.),
+                  assay = "hallmark.ssGSEA_normalized") +
+  scale_fill_gradientn(colors = rev(brewer.pal(11, "RdYlBu"))) +
+  theme(legend.position="right", legend.direction = "vertical") +
+  ggtitle('Hallmarks (NK cells)')
+
+
+```
+
+```{r fig.width=13}
+heatmapEnrichment(subset(t_cells, de_annotation == 'NK_cells'), 
+                  group.by = "age",
+                  gene.set.use = reactome.markers %>% 
+                    dplyr::filter(p_val_adj < 0.05) %>% 
+                    dplyr::top_n(10, wt = abs(avg_log2FC)) %>% 
+                    rownames(.),
+                  assay = "reactome.ssGSEA_normalized") +
+  scale_fill_gradientn(colors = rev(brewer.pal(11, "RdYlBu"))) +
+  theme(legend.position="right", legend.direction = "vertical") +
+  ggtitle('Reactome (NK cells)')
+
+
+```
+
+```{r fig.width=13}
+heatmapEnrichment(subset(t_cells, de_annotation == 'NK_cells'), 
+                  group.by = "age",
+                  gene.set.use = tf.markers %>% 
+                    dplyr::filter(p_val_adj < 0.05) %>% 
+                    dplyr::top_n(10, wt = abs(avg_log2FC)) %>% 
+                    rownames(.),
+                  assay = "tf.ssGSEA_normalized") +
+  scale_fill_gradientn(colors = rev(brewer.pal(11, "RdYlBu"))) +
+  theme(legend.position="right", legend.direction = "vertical") +
+  ggtitle('TFs (NK cells)')
+
+
+```
+
+### CD4+ T cells
+
+```{r include=FALSE}
+t_cells <- performNormalization(t_cells, 
+                                      assay = "hallmark.ssGSEA", 
+                                      gene.sets = GS.hallmark, 
+                                      scale.factor = t_cells$nFeature_RNA)
+hallmark.markers <- FindMarkers(t_cells, 
+                              assay = "hallmark.ssGSEA_normalized", 
+                              ident.1 = "CD4_Tcells_young", ident.2 = "CD4_Tcells_adult",
+                              min.pct = 0,
+                              logfc.threshold = 0)
+
+t_cells <- performNormalization(t_cells, 
+                                      assay = "reactome.ssGSEA", 
+                                      gene.sets = GS.reactome, 
+                                      scale.factor = t_cells$nFeature_RNA)
+reactome.markers <- FindMarkers(t_cells, 
+                              assay = "reactome.ssGSEA_normalized", 
+                              ident.1 = "CD4_Tcells_young", ident.2 = "CD4_Tcells_adult",
+                              min.pct = 0,
+                              logfc.threshold = 0)
+
+t_cells <- performNormalization(t_cells, 
+                                      assay = "tf.ssGSEA", 
+                                      gene.sets = GS.tf, 
+                                      scale.factor = t_cells$nFeature_RNA)
+tf.markers <- FindMarkers(t_cells, 
+                              assay = "tf.ssGSEA_normalized", 
+                              ident.1 = "CD4_Tcells_young", ident.2 = "CD4_Tcells_adult",
+                              min.pct = 0,
+                              logfc.threshold = 0)
+```
+
+```{r fig.width=13}
+heatmapEnrichment(subset(t_cells, de_annotation == 'CD4_Tcells'), 
+                  group.by = "age",
+                  gene.set.use = hallmark.markers %>% 
+                    dplyr::filter(p_val_adj < 0.05) %>% 
+                    dplyr::top_n(10, wt = abs(avg_log2FC)) %>% 
+                    rownames(.),
+                  assay = "hallmark.ssGSEA_normalized") +
+  scale_fill_gradientn(colors = rev(brewer.pal(11, "RdYlBu"))) +
+  theme(legend.position="right", legend.direction = "vertical") +
+  ggtitle('Hallmarks (CD4+ T cells)')
+
+
+```
+
+```{r fig.width=13}
+heatmapEnrichment(subset(t_cells, de_annotation == 'CD4_Tcells'), 
+                  group.by = "age",
+                  gene.set.use = reactome.markers %>% 
+                    dplyr::filter(p_val_adj < 0.05) %>% 
+                    dplyr::top_n(10, wt = abs(avg_log2FC)) %>% 
+                    rownames(.),
+                  assay = "reactome.ssGSEA_normalized") +
+  scale_fill_gradientn(colors = rev(brewer.pal(11, "RdYlBu"))) +
+  theme(legend.position="right", legend.direction = "vertical") +
+  ggtitle('Reactome (CD4+ T cells)')
+
+
+```
+
+```{r fig.width=13}
+heatmapEnrichment(subset(t_cells, de_annotation == 'CD4_Tcells'), 
+                  group.by = "age",
+                  gene.set.use = tf.markers %>% 
+                    dplyr::filter(p_val_adj < 0.05) %>% 
+                    dplyr::top_n(10, wt = abs(avg_log2FC)) %>% 
+                    rownames(.),
+                  assay = "tf.ssGSEA_normalized") +
+  scale_fill_gradientn(colors = rev(brewer.pal(11, "RdYlBu"))) +
+  theme(legend.position="right", legend.direction = "vertical") +
+  ggtitle('TFs (CD4+ T cells)')
+
+
 ```
 
 # Malignant cells
 
-```{r echo=FALSE, fig.height=5, fig.width=12, message=FALSE, warning=FALSE}
+```{r fig.height=12, fig.width=8}
+volcano_plot(malignant.de.markers) +
+            ggtitle('Malignant cells')
+```
+
+```{r eval=FALSE, fig.height=5, fig.width=12, message=FALSE, warning=FALSE, include=FALSE}
 malig_cells <- subset(seu, annotation == 'malignant_cells')
 
 malig_cells <- malig_cells %>% 
@@ -879,6 +1081,11 @@ malig_cells <- malig_cells %>%
 malig_cells <- subset(malig_cells, RNA_snn_res.0.1 != 3)
 
 # clustree(malig_cells)
+```
+
+```{r fig.height=5, fig.width=12,}
+malig_cells <- qread(paste0(PREPRDATADIR, 'malig_cells_mouse_gsvas3_ssGSEA.qs'))
+
 Idents(malig_cells) <- malig_cells$RNA_snn_res.0.1
 plot_grid(DimPlot(malig_cells, group.by = 'RNA_snn_res.0.1', cols = my_colors) +
   ggtitle("Clusters"), 
@@ -917,7 +1124,7 @@ FeaturePlot(malig_cells, 'Mycn')
 
 ## Enrichment
 
-```{r fig.height=9}
+```{r fig.height=10, fig.width=12}
 
 ego_nkcells_pos <- enrichGO(gene = malignant.de.markers %>% 
                             filter(p_val_adj < 0.05 & avg_log2FC > 0.5) %>% 
@@ -964,38 +1171,180 @@ barplot(ego_nkcells_neg, showCategory=10, font.size = 14) +
         legend.key.size = unit(1, 'cm'))
 ```
 
+## Some interesting genes
+
+We have Fos that is up-regulated in young mice.  It relates to the differentiation of neuroblastoma to neuronal cells. Also, other Junb gene is up-regulated. They are in one AP-1 complex.
+I found an article. It's really old. But they say: "The increase in the c-fos gene expression is observed during the differentiation of NB-1 cells into neuronal cells"
+
+Nfkbia:
+
+Deletion and low expression of NFKBIA are associated with poor prognosis in lower-grade glioma patients
+
+Klf4:
+
+KLF4 can act as a tumor suppressor in human malignant neuroblastoma, which is a deadly tumor mostly in children, by inhibiting the cell cycle and activating the cell differentiation and death pathways.
+
+Btg2:
+
+BTG anti-proliferation factor 2
+ 
+```{r fig.height=8}
+Idents(malig_cells) <- 'age'
+VlnPlot(malig_cells, c('Fos', 'Junb', 'Nfkbia', 'Klf4', 'Btg2', 'Irf1'), cols=c("#FF69B4FF", "#6495EDFF"))
+```
+
+## Immediate Early genes
+
+```{r fig.height=8, fig.width=8}
+genes <- c(
+  "Atf3", "Bhlhe40", "Ccl2", "Ccn1", "Ccn2", "Ccnl1", "Cebpd", 
+  "Csrnp1", "Cxcl3", "Dusp1", "Dusp5", "Dusp6", "Egr1", 
+  "Egr3", "F3", "Fos", "Fosb", "Gadd45b", "Myc",
+  "Gem", "Hbegf", "Ier3", "Il6", "Jun", "Junb", "Klf10", 
+  "Klf6", "Klhl21", "Ldlr", "Mcl1", "Nfkbia", "Nfkbiz", 
+  "Nr2c2", "Nr4a1", "Nr4a2", "Plau", "Pmaip1", "Rcan1", 
+  "Sgk1", "Slc2a3", "Srf", "Tnfaip3", "Trib1", "Tsc22d1", 
+  "Zfp36"
+)
+
+heatmap_maligcells <- dittoHeatmap(malig_cells, genes,
+             order.by = 'age', annot.by = 'age', 
+             silent=T,
+             annot.colors = c("#87CEEBFF", "#DDA0DDFF"), 
+             main = 'Malignant cells', 
+             breaks=seq(-2, 2, 0.2), heatmap.colors = colorRampPalette(c("#6495EDFF", "white", "#FF69B4FF"))(length(seq(-2, 2, 0.2))))
+
+plot_grid(heatmap_maligcells[[4]], nrow=1)
+```
+
 ## Single-cell Gene Set Enrichment Analysis
 
-```{r}
-library(escape)
-GS.hallmark <- getGeneSets(species = 'Mus musculus', library = "H")
-GS.reactome <- getGeneSets(species = 'Mus musculus', library = "C2", subcategory = 'CP:REACTOME')
-GS.tf <- getGeneSets(species = 'Mus musculus', library = "C3", subcategory = 'GTRD')
-
+```{r eval=FALSE, include=FALSE}
 malig_cells <- escape::runEscape(malig_cells, 
-                        method = "GSVA",
+                        method = "ssGSEA",
                         gene.sets = GS.hallmark, 
-                        groups = 6000, 
+                        groups = 500, 
                         min.size = 5,
-                        new.assay.name = "hallmark.GSVA")
+                        new.assay.name = "hallmark.ssGSEA",
+                        BPPARAM = MulticoreParam(15))
 
 qsave(malig_cells, paste0(PREPRDATADIR, 'malig_cells_mouse_gsvas1.qs'))
 
 malig_cells <- escape::runEscape(malig_cells, 
-                        method = "GSVA",
-                        gene.sets = GS.reactome, 
-                        groups = 6000, 
-                        min.size = 5,
-                        new.assay.name = "reactome.GSVA")
+                                 method = "ssGSEA",
+                                 gene.sets = GS.reactome,
+                                 groups = 500,
+                                 min.size = 5,
+                                 new.assay.name = "reactome.ssGSEA",
+                                 BPPARAM = MulticoreParam(20))
 qsave(malig_cells, paste0(PREPRDATADIR, 'malig_cells_mouse_gsvas2.qs'))
 
 malig_cells <- escape::runEscape(malig_cells, 
-                        method = "GSVA",
+                        method = "ssGSEA",
                         gene.sets = GS.tf, 
                         groups = 6000, 
                         min.size = 5,
-                        new.assay.name = "tf.GSVA")
+                        new.assay.name = "tf.ssGSEA",
+                        BPPARAM = MulticoreParam(15))
 
-qsave(malig_cells, paste0(PREPRDATADIR, 'malig_cells_mouse_gsvas3.qs'))
+qsave(malig_cells, paste0(PREPRDATADIR, 'malig_cells_mouse_gsvas3_ssGSEA.qs'))
 ```
+
+```{r include=FALSE}
+malig_cells <- performNormalization(malig_cells, 
+                                      assay = "hallmark.ssGSEA", 
+                                      gene.sets = GS.hallmark, 
+                                      scale.factor = malig_cells$nFeature_RNA)
+hallmark.markers <- FindMarkers(malig_cells, 
+                              assay = "hallmark.ssGSEA_normalized", 
+                              ident.1 = "young", ident.2 = "adult",
+                              min.pct = 0,
+                              logfc.threshold = 0)
+
+malig_cells <- performNormalization(malig_cells, 
+                                      assay = "reactome.ssGSEA", 
+                                      gene.sets = GS.reactome, 
+                                      scale.factor = malig_cells$nFeature_RNA)
+reactome.markers <- FindMarkers(malig_cells, 
+                              assay = "reactome.ssGSEA_normalized", 
+                              ident.1 = "young", ident.2 = "adult",
+                              min.pct = 0,
+                              logfc.threshold = 0)
+
+malig_cells <- performNormalization(malig_cells, 
+                                      assay = "tf.ssGSEA", 
+                                      gene.sets = GS.tf, 
+                                      scale.factor = malig_cells$nFeature_RNA)
+tf.markers <- FindMarkers(malig_cells, 
+                              assay = "tf.ssGSEA_normalized", 
+                              ident.1 = "young", ident.2 = "adult",
+                              min.pct = 0,
+                              logfc.threshold = 0)
+```
+
+```{r fig.width=13}
+heatmapEnrichment(malig_cells, 
+                  group.by = "ident",
+                  gene.set.use = hallmark.markers %>% 
+                    dplyr::filter(p_val_adj < 0.05) %>% 
+                    dplyr::top_n(10, wt = abs(avg_log2FC)) %>% 
+                    rownames(.),
+                  assay = "hallmark.ssGSEA_normalized") +
+  scale_fill_gradientn(colors = rev(brewer.pal(11, "RdYlBu"))) +
+  theme(legend.position="right", legend.direction = "vertical") +
+  ggtitle('Hallmarks')
+
+
+```
+
+```{r fig.width=13}
+heatmapEnrichment(malig_cells, 
+                  group.by = "ident",
+                  gene.set.use = reactome.markers %>% 
+                    dplyr::filter(p_val_adj < 0.05) %>% 
+                    dplyr::top_n(10, wt = abs(avg_log2FC)) %>% 
+                    rownames(.),
+                  assay = "reactome.ssGSEA_normalized") +
+  scale_fill_gradientn(colors = rev(brewer.pal(11, "RdYlBu"))) +
+  theme(legend.position="right", legend.direction = "vertical") +
+  ggtitle('Reactome')
+
+
+```
+
+```{r fig.width=13}
+heatmapEnrichment(malig_cells, 
+                  group.by = "ident",
+                  gene.set.use = tf.markers %>% 
+                    dplyr::filter(p_val_adj < 0.05) %>% 
+                    dplyr::top_n(10, wt = abs(avg_log2FC)) %>% 
+                    rownames(.),
+                  assay = "tf.ssGSEA_normalized") +
+  scale_fill_gradientn(colors = rev(brewer.pal(11, "RdYlBu"))) +
+  theme(legend.position="right", legend.direction = "vertical") +
+  ggtitle('TFs')
+
+
+```
+
+```{r eval=FALSE, include=FALSE}
+geyserEnrichment(malig_cells, 
+                 assay = "tf.ssGSEA_normalized",
+                 gene.set = "ZNF454-TARGET-GENES")
+```
+
+```{r eval=FALSE, include=FALSE}
+hallmark.markers %>% 
+  dplyr::filter(p_val_adj < 0.05) %>% 
+  dplyr::arrange(desc(abs(avg_log2FC)))
+
+reactome.markers  %>% 
+  dplyr::filter(p_val_adj < 0.05) %>% 
+  dplyr::arrange(desc(abs(avg_log2FC)))
+
+tf.markers  %>% 
+  dplyr::filter(p_val_adj < 0.05) %>% 
+  dplyr::arrange(desc(abs(avg_log2FC)))
+```
+
 

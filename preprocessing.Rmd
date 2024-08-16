@@ -1275,6 +1275,7 @@ seu$ANNOTATION_FINAL <- ifelse(seu$ANNOTATION_FINAL == "endothelial_cells", "str
 seu <- subset(seu, ANNOTATION_FINAL %in% c("myeloid_cells", "B_cells", "T_cells",
                                            "malignant_cells","stromal_cells"))
 
+# qsave(seu, paste0(PREPRDATADIR, 'seu_integrated_mypipelineannot_v2.qs'))
 seu %>% 
   DimPlot(group.by='ANNOTATION_FINAL', cols = c("#9ACD32FF", "#FF69B4FF", "#DDA0DDFF", "#4682B4FF",  "#87CEEBFF")) +
   ggtitle('Annotation')
@@ -2271,6 +2272,14 @@ qsave(t_cells_list, paste0(PREPRDATADIR, 't_cells_human_list_annotation.qs'))
 ```
 
 ```{r}
+t_cells_list <- qread(paste0(PREPRDATADIR, 't_cells_human_list_annotation.qs'))
+t_cells_list$NB5_yuan <- NULL
+t_cells_list$Tumor_27_dong <- NULL
+t_cells_h <- merge(x=t_cells_list[[1]], y=t_cells_list[2:length(t_cells_list)])
+rm(t_cells_list)
+```
+
+```{r}
 t_cells_h <- t_cells_h %>%
   NormalizeData() %>%
   FindVariableFeatures() %>%
@@ -2288,12 +2297,18 @@ DimPlot(t_cells_h, group.by = 'RNA_snn_res.0.2')
 DimPlot(t_cells_h, group.by = 'Study', cols = my_colors)
 DimPlot(t_cells_h, group.by = 'SampleID')
 
-t_cells_h <- scGate(t_cells_h, model = scGate_models_DB$human$TME_HiRes, ncores = 30)
-
+DimPlot(t_cells_h, group.by = 'SingleR_main')
+DimPlot(t_cells_h, group.by = 'SingleR_fine')
 DimPlot(t_cells_h, group.by = 'scGate_multi')
 ```
 
 ```{r fig.height=10, fig.width=9}
 FeaturePlot(t_cells_h, c('CD3E', 'CD3D', 'CD4', 'NCR1', 'CD8A', 'NCAM1'))
+```
+
+# Malignant cells
+
+```{r}
+
 ```
 
