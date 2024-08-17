@@ -1346,5 +1346,3 @@ tf.markers  %>%
   dplyr::filter(p_val_adj < 0.05) %>% 
   dplyr::arrange(desc(abs(avg_log2FC)))
 ```
-
-
