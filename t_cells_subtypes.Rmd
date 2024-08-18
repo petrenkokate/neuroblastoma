@@ -53,6 +53,8 @@ library(qs)
 # devtools::install_github("ncborcherding/escape")
 # devtools::install_github("rcastelo/GSVA")
 library(escape)
+# install.packages('gprofiler2')
+library(gprofiler2)
 ```
 
 ```{r global variables, include=FALSE}
@@ -154,6 +156,75 @@ t_cells <- RenameIdents(t_cells, singleR_labels)
 t_cells[['SingleR_imm_ref']] <- Idents(t_cells)
 
 DimPlot(t_cells, group.by = 'SingleR_imm_ref', cols = my_colors)
+```
+
+# Markers 
+
+```{r fig.height=6, fig.width=12}
+
+tcells.clusters.markers <- FindAllMarkers(t_cells, only.pos = TRUE, min.pct = 0.25)
+top5 <- tcells.clusters.markers %>%
+  dplyr::filter(p_val_adj < 0.05) %>% 
+  group_by(cluster) %>%
+  top_n(n = 10, wt = avg_log2FC)
+
+DotPlot(t_cells, top5$gene, cols = c('lightgrey', "#BA55D3FF")) +
+  RotatedAxis()
+```
+
+# Reclusterization
+
+```{r}
+t_cells <- t_cells %>% 
+  FindNeighbors(dims = 1:5) %>%
+  FindClusters(resolution = seq(0.1, 1, 0.1))
+
+clustree(t_cells)
+```
+
+
+
+
+```{r}
+DimPlot(t_cells, group.by = 'RNA_snn_res.0.3', cols = my_colors)
+```
+
+```{r fig.height=6, fig.width=12}
+Idents(t_cells) <- 'RNA_snn_res.0.3'
+tcells.clusters.markers <- FindAllMarkers(t_cells, only.pos = TRUE, min.pct = 0.25)
+top5 <- tcells.clusters.markers %>%
+  dplyr::filter(p_val_adj < 0.05) %>% 
+  group_by(cluster) %>%
+  top_n(n = 10, wt = avg_log2FC)
+
+DotPlot(t_cells, top5$gene, cols = c('lightgrey', "#BA55D3FF")) +
+  RotatedAxis()
+```
+
+```{r}
+FeaturePlot(t_cells, c('Cd4', 'Cd8b1'))
+```
+
+```{r}
+mmus_s = gorth(cc.genes$s.genes, source_organism = "hsapiens", target_organism = "mmusculus")$ortholog_name
+mmus_g2m = gorth(cc.genes$g2m.genes, source_organism = "hsapiens", target_organism = "mmusculus")$ortholog_name
+
+t_cells <- CellCycleScoring(t_cells, s.features = mmus_s, g2m.features = mmus_g2m)
+
+DimPlot(t_cells, group.by = 'Phase')
+```
+
+# Articles
+
+## 2
+
+```{r fig.height=10, fig.width=10}
+Idents(t_cells) <- t_cells$RNA_snn_res.0.2
+VlnPlot(t_cells, c('Tcf7', 'Ccr7', 'Cd2', 'Pdcd1', 'Tnfrsf9', 'Tnfrsf4', 'Ctla4', 'Ifngr1', 'Fasl'))
+```
+
+```{r fig.height=10, fig.width=12}
+FeaturePlot(t_cells, c('Tcf7', 'Ccr7', 'Cd2', 'Pdcd1', 'Tnfrsf9', 'Tnfrsf4', 'Ctla4', 'Ifngr1', 'Fasl'))
 ```
 
 
