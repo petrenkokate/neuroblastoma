@@ -161,7 +161,7 @@ DimPlot(t_cells, group.by = 'SingleR_imm_ref', cols = my_colors)
 # Markers 
 
 ```{r fig.height=6, fig.width=12}
-
+Idents(t_cells) <- t_cells$RNA_snn_res.0.2
 tcells.clusters.markers <- FindAllMarkers(t_cells, only.pos = TRUE, min.pct = 0.25)
 top5 <- tcells.clusters.markers %>%
   dplyr::filter(p_val_adj < 0.05) %>% 
@@ -172,38 +172,8 @@ DotPlot(t_cells, top5$gene, cols = c('lightgrey', "#BA55D3FF")) +
   RotatedAxis()
 ```
 
-# Reclusterization
 
-```{r}
-t_cells <- t_cells %>% 
-  FindNeighbors(dims = 1:5) %>%
-  FindClusters(resolution = seq(0.1, 1, 0.1))
-
-clustree(t_cells)
-```
-
-
-
-
-```{r}
-DimPlot(t_cells, group.by = 'RNA_snn_res.0.3', cols = my_colors)
-```
-
-```{r fig.height=6, fig.width=12}
-Idents(t_cells) <- 'RNA_snn_res.0.3'
-tcells.clusters.markers <- FindAllMarkers(t_cells, only.pos = TRUE, min.pct = 0.25)
-top5 <- tcells.clusters.markers %>%
-  dplyr::filter(p_val_adj < 0.05) %>% 
-  group_by(cluster) %>%
-  top_n(n = 10, wt = avg_log2FC)
-
-DotPlot(t_cells, top5$gene, cols = c('lightgrey', "#BA55D3FF")) +
-  RotatedAxis()
-```
-
-```{r}
-FeaturePlot(t_cells, c('Cd4', 'Cd8b1'))
-```
+# Cell-cycle score
 
 ```{r}
 mmus_s = gorth(cc.genes$s.genes, source_organism = "hsapiens", target_organism = "mmusculus")$ortholog_name
@@ -213,6 +183,136 @@ t_cells <- CellCycleScoring(t_cells, s.features = mmus_s, g2m.features = mmus_g2
 
 DimPlot(t_cells, group.by = 'Phase')
 ```
+
+```{r include=FALSE}
+t_cells <- t_cells %>% 
+  ScaleData(vars.to.regress = c("S.Score", "G2M.Score"), features = rownames(t_cells)) %>% 
+  RunPCA(verbose=FALSE) %>% 
+  RunHarmony(., 'age',
+             lambda = 1, verbose = FALSE) 
+
+t_cells <- t_cells %>% 
+  RunUMAP(reduction = "harmony", dims = 1:10, verbose=F) %>% 
+  FindNeighbors(dims = 1:6) %>%
+  FindClusters(resolution = seq(0.1, 1, 0.1))
+
+clustree(t_cells)
+```
+
+```{r eval=FALSE, fig.height=20, fig.width=12, include=FALSE}
+DimHeatmap(t_cells, dims = 1:20)
+```
+```{r eval=FALSE, include=FALSE}
+ElbowPlot(t_cells)
+```
+
+```{r}
+DimPlot(t_cells, group.by = 'RNA_snn_res.0.3', cols = my_colors)
+DimPlot(t_cells, group.by = 'Phase', cols = my_colors)
+```
+
+## SingleR
+
+```{r fig.width=10}
+mouse_ref_imm <- celldex::ImmGenData()
+t_cells <- t_cells %>% 
+    FindClusters(resolution = 1.5)
+  
+sce <- as.SingleCellExperiment(t_cells)
+colLabels(sce) <- t_cells$RNA_snn_res.1.5
+Idents(t_cells) <- 'RNA_snn_res.1.5'
+
+# #cluster-wise annotation
+pred_bped_main <- SingleR(test = sce, ref = mouse_ref_imm, clusters=colLabels(sce),
+                          labels = mouse_ref_imm$label.fine, BPPARAM=MulticoreParam(30))
+# # Create a named vector for RenameIdents
+singleR_labels <- pred_bped_main$pruned.labels
+names(singleR_labels) <- rownames(pred_bped_main)
+
+# Update cluster identities in Seurat object based on SingleR results
+t_cells <- RenameIdents(t_cells, singleR_labels)
+t_cells[['SingleR_imm_ref']] <- Idents(t_cells)
+
+DimPlot(t_cells, group.by = 'SingleR_imm_ref', cols = my_colors)
+```
+
+## SingleR by clusters
+
+```{r fig.width=10}
+sce <- as.SingleCellExperiment(t_cells)
+colLabels(sce) <- t_cells$RNA_snn_res.0.3
+Idents(t_cells) <- 'RNA_snn_res.0.3'
+
+# #cluster-wise annotation
+pred_bped_main <- SingleR(test = sce, ref = mouse_ref_imm, clusters=colLabels(sce),
+                          labels = mouse_ref_imm$label.fine, BPPARAM=MulticoreParam(30))
+# # Create a named vector for RenameIdents
+singleR_labels <- pred_bped_main$pruned.labels
+names(singleR_labels) <- rownames(pred_bped_main)
+
+# Update cluster identities in Seurat object based on SingleR results
+t_cells <- RenameIdents(t_cells, singleR_labels)
+t_cells[['SingleR_imm_ref_v2']] <- Idents(t_cells)
+
+DimPlot(t_cells, group.by = 'SingleR_imm_ref_v2', cols = my_colors)
+```
+
+```{r fig.height=10, fig.width=10}
+Idents(t_cells) <- t_cells$RNA_snn_res.0.3
+VlnPlot(t_cells, c('Cd3e', 'Cd3d', 'Cd3g', 'Klrb1c', 'Ncr1', 'Klrk1', 'Cd4', 'Cd8a', 'Cd8b1',
+                   'Tbx21', 'Cxcr3', 'Il2ra', 'Entpd1', 'Foxp3','Ctla4'))
+```
+
+## Markers 
+
+```{r fig.height=6, fig.width=12}
+
+tcells.clusters.markers <- FindAllMarkers(t_cells, only.pos = TRUE, min.pct = 0.25)
+top5 <- tcells.clusters.markers %>%
+  dplyr::filter(p_val_adj < 0.05) %>% 
+  group_by(cluster) %>%
+  top_n(n = 10, wt = avg_log2FC)
+
+DotPlot(t_cells, top5$gene, cols = c('lightgrey', "#BA55D3FF")) +
+  RotatedAxis()
+```
+## Treg
+
+```{r fig.height=12, fig.width=16}
+FeaturePlot(t_cells, c('Cd4', 'Cd8b1', 'Il17a', 'Il17f', 'Rora', 'Maf', 'Ctla4', 'Rorc', 'Foxp3', 'Il12a', 'Il10'))
+```
+
+## Memory
+
+```{r fig.height=8, fig.width=10}
+FeaturePlot(t_cells, c('Il7r', 'Sell', 'Cd44', 'Ccr7'))
+```
+
+## Th1 
+
+```{r fig.height=10, fig.width=10}
+VlnPlot(t_cells, c('Cd4', 'Cd8a', 'Ifng', 'Il2', 'Tnf', 'Stat1', 'Stat4', 'Tbx21', 'Il12rb2', 'Il27ra', 'Il18r1', 'Ccr5', 'Cxcr3'))
+```
+
+
+## Th2
+
+```{r fig.height=10, fig.width=10}
+VlnPlot(t_cells, c('Cd4', 'Cd8a', 'Ccr3', 'Ccr4', 'Ccr8', 'Cxcr4', 'Il1rl1', 'Stat5a', 'Stat5b', 'Stat6', 'Gata3', 'Il4', 'Il5', 'Il9', 'Il13', 'Il25'))
+```
+
+## Th9
+
+```{r fig.height=10, fig.width=10}
+VlnPlot(t_cells, c('Spi1', 'Irf4', 'Il9', 'Ccl17', 'Ccl22', 'Il10'))
+```
+
+## Th17
+
+```{r fig.height=8, fig.width=10}
+VlnPlot(t_cells, c('Tgfb1', 'Tgfb2', 'Il6ra', 'Il21r', 'Il23r', 'Stat3', 'Rorc', 'Il17a', 'Il17f', 'Il21', 'Il22'))
+```
+
 
 # Articles
 
