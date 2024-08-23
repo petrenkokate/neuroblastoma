@@ -24,6 +24,7 @@ library(SingleR)
 library(scGate)
 library(ggplot2)
 library(BiocParallel)
+# BiocManager::install("harmony")
 library(harmony)
 library(RColorBrewer)
 library(stringr)
@@ -31,25 +32,29 @@ library(cowplot)
 library(scuttle)
 # install.packages("devtools")
 # BiocManager::install("Homo.sapiens")
-# BiocManager::install("jpmam1/scalop") #forked copy of a really good guy 
-# devtools::install_github("jlaffy/infercna")
+# BiocManager::install("jpmam1/scalop") #forked copy of a really good guy
+devtools::install_github("jlaffy/infercna")
 library(infercna)
-library(infercnv)
+# library(infercnv)
 library(parallel)
 library(future)
 library(clustree)
 library(dittoSeq)
 # install.packages("ggh4x")
 library(ggh4x)
-#BiocManager::install('EnhancedVolcano')
+# BiocManager::install('EnhancedVolcano')
 library(EnhancedVolcano)
 library(clusterProfiler)
 # BiocManager::install('org.Mm.eg.db')
 library("org.Mm.eg.db")
+# BiocManager::install('ReactomePA')
 library(ReactomePA)
+# BiocManager::install('msigdbr')
 library(msigdbr)
 # install.packages('qs')
 library(qs)
+# BiocManager::install('enrichR')
+library(enrichR)
 ```
 
 ```{r global variables, include=FALSE}
@@ -1298,7 +1303,6 @@ barplot(reactome_malcells_pos, showCategory=20) +
 # barplot(reactome_malcells_neg, showCategory=20) +
 #   ggtitle('Malignant (negative)')
 
-library(enrichR)
 DEenrichRPlot(malig_cells, ident.1 = 'young', ident.2 = 'adult',
               max.genes = 1000,
               enrich.database = 'HDSigDB_Mouse_2021')
