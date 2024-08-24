@@ -329,6 +329,15 @@ FeaturePlot(t_cells, c('Tcf7', 'Ccr7', 'Cd2', 'Pdcd1', 'Tnfrsf9', 'Tnfrsf4', 'Ct
 # ProjectTILs
 
 ```{r}
+rm(sce, mouse_ref_imm, Hs2Mm.convert.table, cell.cycle.obj, pred_bped_main)
+
+library(usethis) 
+usethis::edit_r_environ()
+```
+
+## Mouse
+
+```{r}
 library(ProjecTILs)
 ref <- load.reference.map()
 data(query_example_seurat)
@@ -342,14 +351,9 @@ DimPlot(querydata, group.by = "functional.cluster", cols = my_colors)
 ```{r}
 querydata <- Run.ProjecTILs(querydata, ref = ref, split.by = "age", ncores = 4)
 plot.projection(ref, querydata, linesize = 0.5, pointsize = 0.5)
+query.list <- SplitObject(querydata, split.by = "age")
 ```
 
-```{r fig.height=9, fig.width=12}
-query.list <- SplitObject(querydata, split.by = "age")
-plot.states.radar(ref, query = query.list, min.cells = 10, genes4radar = c("Foxp3",
-    "Cd4", "Cd8a", "Tcf7", "Ccr7", "Gzmb", "Pdcd1", "Havcr2", "Tox", "Entpd1", "Cxcr5",
-    "Ifng", "Cxcl13", "Xcl1", "Itgae"))
-```
 
 ```{r}
 # Step 1: Combine 'young' cluster information
@@ -417,6 +421,11 @@ plot_grid(pll[[1]], pll[[3]], pll[[5]], ncol = 3, nrow = 1, rel_widths = c(1.3, 
 
 ```
 
+```{r fig.height=9, fig.width=12}
+plot.states.radar(ref, query = query.list, min.cells = 10, genes4radar = c("Foxp3",
+    "Cd4", "Cd8a", "Tcf7", "Ccr7", "Gzmb", "Pdcd1", "Havcr2", "Tox", "Entpd1", "Cxcr5",
+    "Ifng", "Cxcl13", "Xcl1", "Itgae"))
+```
 
 ```{r}
 which.types <- table(t_cells$projection_annotation) > 10
@@ -442,6 +451,100 @@ ggplot(tb.m, aes(x = Cell_state, y = Fold_change, fill = Cell_state)) + geom_bar
 ```
 
 ```{r}
-DimPlot(ref, group.by = "functional.cluster", cols = my_colors)
+Idents(t_cells) <- 'age'
+VlnPlot(t_cells, 'Tox')
 ```
 
+### Looking for new subtypes
+
+```{r}
+compute_silhouette(ref, query = query.list[["adult"]], normalize.scores = T, min.cells = 10)
+```
+
+```{r}
+compute_silhouette(ref, query = query.list[["young"]], normalize.scores = T, min.cells = 10)
+```
+
+## Human t-cells projection
+
+```{r}
+t_cells_h <- qread(paste0(PREPRDATADIR, 't_cells_human_list_annotation.qs'))
+t_cells_h$NB5_yuan <- NULL
+t_cells_h$Tumor_27_dong <- NULL
+t_cells_h <- merge(x = t_cells_h[[1]], y = t_cells_h[-1])
+
+querydata_h <- ProjecTILs.classifier(query = t_cells_h, ref = ref)
+DimPlot(querydata_h, group.by = "functional.cluster", cols = my_colors)
+```
+
+```{r}
+querydata_h <- Run.ProjecTILs(querydata_h, ref = ref, split.by = "less18M", ncores = 4)
+plot.projection(ref, querydata_h, linesize = 0.5, pointsize = 0.5)
+query.list_h <- SplitObject(querydata_h, split.by = "less18M")
+```
+
+```{r fig.height=15, fig.width=15}
+
+pll <- list()
+
+pll[[1]] <- plot.projection(ref, query.list_h[["TRUE"]], linesize = 0.5, pointsize = 0.5, cols  = my_colors) +
+  scale_fill_discrete(type = my_colors, breaks=c("CD8_Tex", "CD8_Tpex", "CD8_EffectorMemory", "CD8_EarlyActiv", "CD8_NaiveLike", "CD4_NaiveLike", "Tfh", "Th1", "Treg")) +
+    ggtitle("Young") + NoLegend()
+pll[[2]] <- plot.statepred.composition(ref, query.list_h[["TRUE"]], metric = "Percent") +
+    ggtitle("Young") + ylim(0, 40)
+# pll[[2]] <- dittoBarPlot(subset(t_cells, age == 'young'), group.by = 'projection_annotation', color.panel = my_colors) +
+#    ggtitle("Young")
+pll[[3]] <- plot.projection(ref, query.list_h[["FALSE"]], linesize = 0.5, pointsize = 0.5, cols = my_colors) +
+  scale_fill_discrete(type = my_colors, breaks=c("CD8_Tex", "CD8_Tpex", "CD8_EffectorMemory", "CD8_EarlyActiv", "CD8_NaiveLike", "CD4_NaiveLike", "Tfh", "Th1", "Treg")) +
+    ggtitle("Adult") 
+pll[[4]] <- plot.statepred.composition(ref, query.list_h[["FALSE"]], metric = "Percent") +
+    ggtitle("Adult") + ylim(0, 40)
+# pll[[4]] <- dittoBarPlot(subset(t_cells, age == 'adult'),  group.by = 'projection_annotation', color.panel = my_colors) +
+#    ggtitle("Adult")
+# pll[[5]] <- dittoBarPlot(t_cells, 'projection_annotation', group.by = 'age', color.panel = my_colors) +
+#   scale_fill_manual(values = my_colors, breaks=c("CD8_Tex", "CD8_Tpex", "CD8_EffectorMemory", "CD8_EarlyActiv", "CD8_NaiveLike", "CD4_NaiveLike", "Tfh", "Th1", "Treg", 'NK_cells')) +
+#   ggtitle('')
+
+grid.arrange(pll, ncol = 2, nrow = 2, widths = c(1.3, 2, 1.2))
+```
+
+```{r fig.height=9, fig.width=12}
+plot.states.radar(ref, query = query.list_h, min.cells = 20, genes4radar = c("Foxp3",
+    "Cd4", "Cd8a", "Tcf7", "Ccr7", "Gzmb", "Pdcd1", "Havcr2", "Tox", "Entpd1", "Cxcr5",
+    "Ifng", "Cxcl13", "Xcl1", "Itgae"))
+```
+
+```{r}
+which.types <- table(querydata_h$functional.cluster) > 20
+states_all <- levels(ref$functional.cluster)
+names(my_colors) <- states_all
+cols_use <- my_colors[names(which.types)][which.types]
+
+# Responder vs non Responder
+query.projected$functional.cluster <- factor(query.projected$functional.cluster,
+    levels = states_all)
+
+norm.c <- table(query.list_h[["FALSE"]]$functional.cluster)/sum(table(query.list_h[["FALSE"]]$functional.cluster))
+norm.q <- table(query.list_h[["TRUE"]]$functional.cluster)/sum(table(query.list_h[["TRUE"]]$functional.cluster))
+
+foldchange <- norm.q[which.types]/norm.c[which.types]
+foldchange <- sort(foldchange, decreasing = T)
+
+tb.m <- reshape2::melt(foldchange)
+colnames(tb.m) <- c("Cell_state", "Fold_change")
+pll <- list()
+ggplot(tb.m, aes(x = Cell_state, y = Fold_change, fill = Cell_state)) + geom_bar(stat = "identity") +
+    scale_fill_manual(values = cols_use) + geom_hline(yintercept = 1) + scale_y_continuous(trans = "log2") +
+    ggtitle("Young vs. Adult") + theme_bw() + theme(axis.text.x = element_blank(),
+    legend.position = "left")
+```
+
+### Looking for new subtypes
+
+```{r}
+compute_silhouette(ref, query = query.list_h[["FALSE"]], normalize.scores = T, min.cells = 20)
+```
+
+```{r}
+compute_silhouette(ref, query = query.list_h[["TRUE"]], normalize.scores = T, min.cells = 20)
+```
