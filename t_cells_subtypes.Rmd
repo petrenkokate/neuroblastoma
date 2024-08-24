@@ -242,6 +242,7 @@ pred_bped_main <- SingleR(test = sce, ref = mouse_ref_imm, clusters=colLabels(sc
 singleR_labels <- pred_bped_main$pruned.labels
 names(singleR_labels) <- rownames(pred_bped_main)
 
+Idents(t_cells) <-  'RNA_snn_res.1'
 # Update cluster identities in Seurat object based on SingleR results
 t_cells <- RenameIdents(t_cells, singleR_labels)
 t_cells[['SingleR_imm_ref_v2']] <- Idents(t_cells)
@@ -249,7 +250,74 @@ t_cells[['SingleR_imm_ref_v2']] <- Idents(t_cells)
 DimPlot(t_cells, group.by = 'SingleR_imm_ref_v2', cols = my_colors)
 ```
 
-```{r eval=FALSE, fig.height=5, fig.width=12, include=FALSE}
+## scGate
+
+```{r}
+# Step 1: Create a base model for T cells
+t_cell_model <- gating_model(level = 1, name = "T cells", signature = c("Cd3e", "Cd3d", "Cd3g"))
+
+# Step 2: Create a model for CD4+ T cells
+cd4_model <- gating_model(model = t_cell_model, level = 2, name = "CD4 T cells", signature = c("Cd4", "Cd8a-", "Cd8b1-"))
+
+# Add CD4+ T cell subtypes in level 3
+cd4_model <- gating_model(model = cd4_model, level = 3, name = "CD4+ Naive", 
+                          signature = c("Sell", "Ccr7", "Cd44-", "Cd69-"))
+
+cd4_model <- gating_model(model = cd4_model, level = 3, name = "CD4+ Memory", 
+                          signature = c("Cd44", "Sell-", "Ccr7-"))
+
+cd4_model_treg <- gating_model(model = cd4_model, level = 3, name = "Treg", 
+                          signature = c("Foxp3", "Ctla4", "Il2ra", "Ifng-"))
+
+cd4_model <- gating_model(model = cd4_model, level = 3, name = "CD4_Tex", 
+                          signature = c("Pdcd1", "Tox", "Foxp3-"))
+
+cd4_model <- gating_model(model = cd4_model, level = 3, name = "Th1", 
+                          signature = c("Tbx21", "Ifng", "Cxcr3", "Il4-", "Il17a-"))
+
+cd4_model <- gating_model(model = cd4_model, level = 3, name = "Th2", 
+                          signature = c("Gata3", "Il4", "Il5", "Ifng-", "Il17a-"))
+
+cd4_model <- gating_model(model = cd4_model, level = 3, name = "Th17", 
+                          signature = c("Rorc", "Il17a", "Ccr6", "Ifng-", "Il4-"))
+
+cd4_model <- gating_model(model = cd4_model, level = 3, name = "Th22", 
+                          signature = c("Ahr", "Il22", "Ccr10","Il17a-", "Ifng-"))
+
+cd4_model <- gating_model(model = cd4_model, level = 3, name = "Th9", 
+                          signature = c("Il9", "Irf4", "Il21", "Ifng-", "Il4-", "Il17a-"))
+
+cd4_model <- gating_model(model = cd4_model, level = 3, name = "Tfh", 
+                          signature = c("Bcl6", "Cxcr5", "Icos", "Il4-", "Ifng-"))
+
+# Step 3: Create a model for CD8+ T cells
+cd8_model <- gating_model(model = t_cell_model, level = 2, name = "CD8 T cells", 
+                          signature = c("Cd8a", "Cd8b1", "Cd4-"))
+
+# Add CD8+ T cell subtypes in level 3
+cd8_model <- gating_model(model = cd8_model, level = 3, name = "CD8+ Naive", 
+                          signature = c("Sell", "Ccr7", "Cd44-", "Cd69-"))
+
+cd8_model <- gating_model(model = cd8_model, level = 3, name = "CD8+ Memory", 
+                          signature = c("Cd44", "Sell-", "Ccr7-"))
+
+cd8_model <- gating_model(model = cd8_model, level = 3, name = "CD8_Tex", 
+                          signature = c("Pdcd1", "Tox", "Foxp3-"))
+
+NKT_model <- gating_model(model = t_cell_model, level = 2, name = "NKT cells", 
+                          signature = c("Nkg7", "Cd3e", "Ccr5", "Itga1", "Cd4-", "Cd8a-"))
+
+NK_model <- gating_model(level = 1, name = "NK cells", 
+                          signature = c("Nkg7", "Klrb1c", "Klrc1", "Cd3e-"))
+
+# Apply the scGate model to the Seurat object
+t_cells <- scGate::scGate(t_cells, model = cd4_model_treg)
+
+# Check the resulting annotations
+DimPlot(t_cells)
+```
+
+```{r fig.height=5, fig.width=12, include=FALSE}
 Idents(object = t_cells) <- "RNA_snn_res.0.3"
 
 new.cluster.ids <- c('0'=NA,
@@ -433,8 +501,6 @@ states_all <- c("CD8_Tex", "CD8_Tpex", "CD8_EffectorMemory", "CD8_EarlyActiv", "
 names(my_colors) <- states_all
 cols_use <- my_colors[names(which.types)][which.types]
 
-query.list <- SplitObject(t_cells, split.by = "age")
-
 norm.c <- table(query.list[["adult"]]$projection_annotation)/sum(table(query.list[["adult"]]$projection_annotation))
 norm.q <- table(query.list[["young"]]$projection_annotation)/sum(table(query.list[["young"]]$projection_annotation))
 
@@ -463,6 +529,53 @@ compute_silhouette(ref, query = query.list[["adult"]], normalize.scores = T, min
 
 ```{r}
 compute_silhouette(ref, query = query.list[["young"]], normalize.scores = T, min.cells = 10)
+```
+
+```{r fig.height=9, fig.width=6}
+min.pct <- 0.1
+min.diff.pct <- 0.3
+logfc.threshold <- 2
+
+
+genes.use.DE <- rownames(ref)
+genes.use.DE <- grep("^Gm|Rik$", genes.use.DE, value = T, invert = T)
+# Based on Ensembl 'biotype' classifications in mouse, genes starting with
+# 'Gm-' or ending with 'Rik' include protein-coding RNAs, long non-coding RNAs,
+# and antisense transcripts. Genes with the 'Gm' prefix seem to be enriched for
+# pseudogenes.
+
+
+tab <- find.discriminant.genes(ref = ref, query = query.list[["adult"]], state = "Treg",
+    min.pct = min.pct, min.diff.pct = min.diff.pct, logfc.threshold = logfc.threshold,
+    genes.use = 'variable')
+
+EnhancedVolcano(tab, lab = rownames(tab), x = "avg_log2FC", y = "p_val", FCcutoff = 1,
+    pCutoff = 0.05, title = "Treg", subtitle = "Adult VS Ref",
+    drawConnectors = T, max.overlaps = 20)
+```
+
+### SingleR wirh project ref
+
+```{r fig.width=10}
+sce <- as.SingleCellExperiment(t_cells)
+colLabels(sce) <- t_cells$RNA_snn_res.1
+
+ref_sce <- as.SingleCellExperiment(ref)
+# #cluster-wise annotation
+pred_bped_main <- SingleR(test = sce, ref = ref_sce, 
+                          labels = ref_sce$functional.cluster, BPPARAM=MulticoreParam(5))
+# # Create a named vector for RenameIdents
+# singleR_labels <- pred_bped_main$pruned.labels
+# names(singleR_labels) <- rownames(pred_bped_main)
+# 
+# Idents(t_cells) <-  'RNA_snn_res.1'
+# # Update cluster identities in Seurat object based on SingleR results
+# t_cells <- RenameIdents(t_cells, singleR_labels)
+# t_cells[['SingleR_imm_ref_v3']] <- Idents(t_cells)
+t_cells[['SingleR_imm_ref_v3']] <- pred_bped_main$pruned.labels
+DimPlot(t_cells, group.by = 'SingleR_imm_ref_v3', cols = my_colors)
+
+
 ```
 
 ## Human t-cells projection
