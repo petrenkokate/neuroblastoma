@@ -307,18 +307,11 @@ new_labels <- ifelse(new_labels %in% names(replacement_map), replacement_map[new
 # Add the new labels to the metadata
 t_cells[['SingleR_imm_ref_v4']] <- new_labels
 
-"#9ACD32FF" "#4682B4FF" "#DDA0DDFF" "#FFA07AFF" "#8FBC8BFF" "#40E0D0FF" "#F0E68CFF" "#5F9EA0FF" "#D2B48CFF"
-[10] "#6495EDFF" "#FF69B4FF" "#BA55D3FF" "#F08080FF" "#32CD32FF" "#FFDAB9FF" "#87CEEBFF"
 DimPlot(t_cells, group.by = 'SingleR_imm_ref_v4', cols = my_colors) +
   scale_color_manual(values = my_colors, breaks=c("T cells - CD4 naïve", "T cells - CD4 memory", "T cells - CD4 effector", "T cells - CD4", "Tgd", "T cells", "NK cells", "Th1", "Treg", 'Regulatory T cells (Tregs)', 'T cells - CD8 naïve', 'T cells - CD8 memory', 'T cells - CD8 effector', 'T cells - CD8', 'NK_cells', 'NKT')) +
   ggtitle('')
 ```
 
-```{r}
-mouse_ref_imm %>% typeof()
-mouse_ref_imm$label.fine %>% unique()
-t_cells$SingleR_imm_ref_v4 %>% unique()
-```
 
 ```{r}
 cd4_expression <- t_cells[["RNA"]]$counts["Cd4", ]
@@ -375,4 +368,38 @@ FeaturePlot(t_cells, c('Sell', 'Ccr7', 'Il7r', 'Il2rb'))
 
 ```{r fig.height=6, fig.width=10}
 FeaturePlot(t_cells, c('Cd44', 'Itgb1', 'Itga4', 'Itga5'))
+```
+
+# Report
+
+```{r fig.height=5, fig.width=15}
+t_cells$SingleR_imm_ref_v4 <- ifelse(is.na(t_cells$SingleR_imm_ref_v4), 'unknown', t_cells$SingleR_imm_ref_v4)
+plot_grid(DimPlot(t_cells, group.by = 'SingleR_imm_ref_v4', cols = my_colors) +
+  scale_color_manual(values = my_colors, breaks=c("T cells - CD4 naïve", "T cells - CD4 memory", "T cells - CD4 effector", "T cells - CD4", "Tgd", "T cells", "NK cells", "Th1", "Treg", 'Regulatory T cells (Tregs)', 'T cells - CD8 naïve', 'T cells - CD8 memory', 'T cells - CD8 effector', 'T cells - CD8', 'NK_cells', 'NKT')) +
+  ggtitle("SingleR annotation"), 
+  DimPlot(t_cells, group.by = 'age', cols = c("#6495EDFF", "#FF69B4FF")) +
+  ggtitle("Age"),
+  nrow = 1, rel_widths = c(1.4, 1))
+```
+
+```{r fig.height=6, fig.width=16}
+Idents(t_cells) <- 'SingleR_imm_ref_v4'
+tcells.clusters.markers <- FindAllMarkers(t_cells, only.pos = TRUE, min.pct = 0.25)
+top5 <- tcells.clusters.markers %>%
+  dplyr::filter(p_val_adj < 0.05) %>% 
+  group_by(cluster) %>%
+  top_n(n = 5, wt = avg_log2FC)
+
+DotPlot(t_cells, top5$gene %>% unique(), cols = c('lightgrey', "#BA55D3FF")) +
+  RotatedAxis()
+```
+
+```{r fig.height=5, fig.width=13}
+plot_grid(dittoBarPlot(t_cells, 'age', group.by = 'SingleR_imm_ref_v4', color.panel = my_colors) +
+            ggtitle('Age'),
+          dittoBarPlot(t_cells, 'Phase', group.by = 'SingleR_imm_ref_v4', color.panel = my_colors),
+          dittoBarPlot(t_cells, 'SingleR_imm_ref_v4', group.by = 'age', color.panel = my_colors) +
+            ggtitle('Annotation'),
+          rel_widths = c(1, 1, 0.7),
+          nrow = 1)
 ```
