@@ -75,7 +75,7 @@ my_colors <- c("#9ACD32FF", "#4682B4FF",  "#DDA0DDFF", "#FFA07AFF", "#8FBC8BFF",
 t_cells <- qread(paste0(PREPRDATADIR, 't_cells_mouse_ssGSEAs3.qs'))
 ```
 
-```{r}
+```{r include=FALSE}
 mmus_s = gorth(cc.genes$s.genes, source_organism = "hsapiens", target_organism = "mmusculus")$ortholog_name
 mmus_g2m = gorth(cc.genes$g2m.genes, source_organism = "hsapiens", target_organism = "mmusculus")$ortholog_name
 
@@ -97,7 +97,8 @@ t_cells <- t_cells %>%
 clustree(t_cells)
 ```
 
-```{r fig.width=10}
+
+```{r fig.width=10, include=FALSE}
 sce <- as.SingleCellExperiment(t_cells)
 colLabels(sce) <- t_cells$RNA_snn_res.1
 
@@ -116,13 +117,13 @@ t_cells[['SingleR_imm_ref_v2']] <- Idents(t_cells)
 DimPlot(t_cells, group.by = 'SingleR_imm_ref_v2', cols = my_colors)
 ```
 
-```{r}
+```{r fig.height=4, fig.width=8}
 Idents(t_cells) <- 'RNA_snn_res.1'
 DimPlot(t_cells)
 DimPlot(t_cells, group.by = 'SingleR_imm_ref_v2', cols = my_colors)
 ```
 
-```{r fig.height=5, fig.width=10}
+```{r fig.height=5, fig.width=10, include=FALSE}
 # sce <- as.SingleCellExperiment(t_cells)
 
 replacement_map <- c(
@@ -313,7 +314,7 @@ DimPlot(t_cells, group.by = 'SingleR_imm_ref_v4', cols = my_colors) +
 ```
 
 
-```{r}
+```{r echo=FALSE}
 cd4_expression <- t_cells[["RNA"]]$counts["Cd4", ]
 cd8_expression <- t_cells[["RNA"]]$counts["Cd8b1", ]
 
@@ -332,7 +333,7 @@ DimPlot(t_cells, group.by = 'CD4_CD8_Group')
 
 ### SingleR wirh project ref
 
-```{r fig.width=6}
+```{r fig.height=4, fig.width=8}
 sce <- as.SingleCellExperiment(t_cells)
 colLabels(sce) <- t_cells$RNA_snn_res.1
 
@@ -359,11 +360,6 @@ DimPlot(t_cells, group.by = 'SingleR_imm_ref_v3', cols = my_colors)
 ```{r fig.height=6, fig.width=10}
 FeaturePlot(t_cells, c('Sell', 'Ccr7', 'Il7r', 'Il2rb'))
 ```
-
-```{r}
-
-```
-
 ## Memory
 
 ```{r fig.height=6, fig.width=10}
@@ -372,15 +368,17 @@ FeaturePlot(t_cells, c('Cd44', 'Itgb1', 'Itga4', 'Itga5'))
 
 # Report
 
-```{r fig.height=5, fig.width=15}
+```{r fig.height=4, fig.width=15, message=FALSE, warning=FALSE}
 t_cells$SingleR_imm_ref_v4 <- ifelse(is.na(t_cells$SingleR_imm_ref_v4), 'unknown', t_cells$SingleR_imm_ref_v4)
-plot_grid(DimPlot(t_cells, group.by = 'SingleR_imm_ref_v4', cols = my_colors) +
+plot_grid(DimPlot(t_cells, group.by = 'SingleR_imm_ref_v4') +
   scale_color_manual(values = my_colors, breaks=c("T cells - CD4 naïve", "T cells - CD4 memory", "T cells - CD4 effector", "T cells - CD4", "Tgd", "T cells", "NK cells", "Th1", "Treg", 'Regulatory T cells (Tregs)', 'T cells - CD8 naïve', 'T cells - CD8 memory', 'T cells - CD8 effector', 'T cells - CD8', 'NK_cells', 'NKT')) +
   ggtitle("SingleR annotation"), 
   DimPlot(t_cells, group.by = 'age', cols = c("#6495EDFF", "#FF69B4FF")) +
   ggtitle("Age"),
   nrow = 1, rel_widths = c(1.4, 1))
 ```
+
+## Markers
 
 ```{r fig.height=6, fig.width=16}
 Idents(t_cells) <- 'SingleR_imm_ref_v4'
@@ -394,6 +392,8 @@ DotPlot(t_cells, top5$gene %>% unique(), cols = c('lightgrey', "#BA55D3FF")) +
   RotatedAxis()
 ```
 
+## Composition
+
 ```{r fig.height=5, fig.width=13}
 plot_grid(dittoBarPlot(t_cells, 'age', group.by = 'SingleR_imm_ref_v4', color.panel = my_colors) +
             ggtitle('Age'),
@@ -403,3 +403,73 @@ plot_grid(dittoBarPlot(t_cells, 'age', group.by = 'SingleR_imm_ref_v4', color.pa
           rel_widths = c(1, 1, 0.7),
           nrow = 1)
 ```
+
+```{r fig.height=5, fig.width=11}
+replacement_map <- c(
+  "T cells - CD4 naïve" = 'naïve',
+  "T cells - CD4 memory" = 'memory',
+  "T cells - CD8 memory" = 'memory',
+  "Regulatory T cells (Tregs)" = 'Tregs',
+  "T cells - CD8 naïve" = 'naïve',
+  "T cells - CD8 effector" = 'effector',
+  "T cells - CD4 effector"  = 'effector'
+)
+labels_old <- t_cells$SingleR_imm_ref_v4
+
+new_labels <- ifelse(labels_old %in% names(replacement_map), replacement_map[labels_old], labels_old)
+t_cells$cell_function <- new_labels 
+
+replacement_map <- c(
+  "T cells - CD4 naïve" = 'CD4+CD8-',
+  "T cells - CD4 memory" = 'CD4+CD8-',
+  "T cells - CD8 memory" = 'CD4-CD8+',
+  "Regulatory T cells (Tregs)" = 'CD4+CD8-',
+  "T cells - CD8 naïve" = 'CD4-CD8+',
+  "T cells - CD8 effector" = 'CD4-CD8+',
+  "T cells - CD4 effector"  = 'CD4+CD8-',
+  "NK cells" = 'CD4-CD8-',
+  "NKT" = 'CD4+CD8+',
+  "Tgd" = 'CD4-CD8-',
+  "T cells - CD8" = 'CD4-CD8+',
+  "T cells - CD4" = 'CD4+CD8-',
+  "T cells" = 'unknown'
+)
+
+new_labels <- ifelse(labels_old %in% names(replacement_map), replacement_map[labels_old], labels_old)
+t_cells$cd4cd8_annotation <- new_labels 
+
+plot_grid(dittoBarPlot(t_cells, 'SingleR_imm_ref_v4', group.by = 'age', color.panel = my_colors) +
+            ggtitle('Annotation'),
+          dittoBarPlot(t_cells, 'CD4_CD8_Group', group.by = 'age', color.panel = my_colors) +
+            ggtitle('CD4/CD8 expression'),
+          dittoBarPlot(t_cells, 'cd4cd8_annotation', group.by = 'age', color.panel = my_colors) +
+            ggtitle('CD4/CD8 annotation'),
+          dittoBarPlot(t_cells, 'cell_function', group.by = 'age', color.panel = my_colors) +
+            ggtitle('Combined by function'),
+          rel_widths = c(1.35, 1.05, 1.05, 1.1),
+          nrow = 1)
+
+
+```
+
+
+## DEG by age
+
+```{r fig.height=6, fig.width=12}
+Idents(t_cells) <- 'age'
+
+tcells.clusters.markers <- FindAllMarkers(t_cells, only.pos = TRUE, min.pct = 0.25)
+top5 <- tcells.clusters.markers %>%
+  dplyr::filter(p_val_adj < 0.05) %>% 
+  group_by(cluster) %>%
+  top_n(n = 15, wt = avg_log2FC)
+
+DotPlot(t_cells, top5$gene, cols = c('lightgrey', "#BA55D3FF"), scale = F) +
+  RotatedAxis()
+```
+
+```{r fig.height=6, fig.width=8}
+
+VlnPlot(t_cells, c('Cd4', 'Cd8a', 'Cd8b1', 'Ctla4', 'Ncr1', 'Klrk1'), cols=c("#FF69B4FF", "#6495EDFF"), ncol = 3)
+```
+
