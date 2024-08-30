@@ -234,7 +234,7 @@ DimPlot(t_cells, group.by = 'SingleR_imm_ref_v2', cols = my_colors)
 ```
 
 ```{r fig.height=5, fig.width=10, include=FALSE}
-sce <- as.SingleCellExperiment(t_cells)
+# sce <- as.SingleCellExperiment(t_cells)
 
 replacement_map <- c(
   # T cells
@@ -403,7 +403,7 @@ replacement_map <- c(
 
 # #cluster-wise annotation
 pred_bped_main <- SingleR(test = sce, ref = mouse_ref_imm, 
-                          labels = mouse_ref_imm$label.fine, BPPARAM=MulticoreParam(5))
+                          labels = mouse_ref_imm$label.fine.modified, BPPARAM=MulticoreParam(5))
 # # # Create a named vector for RenameIdents
 # singleR_labels <- pred_bped_main$pruned.labels
 # names(singleR_labels) <- rownames(pred_bped_main)
@@ -583,5 +583,115 @@ DotPlot(t_cells, top5$gene, cols = c('lightgrey', "#BA55D3FF"), scale = F) +
 VlnPlot(t_cells, c('Cd4', 'Cd8a', 'Cd8b1', 'Ctla4', 'Ncr1', 'Klrk1'), cols=c("#FF69B4FF", "#6495EDFF"), ncol = 3)
 ```
 
+# Human
 
+```{r}
+t_cells_h <- qread(paste0(PREPRDATADIR, 't_cells_human_scaled_clusters.qs'))
+```
+
+```{r eval=FALSE, include=FALSE}
+t_cells_h <- t_cells_h %>% 
+  ScaleData(vars.to.regress = c("S.Score", "G2M.Score"), features = rownames(t_cells_h)) %>% 
+  RunPCA(verbose=FALSE) %>% 
+  RunHarmony(., 'SampleID',
+             lambda = 1, verbose = FALSE) 
+```
+
+```{r eval=FALSE, include=FALSE}
+t_cells_h <- t_cells_h %>% 
+  RunUMAP(reduction = "harmony", dims = 1:7, verbose=F) %>% 
+  FindNeighbors(dims = 1:7) %>%
+  FindClusters(resolution = seq(0.1, 1, 0.1))
+
+
+qsave(t_cells_h, paste0(PREPRDATADIR, 't_cells_human_scaled_clusters.qs'))
+```
+
+```{r}
+t_cells_h <- t_cells_h %>% 
+  RunUMAP(reduction = "harmony", dims = 1:7, verbose=F) %>% 
+  FindNeighbors(dims = 1:7) %>%
+  FindClusters(resolution = seq(0.1, 1, 0.1))
+
+clustree(t_cells_h)
+```
+
+```{r eval=FALSE, fig.height=20, fig.width=12, include=FALSE}
+DimHeatmap(t_cells_h, dims = 1:20)
+```
+
+```{r eval=FALSE, include=FALSE}
+ElbowPlot(t_cells_h)
+```
+
+```{r}
+DimPlot(t_cells_h, group.by = 'RNA_snn_res.0.1')
+replace_list <- c('Fibroblasts', "Plasma cells", "MEP", "GMP", "Neurons", "Neutrophils", "Endothelial cells", "naive B-cells")
+t_cells_h$SingleR_fine_tune <- ifelse(t_cells_h$SingleR_fine %in% replace_list, NA, t_cells_h$SingleR_fine)
+DimPlot(t_cells_h, group.by = 'SingleR_fine')
+DimPlot(t_cells_h, group.by = 'SingleR_fine_tune', cols = my_colors)
+DimPlot(t_cells_h, group.by = 'scGate_multi', cols = my_colors)
+DimPlot(t_cells_h, group.by = 'Phase')
+DimPlot(t_cells_h, group.by = 'Study')
+
+```
+
+```{r}
+dittoBarPlot(t_cells_h, 'Study', group.by = 'SingleR_fine_tune', color.panel = my_colors)
+dittoBarPlot(t_cells_h, 'less18M', group.by = 'SingleR_fine_tune', color.panel = my_colors)
+
+dittoBarPlot(t_cells_h, 'SingleR_fine_tune', group.by = 'Study', color.panel = my_colors)
+dittoBarPlot(t_cells_h, 'SingleR_fine_tune', group.by = 'less18M', color.panel = my_colors)
+```
+```{r echo=FALSE, fig.width=12}
+plot_data <- as.data.frame(table(t_cells_h@meta.data$SampleID, t_cells_h$SingleR_fine_tune, t_cells_h$less18M))
+colnames(plot_data) <- c("SampleID", "Annotation", 'less18M', "Count")
+# plot_data <- merge(plot_data, sample_metadata, by.x='SampleID', by.y='Sample_dataset')
+plot_data$less18M <- as.logical(plot_data$less18M)
+plot_data$less18M <- ifelse(plot_data$less18M, '<18M', '>18M')
+
+# Calculate the percentages
+plot_data <- plot_data %>%
+  group_by(SampleID) %>%
+  mutate(Percent = Count / sum(Count))
+
+# healthy_percent <- plot_data %>%
+#   filter(Annotation == "normal cells") %>%
+#   arrange(Percent)
+# 
+# Order the SampleID factor levels by the percentage of healthy cells
+# plot_data$SampleID <- factor(plot_data$SampleID, levels = healthy_percent$SampleID)
+
+ggplot(plot_data, aes(x = SampleID, y = Percent, fill = Annotation)) +
+  geom_bar(stat = "identity", position = "fill") +
+  scale_fill_manual(values = my_colors) +
+  labs(y = "Percent of cells", x = "SampleID", title = "Annotation") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  facet_grid2(~less18M, scales = "free_x", space = "free_x", switch = "x",
+              strip = strip_themed(
+                background_x = elem_list_rect(
+                  fill = c("#6495EDFF", "#32CD32FF", '#DDA0DDFF'),
+                  color = c("#6495EDFF", "#32CD32FF", '#DDA0DDFF')),
+                text_x = elem_list_text(size=14))) +
+  ggtitle('Annotation')
+```
+
+```{r eval=FALSE, fig.height=6, fig.width=16, include=FALSE}
+t_cells_h <- JoinLayers(t_cells_h)
+
+Idents(t_cells_h) <- 'RNA_snn_res.0.1'
+tcells.clusters.markers <- FindAllMarkers(t_cells_h, only.pos = TRUE)
+top5 <- tcells.clusters.markers %>%
+  dplyr::filter(p_val_adj < 0.05) %>% 
+  group_by(cluster) %>%
+  top_n(n = 5, wt = avg_log2FC)
+
+DotPlot(t_cells_h, top5$gene %>% unique(), cols = c('lightgrey', "#BA55D3FF")) +
+  RotatedAxis()
+```
+
+```{r}
+FeaturePlot()
+```
 
