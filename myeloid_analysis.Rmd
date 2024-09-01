@@ -1,0 +1,478 @@
+---
+title: "Myeloid_cells_analysis"
+output: html_document
+date: "2024-08-24"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+	echo = FALSE,
+	message = FALSE,
+	warning = FALSE
+)
+library(data.table)
+library(Seurat)
+library(scDblFinder)
+library(DoubletFinder)
+library(dplyr)
+library(remotes)
+# remotes::install_github("carmonalab/STACAS")
+library(STACAS)
+library(SingleR)
+# install.packages("scGate")
+library(scGate)
+library(ggplot2)
+library(BiocParallel)
+library(harmony)
+library(RColorBrewer)
+library(stringr)
+library(cowplot)
+library(scuttle)
+# install.packages("devtools")
+# BiocManager::install("Homo.sapiens")
+# BiocManager::install("jpmam1/scalop") #forked copy of a really good guy 
+# devtools::install_github("jlaffy/infercna")
+library(infercna)
+# library(infercnv)
+library(parallel)
+library(future)
+library(clustree)
+library(dittoSeq)
+# install.packages("ggh4x")
+library(ggh4x)
+#BiocManager::install('EnhancedVolcano')
+library(EnhancedVolcano)
+library(clusterProfiler)
+# BiocManager::install('org.Mm.eg.db')
+library("org.Mm.eg.db")
+library(ReactomePA)
+library(msigdbr)
+# install.packages('qs')
+library(qs)
+# devtools::install_github("ncborcherding/escape")
+# devtools::install_github("rcastelo/GSVA")
+library(escape)
+# install.packages('gprofiler2')
+library(gprofiler2)
+# remotes::install_github("carmonalab/ProjecTILs")
+library(ProjecTILs)
+library(gridExtra)
+```
+
+```{r global variables, include=FALSE}
+set.seed(100)
+DATADIR = '~/Desktop/lab/neuroblastoma/data/'
+WORKDIR = '~/Desktop/lab/neuroblastoma/neuroblastoma/'
+PREPRDATADIR = '~/Desktop/lab/neuroblastoma/data/'
+
+my_colors <- c("#9ACD32FF", "#4682B4FF",  "#DDA0DDFF", "#FFA07AFF", "#8FBC8BFF",
+               "#40E0D0FF",  "#F0E68CFF", "#5F9EA0FF", "#D2B48CFF",  
+               "#6495EDFF", "#FF69B4FF", "#BA55D3FF",  "#F08080FF", "#32CD32FF",  
+               "#FFDAB9FF",  "#87CEEBFF")
+```
+
+```{r global variables server, eval=FALSE, include=FALSE}
+set.seed(100)
+DATADIR = '~/neuroblastoma/data/'
+WORKDIR = '~/neuroblastoma/'
+PREPRDATADIR = '~/neuroblastoma/preprocessing_data/'
+
+my_colors <- c("#9ACD32FF", "#4682B4FF",  "#DDA0DDFF", "#FFA07AFF", "#8FBC8BFF",
+               "#40E0D0FF",  "#F0E68CFF", "#5F9EA0FF", "#D2B48CFF",  
+               "#6495EDFF", "#FF69B4FF", "#BA55D3FF",  "#F08080FF", "#32CD32FF",  
+               "#FFDAB9FF",  "#87CEEBFF")
+```
+
+```{r download references, message=FALSE, warning=FALSE, include=FALSE}
+mouse_ref <- celldex::MouseRNAseqData()
+mouse_ref_imm <- celldex::ImmGenData()
+scGate_models_DB <- get_scGateDB()
+```
+
+```{r}
+seu <- qread(paste0(PREPRDATADIR, 'seu_mouse.qs'))
+```
+
+```{r include=FALSE}
+mmus_s = gorth(cc.genes$s.genes, source_organism = "hsapiens", target_organism = "mmusculus")$ortholog_name
+mmus_g2m = gorth(cc.genes$g2m.genes, source_organism = "hsapiens", target_organism = "mmusculus")$ortholog_name
+
+myeloid <- CellCycleScoring(myeloid, s.features = mmus_s, g2m.features = mmus_g2m)
+```
+
+```{r include=FALSE}
+myeloid <- myeloid %>% 
+  ScaleData(vars.to.regress = c("S.Score", "G2M.Score"), features = rownames(myeloid)) %>% 
+  RunPCA(verbose=FALSE) %>% 
+  RunHarmony(., 'age',
+             lambda = 1, verbose = FALSE) 
+
+myeloid <- myeloid %>% 
+  RunUMAP(reduction = "harmony", dims = 1:10, verbose=F) %>% 
+  FindNeighbors(dims = 1:6) %>%
+  FindClusters(resolution = seq(0.1, 1, 0.1))
+
+clustree(myeloid)
+```
+
+
+# SingleR
+
+## Immune reference from celldex
+
+```{r fig.width=10, include=FALSE}
+sce <- as.SingleCellExperiment(myeloid)
+colLabels(sce) <- myeloid$RNA_snn_res.1
+
+# #cluster-wise annotation
+pred_bped_main <- SingleR(test = sce, ref = mouse_ref_imm, clusters=colLabels(sce),
+                          labels = mouse_ref_imm$label.fine, BPPARAM=MulticoreParam(5))
+# # Create a named vector for RenameIdents
+singleR_labels <- pred_bped_main$pruned.labels
+names(singleR_labels) <- rownames(pred_bped_main)
+
+Idents(myeloid) <-  'RNA_snn_res.1'
+# Update cluster identities in Seurat object based on SingleR results
+myeloid <- RenameIdents(myeloid, singleR_labels)
+myeloid[['SingleR_imm_ref_v2']] <- Idents(myeloid)
+
+DimPlot(myeloid, group.by = 'SingleR_imm_ref_v2', cols = my_colors)
+```
+
+```{r fig.height=4, fig.width=8}
+Idents(myeloid) <- 'RNA_snn_res.1'
+DimPlot(myeloid)
+DimPlot(myeloid, group.by = 'SingleR_imm_ref_v2', cols = my_colors)
+```
+
+```{r fig.height=5, fig.width=10, include=FALSE}
+sce <- as.SingleCellExperiment(myeloid)
+
+replacement_map <- c(
+  # T cells
+  "T cells (T.CD4TESTCJ)" = "T cells - CD4",
+  "T cells (T.CD4.1H)" = "T cells - CD4",
+  "T cells (T.Tregs)" = "Regulatory T cells (Tregs)",
+  "T cells (T.8NVE.OT1)" = "T cells - CD8 naïve",
+  "T cells (T.8Mem)" = "T cells - CD8 memory",
+  "T cells (T.CD8.5H)" = "T cells - CD8",
+  "T cells (T.CD8.1H)" = "T cells - CD8",
+  "T cells (T.4FP3+25+)" = "T cells - CD4",
+  "T cells (T.CD8.CTR)" = "T cells - CD8",
+  "T cells (T.8Nve)" = "T cells - CD8 naïve",
+  "T cells (T.8EFF.OT1.48HR.LISOVA)" = "T cells - CD8 effector",
+  "T cells (T.4MEM)" = "T cells - CD4 memory",
+  "T cells (T.4Nve)" = "T cells - CD4 naïve",
+  "T cells (T.8EFFKLRG1+CD127-.D8.LISOVA)" = "T cells - CD8 effector",
+  "T cells (T.CD4.48H)" = "T cells - CD4",
+  "T cells (T.4MEM44H62L)" = "T cells - CD4 memory",
+  "T cells (T.8SP24int)" = "T cells - CD8",
+  "T cells (T.CD8.48H)" = "T cells - CD8",
+  "T cells (T.CD4.5H)" = "T cells - CD4",
+  "T cells (T.CD4TESTJS)" = "T cells - CD4",
+  "T cells (T.8EFF.OT1.24HR.LISOVA)" = "T cells - CD8 effector",
+  "T cells (T.CD4.CTR)" = "T cells - CD4",
+  "T cells (T.DP69+)" = "T cells",
+  "T cells (T.8SP24-)" = "T cells - CD8",
+  "T cells (T.8MEM.OT1.D106.VSVOVA)" = "T cells - CD8 memory",
+  "T cells (T.8EFF.OT1LISO)" = "T cells - CD8 effector",
+  "T cells (T.8MEM)" = "T cells - CD8 memory",
+  "T cells (T.4.Pa)" = "T cells - CD4",
+  "T cells (T.8MEM.OT1.D45.LISOVA)" = "T cells - CD8 memory",
+  "T cells (T.8EFF.OT1.D10LIS)" = "T cells - CD8 effector",
+  "T cells (T.CD4.24H)" = "T cells - CD4",
+  "T cells (T.8NVE)" = "T cells - CD8 naïve",
+  "T cells (T.8EFF.OT1.D5.VSVOVA)" = "T cells - CD8 effector",
+  "T cells (T.CD4CONTROL)" = "T cells - CD4",
+  "T cells (T.4.PLN)" = "T cells - CD4",
+  "T cells (T.8EFF.OT1.D45VSV)" = "T cells - CD8 effector",
+  "T cells (T.ETP)" = "T cells",
+  "T cells (T.8MEMKLRG1-CD127+.D8.LISOVA)" = "T cells - CD8 memory",
+  "T cells (T.4SP69+)" = "T cells - CD4",
+  "T cells (T.8EFF.TBET+.OT1LISOVA)" = "T cells - CD8 effector",
+  "T cells (T.8EFF.TBET-.OT1LISOVA)" = "T cells - CD8 effector",
+  "T cells (T.4EFF49D+11A+.D8.LCMV)" = "T cells - CD4 effector",
+  "T cells (T.8EFF.OT1.D8.VSVOVA)" = "T cells - CD8 effector",
+  "T cells (T.8MEM.OT1.D100.LISOVA)" = "T cells - CD8 memory",
+  "T cells (T.4MEM49D+11A+.D30.LCMV)" = "T cells - CD4 memory",
+  "T cells (T.4Mem)" = "T cells - CD4 memory",
+
+  # NK cells
+  "NK cells (NK.DAP10-)" = "NK cells",
+  "NK cells (NK.H+MCMV1)" = "NK cells",
+  "NK cells (NK.49CI-)" = "NK cells",
+  "NK cells (NK.49H+)" = "NK cells",
+  "NK cells (NK.H+.MCMV1)" = "NK cells",
+  "NK cells (NK)" = "NK cells",
+  "NK cells (NK.MCMV7)" = "NK cells",
+  "NK cells (NK.H+.MCMV7)" = "NK cells",
+  "NK cells (NK.CD127-)" = "NK cells",
+  "NK cells (NK.B2M-)" = "NK cells",
+
+  # Tgd cells
+  "Tgd (Tgd.mat.VG1+VD6+)" = "Tgd",
+  "Tgd (Tgd.VG2+)" = "Tgd",
+  "Tgd (Tgd.mat.VG2+)" = "Tgd",
+  "Tgd (Tgd.mat.vg3)" = "Tgd",
+
+  # ILC cells
+  "ILC (LPL.NCR+CNK)" = "NK cells",
+  "ILC (ILC3.LTI.CD4-)" = "NK cells",
+  "ILC (LIV.NK.DX5+)" = "NK cells",
+  "ILC (ILC1.CD127+)" = "NK cells",
+  "ILC (LPL.NCR+ILC1)" = "NK cells",
+  "ILC (ILC2)" = "NK cells",
+  
+  # NKT cells
+  "NKT (NKT.44+NK1.1+)" = "NKT",
+  "NKT (NKT.4+)" = "NKT",
+  "NKT (NKT.44+NK1.1-)" = "NKT",
+  "NKT (NKT.4-)" = "NKT",
+
+  # DC cells
+  "DC (DC)" = NA,
+  "DC (DC.8-4-11B-)" = NA,
+  "DC (DC.8-4-11B+)" = NA,
+  "DC (DC.PDC.8+)" = NA,
+  "DC (DC.8+)" = NA,
+
+  # Monocytes
+  "Monocytes (MO.6C+II-)" = NA,
+
+  # Macrophages
+  "Macrophages (MF.103-11B+24-)" = NA,
+  'Macrophages' = NA,
+  
+  "T cells (T.4NVE)" = "T cells - CD4 naïve",
+  "ILC" = "NK cells",
+  "T cells (T.4)" = "T cells - CD4",
+  "T cells (Tregs)" = "Regulatory T cells (Tregs)",
+  "Tgd" = "Tgd",
+  "T cells (T.8NVE)" = "T cells - CD8 naïve",
+  "T cells (T.8)" = "T cells - CD8",
+  "T cells (T.8MEM)" = "T cells - CD8 memory",
+  "T cells (T.CD4.96H)" = "T cells - CD4",
+  "T cells (T.CD8.24H)" = "T cells - CD8",
+  "DC (DC.8-4-11B+)" = NA,
+  "T cells (T.8EFF.OT1.12HR.LISOVA)" = "T cells - CD8 effector",
+  "Tgd (Tgd.vg2+.TCRbko)" = "Tgd",
+  "T cells (T.4MEM)" = "T cells - CD4 memory",
+  "DC (DC.8-)" = NA,
+  "T cells (T.8SP69+)" = "T cells - CD8",
+  "NK cells" = "NK cells",
+  "ILC1" = "NK cells",
+  "T cells (T.8EFF.OT1.D8.LISOVA)" = "T cells - CD8 effector",
+  "DC (DC.PDC.8-)" = NA,
+  "T cells (T.4FP3-)" = "T cells - CD4",
+  "NKT" = "NKT",
+  "T cells (T.CD4+TESTNA)" = "T cells - CD4",
+  "T cells (T.CD8.96H)" = "T cells - CD8",
+  "T cells (T.8EFF.OT1.LISOVA)" = "T cells - CD8 effector",
+  "T cells (T.4EFF49D+11A+.D8.LCMV)" = "T cells - CD4 effector",
+  "T cells (T.CD4+TESTDB)" = "T cells - CD4",
+  "T cells (T.4SP24-)" = "T cells - CD4",
+  "Tgd (Tgd.imm.VG1+VD6+)" = "Tgd",
+  "Tgd (Tgd.mat.vg3.)" = "Tgd",
+  "Monocytes" = NA,
+  "T cells (T.4)" = "T cells - CD4",
+  "ILC (LIV.ILC1.DX5-)" = "ILC",
+  "T cells (T.8EFF.OT1.D8LISO)" = "T cells - CD8 effector",
+  "T cells (T.4NVE44-49D-11A-)" = "T cells - CD4 naïve",
+  "Tgd (Tgd.vg2-)" = "Tgd",
+  "T cells" = "T cells",
+  "Macrophages (MF.SBCAPS)" = NA,
+  "NK cells (NK.49CI+)" = "NK cells",
+  "T cells (T.8EFF.OT1.VSVOVA)" = "T cells - CD8 effector",
+  "T cells (T.8EFF.OT1.D15LIS)" = "T cells - CD8 effector",
+  "T cells (T.8EFF.OT1.D15.LISOVA)" = "T cells - CD8 effector",
+  "Tgd (Tgd.VG4+24ALO)" = "Tgd",
+  "Tgd (Tgd)" = "Tgd",
+  "T cells (T.4SP24int)" = "T cells - CD4",
+  "ILC (ILC3.LTI.4+)" = "NK cells",
+  "Tgd (Tgd.VG5+24AHI)" = "Tgd",
+  "T cells (T.8EFF.OT1.D10.LISOVA)" = "T cells - CD8 effector",
+  "NK cells (NK.49H-)" = "NK cells",
+  "Eosinophils (EO)" = NA,
+  "Eosinophils" = NA,
+  "DC" = NA, 
+  "Tgd (Tgd.vg2+.act)" = "Tgd",
+  "Tgd (Tgd.VG5+.ACT)" = "Tgd",
+  
+  "NKT (NKT.44-NK1.1-)" = "NKT",
+  "ILC (ILC3.LTI.CD4+)" = 'NK cells',
+  "T cells (T.8EFF.OT1.D15.VSVOVA)" = "T cells - CD8 effector",
+  "B cells (B.Fo)" = NA,
+  "B cells" = NA,
+  "Tgd (Tgd.VG3+24AHI)" = 'Tgd',
+  "Stem cells (SC.CDP)" = NA,
+  "Stem cells" = NA,
+  "T cells (T.4int8+)" = "T cells - CD4",
+  "Tgd (Tgd.vg5+.act)" = 'Tgd',
+  "T cells (T.DN2A)" = 'T cells',
+  "T cells (T.DN3-4)" = 'T cells'
+)
+
+
+# #cluster-wise annotation
+pred_bped_main <- SingleR(test = sce, ref = mouse_ref_imm, 
+                          labels = mouse_ref_imm$label.fine, BPPARAM=MulticoreParam(5))
+# # # Create a named vector for RenameIdents
+# singleR_labels <- pred_bped_main$pruned.labels
+# names(singleR_labels) <- rownames(pred_bped_main)
+# 
+# Idents(myeloid) <-  'RNA_snn_res.1'
+# Update cluster identities in Seurat object based on SingleR results
+# myeloid <- RenameIdents(myeloid, singleR_labels)
+myeloid[['SingleR_imm_ref_v4']] <- pred_bped_main$pruned.labels
+new_labels <- myeloid$SingleR_imm_ref_v4
+new_labels <- ifelse(new_labels %in% names(replacement_map), replacement_map[new_labels], new_labels)
+
+# Add the new labels to the metadata
+myeloid[['SingleR_imm_ref_v4']] <- new_labels
+
+DimPlot(myeloid, group.by = 'SingleR_imm_ref_v4', cols = my_colors) +
+  scale_color_manual(values = my_colors, breaks=c("T cells - CD4 naïve", "T cells - CD4 memory", "T cells - CD4 effector", "T cells - CD4", "Tgd", "T cells", "NK cells", "Th1", "Treg", 'Regulatory T cells (Tregs)', 'T cells - CD8 naïve', 'T cells - CD8 memory', 'T cells - CD8 effector', 'T cells - CD8', 'NK_cells', 'NKT')) +
+  ggtitle('')
+```
+
+
+```{r echo=FALSE}
+cd4_expression <- myeloid[["RNA"]]$counts["Cd4", ]
+cd8_expression <- myeloid[["RNA"]]$counts["Cd8b1", ]
+
+# Define thresholds for CD4 and CD8 positivity
+cd4_threshold <- 0.5  # Set an appropriate threshold based on your data
+cd8_threshold <- 0.5  # Set an appropriate threshold based on your data
+
+# Create a new metadata column 'CD4_CD8_Group'
+myeloid$CD4_CD8_Group <- "CD4-CD8-"
+myeloid$CD4_CD8_Group[cd4_expression > cd4_threshold & cd8_expression <= cd8_threshold] <- "CD4+CD8-"
+myeloid$CD4_CD8_Group[cd4_expression <= cd4_threshold & cd8_expression > cd8_threshold] <- "CD4-CD8+"
+myeloid$CD4_CD8_Group[cd4_expression > cd4_threshold & cd8_expression > cd8_threshold] <- "CD4+CD8+"
+
+DimPlot(myeloid, group.by = 'CD4_CD8_Group')
+```
+
+
+# Markers
+
+## Naive
+
+```{r fig.height=6, fig.width=10}
+FeaturePlot(myeloid, c('Sell', 'Ccr7', 'Il7r', 'Il2rb'))
+```
+## Memory
+
+```{r fig.height=6, fig.width=10}
+FeaturePlot(myeloid, c('Cd44', 'Itgb1', 'Itga4', 'Itga5'))
+```
+
+# Report
+
+```{r fig.height=4, fig.width=15, message=FALSE, warning=FALSE}
+myeloid$SingleR_imm_ref_v4 <- ifelse(is.na(myeloid$SingleR_imm_ref_v4), 'unknown', myeloid$SingleR_imm_ref_v4)
+plot_grid(DimPlot(myeloid, group.by = 'SingleR_imm_ref_v4') +
+  scale_color_manual(values = my_colors, breaks=c("T cells - CD4 naïve", "T cells - CD4 memory", "T cells - CD4 effector", "T cells - CD4", "Tgd", "T cells", "NK cells", "Th1", "Treg", 'Regulatory T cells (Tregs)', 'T cells - CD8 naïve', 'T cells - CD8 memory', 'T cells - CD8 effector', 'T cells - CD8', 'NK_cells', 'NKT')) +
+  ggtitle("SingleR annotation"), 
+  DimPlot(myeloid, group.by = 'age', cols = c("#6495EDFF", "#FF69B4FF")) +
+  ggtitle("Age"),
+  nrow = 1, rel_widths = c(1.35, 1))
+```
+
+## Markers
+
+```{r fig.height=6, fig.width=16}
+Idents(myeloid) <- 'SingleR_imm_ref_v4'
+tcells.clusters.markers <- FindAllMarkers(myeloid, only.pos = TRUE, min.pct = 0.25)
+top5 <- tcells.clusters.markers %>%
+  dplyr::filter(p_val_adj < 0.05) %>% 
+  group_by(cluster) %>%
+  top_n(n = 5, wt = avg_log2FC)
+
+DotPlot(myeloid, top5$gene %>% unique(), cols = c('lightgrey', "#BA55D3FF")) +
+  RotatedAxis()
+```
+
+## Composition
+
+```{r fig.height=5, fig.width=13}
+plot_grid(dittoBarPlot(myeloid, 'age', group.by = 'SingleR_imm_ref_v4', color.panel = my_colors) +
+            ggtitle('Age'),
+          dittoBarPlot(myeloid, 'Phase', group.by = 'SingleR_imm_ref_v4', color.panel = my_colors),
+          dittoBarPlot(myeloid, 'SingleR_imm_ref_v4', group.by = 'age', color.panel = my_colors) +
+            ggtitle('Annotation'),
+          rel_widths = c(1, 1, 0.7),
+          nrow = 1)
+```
+
+```{r fig.height=5, fig.width=11}
+replacement_map <- c(
+  "T cells - CD4 naïve" = 'naïve',
+  "T cells - CD4 memory" = 'memory',
+  "T cells - CD8 memory" = 'memory',
+  "Regulatory T cells (Tregs)" = 'Tregs',
+  "T cells - CD8 naïve" = 'naïve',
+  "T cells - CD8 effector" = 'effector',
+  "T cells - CD4 effector"  = 'effector'
+)
+labels_old <- myeloid$SingleR_imm_ref_v4
+
+new_labels <- ifelse(labels_old %in% names(replacement_map), replacement_map[labels_old], labels_old)
+myeloid$cell_function <- new_labels 
+
+replacement_map <- c(
+  "T cells - CD4 naïve" = 'CD4+CD8-',
+  "T cells - CD4 memory" = 'CD4+CD8-',
+  "T cells - CD8 memory" = 'CD4-CD8+',
+  "Regulatory T cells (Tregs)" = 'CD4+CD8-',
+  "T cells - CD8 naïve" = 'CD4-CD8+',
+  "T cells - CD8 effector" = 'CD4-CD8+',
+  "T cells - CD4 effector"  = 'CD4+CD8-',
+  "NK cells" = 'CD4-CD8-',
+  "NKT" = 'CD4+CD8+',
+  "Tgd" = 'CD4-CD8-',
+  "T cells - CD8" = 'CD4-CD8+',
+  "T cells - CD4" = 'CD4+CD8-',
+  "T cells" = 'unknown'
+)
+
+new_labels <- ifelse(labels_old %in% names(replacement_map), replacement_map[labels_old], labels_old)
+myeloid$cd4cd8_annotation <- new_labels 
+
+plot_grid(dittoBarPlot(myeloid, 'SingleR_imm_ref_v4', group.by = 'age', color.panel = my_colors) +
+            ggtitle('Annotation'),
+          dittoBarPlot(myeloid, 'CD4_CD8_Group', group.by = 'age', color.panel = my_colors) +
+            ggtitle('CD4/CD8 expression'),
+          dittoBarPlot(myeloid, 'cd4cd8_annotation', group.by = 'age', color.panel = my_colors) +
+            ggtitle('CD4/CD8 annotation'),
+          dittoBarPlot(myeloid, 'cell_function', group.by = 'age', color.panel = my_colors) +
+            ggtitle('Combined by function'),
+          rel_widths = c(1.35, 1.05, 1.05, 1.1),
+          nrow = 1)
+
+
+```
+
+
+## DEG by age
+
+```{r fig.height=6, fig.width=12}
+Idents(myeloid) <- 'age'
+
+tcells.clusters.markers <- FindAllMarkers(myeloid, only.pos = TRUE, min.pct = 0.25)
+top5 <- tcells.clusters.markers %>%
+  dplyr::filter(p_val_adj < 0.05) %>% 
+  group_by(cluster) %>%
+  top_n(n = 15, wt = avg_log2FC)
+
+DotPlot(myeloid, top5$gene, cols = c('lightgrey', "#BA55D3FF"), scale = F) +
+  RotatedAxis()
+```
+
+```{r fig.height=6, fig.width=8}
+
+VlnPlot(myeloid, c('Cd4', 'Cd8a', 'Cd8b1', 'Ctla4', 'Ncr1', 'Klrk1'), cols=c("#FF69B4FF", "#6495EDFF"), ncol = 3)
+```
+
+
+
