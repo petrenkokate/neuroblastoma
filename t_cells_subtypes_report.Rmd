@@ -584,4 +584,32 @@ VlnPlot(t_cells, c('Cd4', 'Cd8a', 'Cd8b1', 'Ctla4', 'Ncr1', 'Klrk1'), cols=c("#F
 ```
 
 
+# Figure
+
+```{r fig.height=12, fig.width=12}
+plot_annotation <- plot_grid(DimPlot(t_cells, group.by = 'SingleR_imm_ref_v4') +
+  scale_color_manual(values = my_colors, breaks=c("T cells - CD4 naïve", "T cells - CD4 memory", "T cells - CD4 effector", "T cells - CD4", "Tgd", "T cells", "NK cells", "Th1", "Treg", 'Regulatory T cells (Tregs)', 'T cells - CD8 naïve', 'T cells - CD8 memory', 'T cells - CD8 effector', 'T cells - CD8', 'NK_cells', 'NKT')) +
+  ggtitle("SingleR annotation"), 
+  DimPlot(t_cells, group.by = 'age', cols = c("#6495EDFF", "#FF69B4FF")) +
+  ggtitle("Age"),
+  nrow = 1, rel_widths = c(1.35, 1),
+  labels = c('A', 'B'))
+
+plot_composition <- plot_grid(dittoBarPlot(t_cells, 'age', group.by = 'SingleR_imm_ref_v4', color.panel = my_colors) +
+            ggtitle('Age'),
+          dittoBarPlot(t_cells, 'SingleR_imm_ref_v4', group.by = 'age', color.panel = my_colors) +
+            ggtitle('Annotation'),
+          rel_widths = c(1, 0.5),
+          nrow = 1, labels = c('C', 'D'))
+
+plot_markers <- DotPlot(t_cells, 
+                        c('Cd4', 'Cd8a', 'Cd8b1', 'Lef1', 'Ccr7',
+                          'Ctla4', 'Ncr1', 'Klrk1', 'Gzma', 'Id2'),
+                        cols = c('lightgrey', "#BA55D3FF"), scale =F) +
+  RotatedAxis()
+
+plot_grid(plot_annotation, plot_composition, plot_markers, nrow =3, 
+          labels = c('', '', 'E'), 
+          rel_heights = c(1, 1.4, 1))
+```
 

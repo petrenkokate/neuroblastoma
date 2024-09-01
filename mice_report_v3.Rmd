@@ -34,7 +34,7 @@ library(scuttle)
 # BiocManager::install("jpmam1/scalop") #forked copy of a really good guy 
 # devtools::install_github("jlaffy/infercna")
 library(infercna)
-library(infercnv)
+# library(infercnv)
 library(parallel)
 library(future)
 library(clustree)
@@ -55,11 +55,23 @@ library(qs)
 library(escape)
 ```
 
-```{r global variables, include=FALSE}
+```{r global variables, eval=FALSE, include=FALSE}
 set.seed(100)
 DATADIR = '~/neuroblastoma/data/'
 WORKDIR = '~/neuroblastoma/'
 PREPRDATADIR = '~/neuroblastoma/preprocessing_data/'
+
+my_colors <- c("#9ACD32FF", "#4682B4FF",  "#DDA0DDFF", "#FFA07AFF", "#8FBC8BFF",
+               "#40E0D0FF",  "#F0E68CFF", "#5F9EA0FF", "#D2B48CFF",  
+               "#6495EDFF", "#FF69B4FF", "#BA55D3FF",  "#F08080FF", "#32CD32FF",  
+               "#FFDAB9FF",  "#87CEEBFF")
+```
+
+```{r global variables, include=FALSE}
+set.seed(100)
+DATADIR = '~/Desktop/lab/neuroblastoma/data/'
+WORKDIR = '~/Desktop/lab/neuroblastoma/neuroblastoma/'
+PREPRDATADIR = '~/Desktop/lab/neuroblastoma/data/'
 
 my_colors <- c("#9ACD32FF", "#4682B4FF",  "#DDA0DDFF", "#FFA07AFF", "#8FBC8BFF",
                "#40E0D0FF",  "#F0E68CFF", "#5F9EA0FF", "#D2B48CFF",  
@@ -73,11 +85,17 @@ mouse_ref_imm <- celldex::ImmGenData()
 scGate_models_DB <- get_scGateDB()
 ```
 
-```{r include=FALSE}
+```{r eval=FALSE, include=FALSE}
 young <- Read10X_h5(paste0(DATADIR,
                            'mice_scRNA-seq_v1/20240625_YuvalShaked_Chen/CellRanger/Counting_2024A/P_2024A/filtered_feature_bc_matrix.h5'))
 adult <- Read10X_h5(paste0(DATADIR,
                            'mice_scRNA-seq_v1/20240625_YuvalShaked_Chen/CellRanger/Counting_2024A/A_2024A/filtered_feature_bc_matrix.h5'))
+```
+
+```{r}
+young <- Read10X_h5(paste0(DATADIR, 'filtered_feature_bc_matrix.h5'
+                           ))
+adult <- Read10X_h5(paste0(DATADIR, 'filtered_feature_bc_matrix_P_2024A.h5'))
 ```
 
 # QC - Filtration
@@ -405,7 +423,12 @@ volcano_plot <- function(de.markers) {
     drawConnectors = TRUE,
     pCutoff = 0.05, 
     FCcutoff = 0.5,
-    max.overlaps = 30
+    max.overlaps = 30,
+    titleLabSize = 14, 
+    subtitleLabSize = 12,
+    captionLabSize = 12,
+    legendLabSize = 12,
+    legendIconSize = 3
     ) +
   labs(subtitle = "Young vs Adult")
 }
@@ -1346,3 +1369,77 @@ tf.markers  %>%
   dplyr::filter(p_val_adj < 0.05) %>% 
   dplyr::arrange(desc(abs(avg_log2FC)))
 ```
+
+# Figure
+
+```{r fig.height=20, fig.width=16}
+Idents(object = seu) <- "RNA_snn_res.0.1"
+
+new.cluster.ids <- c('0'='Malignant cells',
+                     '1'='Malignant cells',
+                     '2'='T cells',
+                     '3'='B cells',
+                     '4'='Myeloid cells',
+                     '5'='Fibroblasts',
+                     '6'='Malignant cells',
+                     '6'='Malignant cells',
+                     '7'='Endothelial cells',
+                     '8'='Fibroblasts'
+)
+
+seu <- RenameIdents(seu, new.cluster.ids)
+seu$annotation <- Idents(seu)
+
+plot_annotation <- plot_grid(DimPlot(seu, group.by='annotation', cols = c("#FF69B4FF", "#40E0D0FF", "#6495EDFF",  "#9ACD32FF", "#BA55D3FF", "#DDA0DDFF", "#FFA07AFF")) +
+  ggtitle("Annotation"), 
+  DimPlot(seu, group.by = 'age', cols = c("#6495EDFF", "#FF69B4FF")) +
+  ggtitle("Age"),
+  nrow = 1, rel_widths = c(1, 0.9), labels = c('A', 'B'))
+
+Idents(object = seu) <- "annotation"
+clusters.markers <- FindAllMarkers(seu, only.pos = TRUE, min.pct = 0.25)
+top5 <- clusters.markers %>%
+  dplyr::filter(p_val_adj < 0.05) %>% 
+  filter(!str_starts(gene, regex("^(Rb|Gm)")) & !str_ends(gene, "Rik")) %>%
+  group_by(cluster) %>%
+  top_n(n = 5, wt = avg_log2FC) %>% 
+  rbind(clusters.markers %>% 
+          filter(gene == 'Mycn'), .)
+
+plot_markers <- DotPlot(seu, top5$gene, cols = c('lightgrey', "#BA55D3FF")) +
+  RotatedAxis()
+
+plot_compostion <- plot_grid(dittoBarPlot(seu, 'age', group.by = 'annotation', color.panel = my_colors) +
+                               ggtitle('Age'),
+          dittoBarPlot(seu, 'Phase', group.by = 'annotation', color.panel = my_colors),
+          dittoBarPlot(seu, 'annotation', group.by = 'age', color.panel = my_colors) +
+            ggtitle('Annotation'),
+          rel_widths = c(1, 1, 0.7),
+          nrow = 1, labels = c('D', 'E', 'F'))
+
+plot_de <- plot_grid(volcano_plot(malignant.de.markers) +
+            ggtitle('Malignant cells') +
+              NoLegend(),
+            volcano_plot(t_cells.de.markers) +
+            ggtitle('T-cells') +
+              NoLegend(),
+          volcano_plot(b_cells.de.markers) +
+            ggtitle('B-cells') +
+            NoLegend(),
+          volcano_plot(myeloid.de.markers) +
+            ggtitle('Myeloid cells') +
+            NoLegend(),
+          nrow = 1, labels = c('G', 'H', 'I', 'K'))
+
+plot_grid(plot_annotation, 
+          plot_markers,
+          plot_compostion,
+          plot_de,
+          nrow = 4, labels = c('', 'C', '', ''),
+          rel_heights = c(1.8, 1.5, 1.5, 2.4))
+
+DimPlot(seu, group.by='RNA_snn_res.0.1')
+DimPlot(seu, group.by='annotation', cols = c("#FF69B4FF", "#40E0D0FF", "#6495EDFF",  "#9ACD32FF", "#BA55D3FF", "#DDA0DDFF", "#FFA07AFF")) +
+  ggtitle("Annotation")
+```
+
