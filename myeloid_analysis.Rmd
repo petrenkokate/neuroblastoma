@@ -219,6 +219,7 @@ top5 <- clusters.markers %>%
 
 DotPlot(myeloid, top5$gene %>% unique(), cols = c('lightgrey', "#BA55D3FF"), scale = F) +
   RotatedAxis()
+
 ```
 
 0 -
