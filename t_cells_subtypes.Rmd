@@ -62,9 +62,9 @@ library(gridExtra)
 
 ```{r global variables, include=FALSE}
 set.seed(100)
-DATADIR = '~/Desktop/lab/neuroblastoma/data/'
-WORKDIR = '~/Desktop/lab/neuroblastoma/neuroblastoma/'
-PREPRDATADIR = '~/Desktop/lab/neuroblastoma/data/'
+DATADIR = '~/neuroblastoma/data/'
+WORKDIR = '~/neuroblastoma/'
+PREPRDATADIR = '~/neuroblastoma/preprocessing_data/'
 
 my_colors <- c("#9ACD32FF", "#4682B4FF",  "#DDA0DDFF", "#FFA07AFF", "#8FBC8BFF",
                "#40E0D0FF",  "#F0E68CFF", "#5F9EA0FF", "#D2B48CFF",  

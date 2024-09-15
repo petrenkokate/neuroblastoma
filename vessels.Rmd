@@ -71,18 +71,6 @@ my_colors <- c("#9ACD32FF", "#4682B4FF",  "#DDA0DDFF", "#FFA07AFF", "#8FBC8BFF",
                "#FFDAB9FF",  "#87CEEBFF")
 ```
 
-```{r global variables, include=FALSE}
-set.seed(100)
-DATADIR = '~/Desktop/lab/neuroblastoma/data/'
-WORKDIR = '~/Desktop/lab/neuroblastoma/neuroblastoma/'
-PREPRDATADIR = '~/Desktop/lab/neuroblastoma/data/'
-
-my_colors <- c("#9ACD32FF", "#4682B4FF",  "#DDA0DDFF", "#FFA07AFF", "#8FBC8BFF",
-               "#40E0D0FF",  "#F0E68CFF", "#5F9EA0FF", "#D2B48CFF",  
-               "#6495EDFF", "#FF69B4FF", "#BA55D3FF",  "#F08080FF", "#32CD32FF",  
-               "#FFDAB9FF",  "#87CEEBFF")
-```
-
 ```{r download references, message=FALSE, warning=FALSE, include=FALSE}
 mouse_ref <- celldex::MouseRNAseqData()
 mouse_ref_imm <- celldex::ImmGenData()

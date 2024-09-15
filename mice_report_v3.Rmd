@@ -67,18 +67,6 @@ my_colors <- c("#9ACD32FF", "#4682B4FF",  "#DDA0DDFF", "#FFA07AFF", "#8FBC8BFF",
                "#FFDAB9FF",  "#87CEEBFF")
 ```
 
-```{r global variables, include=FALSE}
-set.seed(100)
-DATADIR = '~/Desktop/lab/neuroblastoma/data/'
-WORKDIR = '~/Desktop/lab/neuroblastoma/neuroblastoma/'
-PREPRDATADIR = '~/Desktop/lab/neuroblastoma/data/'
-
-my_colors <- c("#9ACD32FF", "#4682B4FF",  "#DDA0DDFF", "#FFA07AFF", "#8FBC8BFF",
-               "#40E0D0FF",  "#F0E68CFF", "#5F9EA0FF", "#D2B48CFF",  
-               "#6495EDFF", "#FF69B4FF", "#BA55D3FF",  "#F08080FF", "#32CD32FF",  
-               "#FFDAB9FF",  "#87CEEBFF")
-```
-
 ```{r download references, message=FALSE, warning=FALSE, include=FALSE}
 mouse_ref <- celldex::MouseRNAseqData()
 mouse_ref_imm <- celldex::ImmGenData()
@@ -90,12 +78,6 @@ young <- Read10X_h5(paste0(DATADIR,
                            'mice_scRNA-seq_v1/20240625_YuvalShaked_Chen/CellRanger/Counting_2024A/P_2024A/filtered_feature_bc_matrix.h5'))
 adult <- Read10X_h5(paste0(DATADIR,
                            'mice_scRNA-seq_v1/20240625_YuvalShaked_Chen/CellRanger/Counting_2024A/A_2024A/filtered_feature_bc_matrix.h5'))
-```
-
-```{r}
-young <- Read10X_h5(paste0(DATADIR, 'filtered_feature_bc_matrix.h5'
-                           ))
-adult <- Read10X_h5(paste0(DATADIR, 'filtered_feature_bc_matrix_P_2024A.h5'))
 ```
 
 # QC - Filtration
