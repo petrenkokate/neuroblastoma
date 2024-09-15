@@ -380,3 +380,10 @@ plot_grid(volcano_plot(macr.de.markers) +
             ggtitle('DC'),
           nrow = 1)
 ```
+
+```{r}
+Idents(myeloid) <- 'age'
+VlnPlot(subset(myeloid, annotation == 'Macrophages'), 'Apoe')
+FeaturePlot(myeloid, 'Apoe')
+```
+
