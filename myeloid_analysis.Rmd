@@ -57,9 +57,11 @@ library(gprofiler2)
 # remotes::install_github("carmonalab/ProjecTILs")
 library(ProjecTILs)
 library(gridExtra)
+library(scCustomize)
+library(enrichR)
 ```
 
-```{r global variables server, eval=FALSE, include=FALSE}
+```{r global variables server, include=FALSE}
 set.seed(100)
 DATADIR = '~/neuroblastoma/data/'
 WORKDIR = '~/neuroblastoma/'
@@ -210,8 +212,8 @@ FeaturePlot(myeloid, c('Itgax', 'Ccl17', 'Cd86', 'Cd80', 'Itgae'))
 FeaturePlot(myeloid, c('Cxcr2', 'Il1r2'))
 ```
 
-```{r eval=FALSE, fig.height=6, fig.width=12, include=FALSE}
-Idents(myeloid) <- 'RNA_snn_res.0.5'
+```{r eval=FALSE, fig.height=6, fig.width=15, include=FALSE}
+Idents(myeloid) <- 'RNA_snn_res.0.9'
 
 clusters.markers <- FindAllMarkers(myeloid, only.pos = TRUE, min.pct = 0.25)
 top5 <- clusters.markers %>%
@@ -220,10 +222,11 @@ top5 <- clusters.markers %>%
   group_by(cluster) %>%
   top_n(n = 5, wt = avg_log2FC)
 
-DotPlot(myeloid, top5$gene %>% unique(), cols = c('lightgrey', "#BA55D3FF"), scale = F) +
+DotPlot(myeloid, c('Adgre1','Itgam', 'Cd68', 'Mrc1', 'Ccr7', 'Flt3', 'Maf', top5$gene %>% unique()), cols = c('lightgrey', "#BA55D3FF"), scale = F) +
   RotatedAxis()
 
 ```
+
 
 ```{r eval=FALSE, include=FALSE}
 DimPlot(myeloid, group.by = 'RNA_snn_res.0.9')
@@ -232,10 +235,10 @@ DimPlot(myeloid, group.by = 'RNA_snn_res.0.9')
 
 # Composition
 
-```{r include=FALSE}
+```{r eval=FALSE, include=FALSE}
 Idents(myeloid) <- 'RNA_snn_res.0.9'
 
-new.cluster.ids <- c('0'='Macrophages',
+new.cluster.ids <- c('0'='Macrophages', 
                      '1'='DC',
                      '2'='Monocytes',
                      '3'='Macrophages',
@@ -253,16 +256,44 @@ myeloid <- RenameIdents(myeloid, new.cluster.ids)
 myeloid$annotation <- Idents(myeloid)
 ```
 
+```{r include=FALSE}
+Idents(myeloid) <- 'RNA_snn_res.0.9'
+
+new.cluster.ids <- c('0'='TAMs Maf+', 
+                     '1'='cDC',
+                     '2'='Monocytes Ly6c+',
+                     '3'='TAMs Maf+',
+                     '4'='Monocytes Ly6c+Nr4a1+',
+                     '5' = 'TAMs Maf+',
+                     '6' = 'TAMs Ero1a+',
+                     '7' = 'TAMs Cmss1+Ftl+Lgals3+',
+                     '8' = 'cDC Ccr7+',
+                     '9' = 'TAMs Prg4+Alox15+',
+                     '10' = 'Neutrophils',
+                     '11' = 'pDC'
+)
+
+myeloid <- RenameIdents(myeloid, new.cluster.ids)
+myeloid$annotation <- Idents(myeloid)
+```
+
+
 ```{r echo=FALSE, fig.height=4, fig.width=12}
+custom_order <- c("Monocytes Ly6c+", "Monocytes Ly6c+Nr4a1+",  "Neutrophils",
+                  'TAMs Cmss1+Ftl+Lgals3+',
+                  'TAMs Maf+', "TAMs Ero1a+", 'TAMs Prg4+Alox15+',
+                   'cDC', 'cDC Ccr7+', 'pDC')
+myeloid$annotation <- factor(myeloid$annotation, levels = custom_order)
+
 plot_grid(DimPlot(myeloid, group.by = 'annotation', cols = my_colors) +
   ggtitle("Annotation"), 
   DimPlot(myeloid, group.by = 'age', cols = c("#6495EDFF", "#FF69B4FF")) +
   ggtitle("Age"),
-  nrow = 1)
+  nrow = 1, rel_widths = c(1, 0.8))
 ```
 
-```{r echo=FALSE, fig.height=4, fig.width=13}
-plot_grid(dittoBarPlot(myeloid, 'age', group.by = 'annotation', color.panel = my_colors) +
+```{r echo=FALSE, fig.height=5, fig.width=14}
+plot_grid(dittoBarPlot(myeloid, 'age', group.by = 'annotation', color.panel = my_colors, scale = 'count') +
             ggtitle('Age'),
           dittoBarPlot(myeloid, 'Phase', group.by = 'annotation', color.panel = my_colors),
           dittoBarPlot(myeloid, 'annotation', group.by = 'age', color.panel = my_colors) +
@@ -271,107 +302,56 @@ plot_grid(dittoBarPlot(myeloid, 'age', group.by = 'annotation', color.panel = my
           nrow = 1)
 ```
 
-```{r echo=FALSE, fig.height=6, fig.width=12, message=FALSE, warning=FALSE}
+We see that in TME of neuroblastoma of adult mouse there are more Monocytes Ly6c(high), more TAMs Ero1a+ (found only in adult), TAMs Maf+, while in TME of neuroblastoma of young mouse there are more Monocytes Ly6c(high)Nr4a1+ (relatively), pDC and cDC (relatively), TAMs Cmss1+Ftl+Lgals3+ (relatively) and neutrophils (relatively)
+
+
+
+```{r echo=FALSE, fig.height=8, fig.width=7}
 Idents(myeloid) <- 'annotation'
 
-clusters.markers <- FindAllMarkers(myeloid, only.pos = TRUE, min.pct = 0.5, verbose = T)
+clusters.markers <- FindAllMarkers(myeloid, only.pos = TRUE, min.pct = 0.25)
 top5 <- clusters.markers %>%
-  dplyr::filter(p_val_adj < 0.05) %>% 
+  dplyr::filter(p_val_adj < 0.05 & pct.1 > 0.45) %>% 
   # filter(!str_starts(gene, regex("^(Rb|Gm)")) & !str_ends(gene, "Rik")) %>%
   group_by(cluster) %>%
-  top_n(n = 7, wt = avg_log2FC)
+  top_n(n = 5, wt = avg_log2FC) %>% 
+  rbind(clusters.markers %>%
+  dplyr::filter(gene == 'Maf' | gene == 'H2-Ob'))
 
-DotPlot(myeloid, top5$gene %>% unique(), cols = c('lightgrey', "#BA55D3FF"), scale = F) +
-  RotatedAxis()
+custom_order <- c("Neutrophils", "TAMs Ero1a+", "Monocytes Ly6c+Nr4a1+", "Monocytes Ly6c+",
+                  'TAMs Maf+', 'TAMs Cmss1+Ftl+Lgals3+', 'TAMs Prg4+Alox15+',  'cDC', 
+                  'cDC Ccr7+', 'pDC')
 
+# Convert the 'name' column to a factor with a specified order
+top5$cluster <- factor(top5$cluster, levels = custom_order)
+top5 <- top5[order(top5$cluster), ]
+
+scCustomize::Clustered_DotPlot(myeloid, features = c(top5$gene[1:46],'Siglech', 'Ly6d', 'Ccr9', 'Bst2', 'Itgax') %>% unique(),
+                               plot_km_elbow = FALSE, cluster_feature = F,
+                               colors_use_idents = my_colors,
+                               raster = T)
 ```
 
-```{r eval=FALSE, include=FALSE}
-FeaturePlot(myeloid, c('Adgre1', 'Ptprc'))
-FeaturePlot(myeloid, c('Cd163', 'Msr1', 'Il10', 'Cd68'))
-FeaturePlot(myeloid, c('Ccl2', 'Vegfa', 'Il10', 'Cd68'))
-DimPlot(myeloid, group.by = 'annotation', cols = my_colors) +
-  ggtitle("Annotation")
-```
+# DEG
 
-# DEG by age
+```{r fig.height=8, fig.width=8}
+Idents(myeloid) <- 'age'
+de.markers <- FindMarkers(myeloid, 
+                                  ident.1 = "young", ident.2 = "adult", 
+                                  min.pct = 0.15)
+de.markers <- de.markers %>% 
+  mutate(gene = rownames(.)) %>% 
+  dplyr::filter(!str_starts(gene, regex("^(Rb|Gm|Hb)")) & !str_ends(gene, "Rik")) %>% 
+  dplyr::filter(gene != 'Igf2bp3')
 
-## Scatter plots
-
-```{r echo=FALSE, fig.height=7, fig.width=7, message=FALSE, warning=FALSE}
-myeloid$celltype.age <- paste(myeloid$annotation, myeloid$age, sep = "_")
-Idents(myeloid) <- "celltype.age"
-myeloid_bulk <- AggregateExpression(myeloid, group.by = c("annotation", "age"), return.seurat = TRUE)
-
-p1 <- CellScatter(myeloid_bulk, "Macrophages_young", "Macrophages_adult")
-p1 <- CellScatter(myeloid_bulk, "Macrophages_young", "Macrophages_adult", highlight = p1$data %>% filter(abs(`Macrophages_young` - `Macrophages_adult`) > 1) %>% rownames())
-p1 <- LabelPoints(plot = p1, points = p1$data %>% filter(abs(`Macrophages_young` - `Macrophages_adult`) > 1) %>% rownames(), repel = TRUE)
-
-p2 <- CellScatter(myeloid_bulk, "Monocytes_young", "Monocytes_adult")
-p2 <- CellScatter(myeloid_bulk, "Monocytes_young", "Monocytes_adult", highlight = p2$data %>% filter(abs(`Monocytes_young` - `Monocytes_adult`) > 1) %>% rownames())
-p2 <- LabelPoints(plot = p2, points = p2$data %>% filter(abs(`Monocytes_young` - `Monocytes_adult`) > 1) %>% rownames(), repel = TRUE)
-
-p3 <- CellScatter(myeloid_bulk, "Neutrophils_young", "Neutrophils_adult")
-p3 <- CellScatter(myeloid_bulk, "Neutrophils_young", "Neutrophils_adult", highlight = p3$data %>% filter(abs(Neutrophils_young - Neutrophils_adult) > 1) %>% rownames())
-p3 <- LabelPoints(plot = p3, points = p3$data %>% filter(abs(Neutrophils_young - Neutrophils_adult) > 1) %>% rownames(), repel = TRUE)
-
-p4 <- CellScatter(myeloid_bulk, "DC_young", "DC_adult")
-p4 <- CellScatter(myeloid_bulk, "DC_young", "DC_adult", highlight = p4$data %>% filter(abs(`DC_young` - `DC_adult`) > 1) %>% rownames())
-p4 <- LabelPoints(plot = p4, points =  p4$data %>% filter(abs(`DC_young` - `DC_adult`) > 1) %>% rownames(), repel = TRUE)
-
-p1 + p2 + p3 + p4
-```
-
-
-```{r eval=FALSE, fig.height=6, fig.width=12, include=FALSE}
-genes <- c(p1$data %>% filter(abs(`Macrophages_young` - `Macrophages_adult`) > 1) %>% rownames(),
-           p4$data %>% filter(abs(`DC_young` - `DC_adult`) > 1) %>% rownames(),
-           p2$data %>% filter(abs(`Monocytes_young` - `Monocytes_adult`) > 1) %>% rownames()
-           ) %>% unique
-Idents(myeloid) <- 'annotation'
-DotPlot(myeloid, genes, cols = c("#6495EDFF", "#FF69B4FF"), dot.scale = 8, 
-    split.by = "age") + RotatedAxis()
-```
-
-## Volcano plots
-
-```{r echo=FALSE, fig.height=8, fig.width=10}
-macr.de.markers <- FindMarkers(myeloid, 
-                                  ident.1 = "Macrophages_young", ident.2 = "Macrophages_adult", 
-                                  min.pct = 0.25)
-mono.de.markers <- FindMarkers(myeloid,
-                                  ident.1 = "Monocytes_young", ident.2 = "Monocytes_young",
-                                  min.pct = 0.01)
-dc.de.markers <- FindMarkers(myeloid, 
-                                  ident.1 = "DC_young", ident.2 = "DC_adult", 
-                                  min.pct = 0.25)
-
-volcano_plot <- function(de.markers) {
-  EnhancedVolcano(de.markers,
-    lab = rownames(de.markers),
-    x = 'avg_log2FC',
-    y = 'p_val_adj',
-    col = c("grey30","#8FBC8BFF", "#6495EDFF", "#BA55D3FF"),
-    drawConnectors = TRUE,
-    pCutoff = 0.05, 
-    FCcutoff = 0.5,
-    max.overlaps = 30
-    ) +
-  labs(subtitle = "Young vs Adult")
-}
-
-plot_grid(volcano_plot(macr.de.markers) +
-            ggtitle('Macrophages'),
-          # volcano_plot(mono.de.markers) +
-          #   ggtitle('Monocytes'),
-          volcano_plot(dc.de.markers) +
-            ggtitle('DC'),
+plot_grid(volcano_plot(de.markers) +
+            ggtitle('Myeloid cells'),
           nrow = 1)
 ```
 
+# Human validation
+
 ```{r}
-Idents(myeloid) <- 'age'
-VlnPlot(subset(myeloid, annotation == 'Macrophages'), 'Apoe')
-FeaturePlot(myeloid, 'Apoe')
+
 ```
 
