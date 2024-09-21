@@ -59,6 +59,7 @@ library(ProjecTILs)
 library(gridExtra)
 library(scCustomize)
 library(enrichR)
+# devtools::install_github("jinworks/CellChat")
 ```
 
 ```{r global variables server, include=FALSE}
@@ -71,6 +72,22 @@ my_colors <- c("#9ACD32FF", "#4682B4FF",  "#DDA0DDFF", "#FFA07AFF", "#8FBC8BFF",
                "#40E0D0FF",  "#F0E68CFF", "#5F9EA0FF", "#D2B48CFF",  
                "#6495EDFF", "#FF69B4FF", "#BA55D3FF",  "#F08080FF", "#32CD32FF",  
                "#FFDAB9FF",  "#87CEEBFF")
+```
+
+```{r}
+volcano_plot <- function(de.markers) {
+  EnhancedVolcano(de.markers,
+    lab = rownames(de.markers),
+    x = 'avg_log2FC',
+    y = 'p_val_adj',
+    col = c("grey30","#8FBC8BFF", "#6495EDFF", "#BA55D3FF"),
+    drawConnectors = TRUE,
+    pCutoff = 0.05, 
+    FCcutoff = 0.5,
+    max.overlaps = 30
+    ) +
+  labs(subtitle = "Young vs Adult")
+}
 ```
 
 ```{r download references, message=FALSE, warning=FALSE, include=FALSE}
@@ -351,7 +368,175 @@ plot_grid(volcano_plot(de.markers) +
 
 # Human validation
 
-```{r}
+```{r include=FALSE}
+myeloid_h <- qread(paste0(PREPRDATADIR, 'myeloid_cells_v3.qs'))
+```
 
+```{r eval=FALSE, include=FALSE}
+s.genes <- cc.genes$s.genes
+g2m.genes <- cc.genes$g2m.genes 
+myeloid_h <- myeloid_h %>% 
+  CellCycleScoring(s.features = s.genes, g2m.features = g2m.genes) 
+myeloid_h[["RNA"]] <- split(myeloid_h[["RNA"]], f = myeloid_h$SampleID)
+
+myeloid_h <- myeloid_h %>% 
+  NormalizeData() %>% 
+  FindVariableFeatures() %>% 
+  ScaleData(vars.to.regress = c("S.Score", "G2M.Score"), verbose = F) %>% 
+  RunPCA(verbose=FALSE)
+  
+myeloid_h <- myeloid_h %>% 
+  IntegrateLayers(
+    object = ., method = CCAIntegration,
+    orig.reduction = "pca", new.reduction = "integrated.cca.myeloid",
+    verbose = FALSE, k.weight = min(table(myeloid_h$SampleID))) 
+
+myeloid <- JoinLayers(myeloid)
+
+qsave(myeloid_h, paste0(PREPRDATADIR, 'myeloid_cells_v3.qs'))
+```
+
+```{r include=FALSE}
+myeloid_h <- myeloid_h %>% 
+  RunUMAP(reduction = "integrated.cca.myeloid", dims = 1:8) %>% 
+  FindNeighbors(dims = 1:8) %>%
+  FindClusters(resolution = seq(0.1, 1, 0.1))
+
+
+clustree(myeloid_h)
+```
+
+```{r eval=FALSE, fig.height=20, fig.width=12, include=FALSE}
+DimHeatmap(myeloid_h, dims = 1:20)
+```
+
+```{r eval=FALSE, include=FALSE}
+ElbowPlot(myeloid_h)
+```
+
+```{r eval=FALSE, include=FALSE}
+DimPlot(myeloid_h, group.by = 'RNA_snn_res.0.1')
+# replace_list <- c('Fibroblasts', "Plasma cells", "MEP", "GMP", "Neurons", "Neutrophils", "Endothelial cells", "naive B-cells")
+# t_cells_h$SingleR_fine_tune <- ifelse(t_cells_h$SingleR_fine %in% replace_list, NA, t_cells_h$SingleR_fine)
+# DimPlot(myeloid_h, group.by = 'SingleR_fine')
+# DimPlot(myeloid_h, group.by = 'SingleR_fine_tune', cols = my_colors)
+DimPlot(myeloid_h, group.by = 'celltype_humatlas_main')
+DimPlot(myeloid_h, group.by = 'scGate_multi', cols = my_colors)
+DimPlot(myeloid_h, group.by = 'Phase')
+DimPlot(myeloid_h, group.by = 'Study')
+
+```
+
+## ProjecTILs
+
+### Mouse reference
+
+```{r include=FALSE}
+ref.mouse <- make.reference(ref = myeloid, ndim = 5, seed = 100, recalculate.umap = FALSE,
+    annotation.column = "annotation")
+query.projected <- Run.ProjecTILs(myeloid_h, ref = ref.mouse, filter.cell = F, skip.normalize = T, split.by = 'SampleID', ncores = 14)
+```
+
+```{r echo=FALSE}
+plot.projection(ref.mouse, query.projected, linesize = 0.3, pointsize = 0.3)
+```
+
+## Markers
+
+```{r fig.height=14, fig.width=19}
+DefaultAssay(object = query.projected) <- "integrated"
+query.list <- SplitObject(query.projected, split.by = "less18M")
+names(query.list) <- c('adult', 'young')
+
+
+genes <- c(top5$gene[1:46],'Siglech', 'Ly6d', 'Ccr9', 'Bst2', 'Itgax') %>% unique()
+genes <- genes[c(top5$gene[1:46],'Siglech', 'Ly6d', 'Ccr9', 'Bst2', 'Itgax') %>% unique() %in% Features(query.list$adult) & c(top5$gene[1:46],'Siglech', 'Ly6d', 'Ccr9', 'Bst2', 'Itgax') %>% unique() %in% Features(query.list$young) & !(c(top5$gene[1:46],'Siglech', 'Ly6d', 'Ccr9', 'Bst2', 'Itgax') %>% unique() %in% c('Ptgis', 'Rp1', 'Vmn2r26', "Tmem150c", "Lad1", "Slco5a1","Adcy6", "Slc2a1", "Dusp2", "Dusp16", "Ms4a7", "H2-Ob", "Dpp4", "Alox15", 'Prg4', "Ly6d", "Bst2"))] 
+
+plot.states.radar(ref.mouse, query = query.list, ref.assay = 'integrated', query.assay = 'integrated', min.cells = 5, genes4radar = genes)
+```
+
+## Comparison
+
+```{r include=FALSE}
+p1 <- plot.projection(ref.mouse, query.list$young, linesize = 0.3, pointsize = 0.3) + ggtitle('Young (< 18 months)')
+p2 <- plot.projection(ref.mouse, query.list$adult, linesize = 0.3, pointsize = 0.3)  + ggtitle('Adult (> 18 months)')
+```
+
+```{r echo=FALSE, fig.height=9, fig.width=16}
+plot_grid(p1, p2, nrow = 1)
+```
+
+```{r include=FALSE}
+# Step 1: Combine 'young' cluster information
+young_cluster_info <- query.list[["young"]]$functional.cluster
+young_metadata_vector <- as.character(young_cluster_info)
+names(young_metadata_vector) <- names(young_cluster_info)
+
+# Initialize the vector with NA for all cells
+projection_annotation <- rep(NA, length(Cells(myeloid_h)))
+names(projection_annotation) <- Cells(myeloid_h)
+
+# Assign 'young' annotations
+projection_annotation[names(young_metadata_vector)] <- young_metadata_vector
+
+# Step 2: Combine 'adult' cluster information
+adult_cluster_info <- query.list[["adult"]]$functional.cluster
+adult_metadata_vector <- as.character(adult_cluster_info)
+names(adult_metadata_vector) <- names(adult_cluster_info)
+
+# Assign 'adult' annotations, keeping existing 'young' annotations where they exist
+projection_annotation[names(adult_metadata_vector)] <- ifelse(
+  is.na(projection_annotation[names(adult_metadata_vector)]),
+  adult_metadata_vector,
+  projection_annotation[names(adult_metadata_vector)]
+)
+
+
+# Add the final combined annotation to the Seurat object
+myeloid_h$projection_annotation <- factor(projection_annotation, 
+                                        levels = c("Monocytes Ly6c+","Monocytes Ly6c+Nr4a1+", 
+                                                   "Neutrophils",'TAMs Cmss1+Ftl+Lgals3+',
+                                                   'TAMs Maf+', "TAMs Ero1a+", 'TAMs Prg4+Alox15+',
+                                                   'cDC', 'cDC Ccr7+', 'pDC'))
+```
+
+## Composition
+
+```{r echo=FALSE, fig.height=4, fig.width=12}
+plot_grid(DimPlot(myeloid_h, group.by = 'projection_annotation', cols = my_colors) +
+  ggtitle("Annotation"), 
+  DimPlot(myeloid_h, group.by = 'less18M', cols = c("#6495EDFF", "#FF69B4FF")) +
+  ggtitle("Age"),
+  nrow = 1, rel_widths = c(1, 0.8))
+```
+
+```{r echo=FALSE, fig.height=5, fig.width=14}
+plot_grid(dittoBarPlot(myeloid_h, 'less18M', group.by = 'projection_annotation', color.panel = my_colors, scale = 'count') +
+            ggtitle('Age'),
+          dittoBarPlot(myeloid_h, 'Phase', group.by = 'projection_annotation', color.panel = my_colors),
+          dittoBarPlot(myeloid_h, 'projection_annotation', group.by = 'less18M', color.panel = my_colors) +
+            ggtitle('Annotation'),
+          rel_widths = c(1, 1, 0.7),
+          nrow = 1)
+```
+
+### scGate 
+
+```{r echo=FALSE, fig.height=5, fig.width=14}
+plot_grid(dittoBarPlot(myeloid_h, 'less18M', group.by = 'scGate_multi', color.panel = my_colors, scale = 'count') +
+            ggtitle('Age'),
+          dittoBarPlot(myeloid_h, 'Phase', group.by = 'scGate_multi', color.panel = my_colors),
+          dittoBarPlot(myeloid_h, 'scGate_multi', group.by = 'less18M', color.panel = my_colors) +
+            ggtitle('Annotation'),
+          rel_widths = c(1, 1, 0.7),
+          nrow = 1)
+```
+# Mouse vs Human
+
+```{r}
+plot_grid(dittoBarPlot(myeloid_h, 'projection_annotation', group.by = 'less18M', color.panel = my_colors) +
+            ggtitle('Human'),
+          dittoBarPlot(myeloid, 'annotation', group.by = 'age', color.panel = my_colors) +
+            ggtitle('Mouse'))
 ```
 
