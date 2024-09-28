@@ -60,6 +60,9 @@ library(gridExtra)
 library(scCustomize)
 library(enrichR)
 # devtools::install_github("jinworks/CellChat")
+library(CellChat)
+library(patchwork)
+options(stringsAsFactors = FALSE)
 ```
 
 ```{r global variables server, include=FALSE}
@@ -366,13 +369,17 @@ plot_grid(volcano_plot(de.markers) +
           nrow = 1)
 ```
 
+```{r include=FALSE}
+qsave(myeloid, paste0(PREPRDATADIR, 'myeloid_cells_mouse.qs'))
+```
+
 # Human validation
 
 ```{r include=FALSE}
-myeloid_h <- qread(paste0(PREPRDATADIR, 'myeloid_cells_v3.qs'))
+myeloid_h <- qread(paste0(PREPRDATADIR, 'myeloid_cells_v2.qs'))
 ```
 
-```{r eval=FALSE, include=FALSE}
+```{r include=FALSE}
 s.genes <- cc.genes$s.genes
 g2m.genes <- cc.genes$g2m.genes 
 myeloid_h <- myeloid_h %>% 
@@ -391,7 +398,7 @@ myeloid_h <- myeloid_h %>%
     orig.reduction = "pca", new.reduction = "integrated.cca.myeloid",
     verbose = FALSE, k.weight = min(table(myeloid_h$SampleID))) 
 
-myeloid <- JoinLayers(myeloid)
+myeloid_h <- JoinLayers(myeloid_h)
 
 qsave(myeloid_h, paste0(PREPRDATADIR, 'myeloid_cells_v3.qs'))
 ```
@@ -539,4 +546,5 @@ plot_grid(dittoBarPlot(myeloid_h, 'projection_annotation', group.by = 'less18M',
           dittoBarPlot(myeloid, 'annotation', group.by = 'age', color.panel = my_colors) +
             ggtitle('Mouse'))
 ```
+
 

@@ -282,7 +282,7 @@ seu$celltype_humatlas_fine[is.na(seu$celltype_humatlas_fine)] <- 'unknown'
 ```
 
 ```{r metadata load, include=FALSE}
-sample_metadata <- read.csv(paste0(DATADIR, 'samples_metadata_v2.csv'))
+sample_metadata <- read.csv(paste0(DATADIR, 'samples_metadata_v3.csv'))
 sample_metadata[sample_metadata==""] <- NA
 
 rownames(sample_metadata) <- sample_metadata$Sample_dataset
@@ -514,7 +514,8 @@ cnv_scores_list <- mclapply(unique(seu$SampleID), cnv_scores_allsamples, mc.core
 # Remove NULL entries and combine results
 cnv_scores_list <- cnv_scores_list[!sapply(cnv_scores_list, is.null)]
 all_malignant_cells <- unlist(cnv_scores_list)
-
+seu$infercnv_result <- "non-malignant"  # Set default as non-malignant
+seu$infercnv_result[names(all_malignant_cells)] <- all_malignant_cells
 # infercnv_list[[1]]@tumor_subclusters$subclusters
 ```
 

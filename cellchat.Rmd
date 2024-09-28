@@ -1,0 +1,126 @@
+---
+title: "cellchat"
+author: "Kate Petrenko"
+date: "2024-09-21"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+	echo = FALSE,
+	message = FALSE,
+	warning = FALSE
+)
+library(data.table)
+library(Seurat)
+library(scDblFinder)
+library(DoubletFinder)
+library(dplyr)
+library(remotes)
+# remotes::install_github("carmonalab/STACAS")
+library(STACAS)
+library(SingleR)
+# install.packages("scGate")
+library(scGate)
+library(ggplot2)
+library(BiocParallel)
+library(harmony)
+library(RColorBrewer)
+library(stringr)
+library(cowplot)
+library(scuttle)
+# install.packages("devtools")
+# BiocManager::install("Homo.sapiens")
+# BiocManager::install("jpmam1/scalop") #forked copy of a really good guy 
+# devtools::install_github("jlaffy/infercna")
+library(infercna)
+# library(infercnv)
+library(parallel)
+library(future)
+library(clustree)
+library(dittoSeq)
+# install.packages("ggh4x")
+library(ggh4x)
+#BiocManager::install('EnhancedVolcano')
+library(EnhancedVolcano)
+library(clusterProfiler)
+# BiocManager::install('org.Mm.eg.db')
+library("org.Mm.eg.db")
+library(ReactomePA)
+library(msigdbr)
+# install.packages('qs')
+library(qs)
+# devtools::install_github("ncborcherding/escape")
+# devtools::install_github("rcastelo/GSVA")
+library(escape)
+# install.packages('gprofiler2')
+library(gprofiler2)
+# remotes::install_github("carmonalab/ProjecTILs")
+library(ProjecTILs)
+library(gridExtra)
+library(scCustomize)
+library(enrichR)
+# devtools::install_github("jinworks/CellChat")
+library(CellChat)
+library(patchwork)
+options(stringsAsFactors = FALSE)
+```
+
+```{r global variables server, include=FALSE}
+set.seed(100)
+DATADIR = '~/neuroblastoma/data/'
+WORKDIR = '~/neuroblastoma/'
+PREPRDATADIR = '~/neuroblastoma/preprocessing_data/'
+
+my_colors <- c("#9ACD32FF", "#4682B4FF",  "#DDA0DDFF", "#FFA07AFF", "#8FBC8BFF",
+               "#40E0D0FF",  "#F0E68CFF", "#5F9EA0FF", "#D2B48CFF",  
+               "#6495EDFF", "#FF69B4FF", "#BA55D3FF",  "#F08080FF", "#32CD32FF",  
+               "#FFDAB9FF",  "#87CEEBFF")
+```
+
+```{r}
+seu <- qread(paste0(PREPRDATADIR, 'seu_mouse.qs'))
+myeloid <- qread(paste0(PREPRDATADIR, 'myeloid_cells_mouse.qs'))
+t_cells <- qread(paste0(PREPRDATADIR, 't_cells_mouse_v3.qs'))
+```
+
+Added annotation from separated analysis
+
+```{r}
+seu$deep_annotation <- seu$annotation 
+
+```
+
+# CellChat
+
+```{r include=FALSE}
+data.input <- seu[["RNA"]]$data
+labels <- Idents(seu)
+meta <- data.frame(labels = labels, row.names = names(labels))
+
+seu$samples <- seu$age
+cellchat <- createCellChat(object = seu, group.by = "annotation", assay = "RNA")
+```
+
+```{r}
+CellChatDB <- CellChatDB.mouse 
+showDatabaseCategory(CellChatDB)
+```
+
+```{r}
+# use all CellChatDB except for "Non-protein Signaling" for cell-cell communication analysis "Non-protein Signaling" (i.e., metabolic and synaptic signaling)
+CellChatDB.use <- subsetDB(CellChatDB) 
+cellchat@DB <- CellChatDB.use
+```
+
+```{r}
+cellchat <- subsetData(cellchat)
+future::plan("multisession", workers = 4) # do parallel
+cellchat <- identifyOverExpressedGenes(cellchat)
+cellchat <- identifyOverExpressedInteractions(cellchat)
+```
+
+```{r}
+cellchat <- computeCommunProb(cellchat, type = "triMean")
+cellchat <- filterCommunication(cellchat, min.cells = 10)
+```

@@ -63,7 +63,7 @@ seu <- readRDS(paste0(PREPRDATADIR, 'seu_MYCN_MLLT11.rds'))
 ```
 
 ```{r metadata load, include=FALSE}
-sample_metadata <- read.csv(paste0(DATADIR, 'samples_metadata_v2.csv'))
+sample_metadata <- read.csv(paste0(DATADIR, 'samples_metadata_v3.csv'))
 sample_metadata[sample_metadata==""] <- NA
 
 rownames(sample_metadata) <- sample_metadata$Sample_dataset
