@@ -95,11 +95,14 @@ plate_to_fileid_mapping <- wienke_meta$file_id_GEO
 names(plate_to_fileid_mapping) <- rownames(wienke_meta) 
 seu_w$SampleID <- gsub("scR_CEL-Seq2(_\\d+)?", "wienke", plate_to_fileid_mapping)
 seu_w$SampleID <- gsub("scR-CEL-Seq2(_\\d+)?", "wienke", seu_w$SampleID)
+
+# Assign the cleaned gene names back to the Seurat object
+rownames(seu_w) <- make.unique(gsub(".*--", "", rownames(seu_w)))
 ```
 
 # Preprocessing data
 
-```{r data review, eval=FALSE, message=TRUE, warning=TRUE, include=FALSE}
+```{r data review, echo=FALSE, message=TRUE, warning=TRUE}
 seu_list <- SplitObject(seu_w, split.by = "SampleID")
 
 
@@ -149,8 +152,8 @@ seu_list <- lapply(seu_list, function(seu){
 seu_list <- lapply(seu_list, function(seu) {
   print(unique(seu$SampleID))
   # filter low-quality cells and doublets
-  seu <- subset(seu, subset = nFeature_RNA > 200 & nFeature_RNA < 6000 & singlet =='yes' & complexity > 0.8)
-  # seu <- StandardizeGeneSymbols(seu, slot = 'counts', EnsemblGeneTable=EnsemblGeneTable.Hs)
+  seu <- subset(seu, subset = nFeature_RNA > 200 & nFeature_RNA < 6000 & percent_mito < 35 & singlet =='yes' & complexity > 0.8)
+  seu <- StandardizeGeneSymbols(seu, slot = 'counts', EnsemblGeneTable=EnsemblGeneTable.Hs)
   seu <- seu%>%
     NormalizeData() |>
     FindVariableFeatures() |> 
@@ -185,13 +188,14 @@ sample_metadata[sample_metadata==""] <- NA
 rownames(sample_metadata) <- sample_metadata$Sample_dataset
 
 sample_metadata <- sample_metadata %>% 
-  filter(Sample_dataset %in% c(unique(seu$SampleID), 'M2_fetahu'))
+  filter(Sample_dataset %in% unique(seu$SampleID))
 
 seu$sex <- sample_metadata[seu$SampleID,]$Sex
 seu$less18M <- sample_metadata[seu$SampleID,]$less18M
 seu$Survival.Death <- sample_metadata[seu$SampleID,]$Survival.Death
 seu$Site <- sample_metadata[seu$SampleID,]$Site
 seu$INSS_stage <- sample_metadata[seu$SampleID,]$INSS_stage
+seu$Treatment <- sample_metadata[seu$SampleID,]$Treatment
 
 seu$Study <- sapply(str_split(seu$SampleID, "_"), function(x) {
   if (length(x) == 2) {
@@ -208,8 +212,405 @@ seu$Study <- sapply(str_split(seu$SampleID, "_"), function(x) {
 ```{r eval=FALSE, include=FALSE}
 cells_names <- table(seu$celltype_humatlas_main) %>% 
   as.data.frame %>% 
-  filter(Freq > 1500) 
+  filter(Freq > 50) 
 
 seu$celltype_humatlas_main_filt <- ifelse(seu$celltype_humatlas_main %in% cells_names[,1],
                                           seu$celltype_humatlas_main, "unknown")
 ```
+
+# inferCNV
+
+```{r CNV, include=FALSE}
+# When using infercnv::run(), set 'cutoff=0.1' with 10xGenomics data, instead of the default (1) we tend to use with smartSeq2 and less sparse data.
+options(scipen = 100)
+options(bitmapType="Xlib")
+options(bitmapType='cairo')
+plan("sequential")
+
+calculate_cnv <- function(sample) {
+  
+  seu_obj <- subset(seu, SampleID == sample)
+  print(paste(sample, 'is going on...'))
+  
+  # prepare annotation file
+  cell_annotations <- seu_obj$celltype_humatlas_main_filt
+  
+  # Create a data frame with cell names and their annotations
+  annotation_df <- data.frame(
+    CellName = names(cell_annotations),
+    CellType = cell_annotations,
+    stringsAsFactors = FALSE) %>% 
+    mutate(CellType = ifelse(CellType %in% c("Neurons", "Neuroepithelial_cell", "unknown"), 
+                             "malignant", CellType))
+    
+  malignant_count <- sum(annotation_df$CellType == "malignant")
+  
+  if (malignant_count < 2) {
+    print(paste(sample, 'SKIPPED'))
+    return(NULL)
+  }
+  
+  # Count the number of cells in each CellType
+  cell_type_counts <- annotation_df %>%
+    group_by(CellType) %>%
+    summarise(Count = n())
+  
+  # Find cell types with fewer than 2 cells
+  small_cell_types <- cell_type_counts %>%
+    filter(Count < 10) %>%
+    pull(CellType)
+  
+  # Update CellType to "unknown" for small cell types
+  annotation_df <- annotation_df %>%
+    mutate(CellType = ifelse(CellType %in% small_cell_types, "unknown", CellType))
+  
+  write.table(annotation_df, paste0(WORKDIR, "refs/", sample, "_annotation_file.txt"), 
+              sep = "\t", quote = FALSE, row.names = FALSE, col.names = FALSE)
+
+  cell_annotations <- annotation_df$CellType %>% unique() 
+  cell_annotations <- cell_annotations[!cell_annotations %in% c("malignant", "unknown")]
+  
+  # create the infercnv object
+  infercnv_obj = try(CreateInfercnvObject(raw_counts_matrix=seu_obj[["RNA"]]$counts %>% as.matrix(),
+                                      annotations_file=paste0(WORKDIR, "refs/", sample, "_annotation_file.txt"),
+                                      delim="\t",
+                                      gene_order_file=paste0(WORKDIR, 'refs/gencode_v19_gene_pos.txt'),
+                                      ref_group_names=cell_annotations))
+  
+  # perform infercnv operations to reveal cnv signal
+  infercnv_obj = try(infercnv::run(infercnv_obj,
+                               cutoff=0.1,  # use 1 for smart-seq, 0.1 for 10x-genomics
+                               out_dir=paste0(PREPRDATADIR, 'infercnv/', sample),  # dir is auto-created for storing outputs
+                               cluster_by_groups=F,   # cluster
+                               plot_steps = T,
+                               num_ref_groups = length(cell_annotations),
+                               analysis_mode='subclusters',
+                               denoise=T,
+                               HMM=T,
+                               num_threads = 40,
+                               png_res = 300,
+                               write_expr_matrix = T
+                               ) )
+  
+  return(infercnv_obj)
+  
+}
+
+infercnv_list <- lapply(seu$SampleID %>% unique, calculate_cnv)
+
+saveRDS(infercnv_list, paste0(PREPRDATADIR, 'infercnv_list_wienke.rds'))
+```
+
+```{r cnv score, eval=FALSE, include=FALSE}
+# Define the function to calculate CNV score
+calculate_cnv_score <- function(cell_data, reference_data) {
+  return(sum(abs(cell_data - reference_data)))
+}
+
+cnv_scores_allsamples <- function(sample) {
+  
+  obs_file <- paste0(PREPRDATADIR, 'infercnv/', sample, '/infercnv.observations.txt')
+  ref_file <- paste0(PREPRDATADIR, 'infercnv/', sample, '/infercnv.references.txt')
+  if (file.exists(obs_file) & file.exists(ref_file)) {
+    observations <- read.table(obs_file, header = TRUE) %>% as.matrix()
+    references <- read.table(ref_file, header = TRUE)  %>% as.matrix()
+
+    # Calculate CNV scores
+    reference_means <- rowMeans(references)
+    cnv_scores <- apply(observations, 2, calculate_cnv_score, reference_data = reference_means)
+
+    # Define a threshold for CNV score to identify malignant cells
+    threshold <- quantile(cnv_scores, 0.9)
+    malignant_cells <- names(cnv_scores[cnv_scores > threshold])
+    return(malignant_cells)
+  } 
+  else {
+    return(NULL)
+  }
+}
+
+cnv_scores_list <- mclapply(unique(seu$SampleID), cnv_scores_allsamples, mc.cores = 20)
+
+# Remove NULL entries and combine results
+cnv_scores_list <- cnv_scores_list[!sapply(cnv_scores_list, is.null)]
+all_malignant_cells <- unlist(cnv_scores_list)
+seu$infercnv_result <- "non-malignant"  # Set default as non-malignant
+seu$infercnv_result[all_malignant_cells] <- 'malignant'
+# infercnv_list[[1]]@tumor_subclusters$subclusters
+```
+
+
+```{r infercnv plot, echo=FALSE}
+seu <- seu %>% 
+    NormalizeData(verbose=F) %>% 
+    FindVariableFeatures(verbose=F) %>% 
+    ScaleData(verbose=F) %>% 
+    RunPCA(verbose=F) %>% 
+    RunUMAP(dims = 1:20, verbose=F)
+
+DimPlot(seu, group.by='infercnv_result') +
+  scale_color_manual(values = c('#FF69B4FF', 'grey')) +
+  ggtitle('inferCNV')
+```
+
+```{r}
+DimPlot(seu, group.by='celltype_humatlas_main_filt') +
+  ggtitle('inferCNV')
+```
+
+# Annotation
+
+```{r}
+
+annotate <- function(sample) {
+  
+  seu <- subset(seu, SampleID == sample) %>% 
+    NormalizeData() %>%
+    FindVariableFeatures()%>%
+    ScaleData() %>%
+    RunPCA() %>% 
+    RunUMAP(dims = 1:20) %>%
+    FindNeighbors(dims = 1:20) %>%
+    FindClusters(resolution = 1.5)
+  
+  sce <- as.SingleCellExperiment(seu)
+  colLabels(sce) <- seu$RNA_snn_res.1.5
+  Idents(seu) <- 'RNA_snn_res.1.5'
+  
+  # #cluster-wise annotation
+  pred_bped_main <- SingleR(test = sce, ref = hum_atlas_data, clusters=colLabels(sce),
+                            labels = hum_atlas_data$label.main, BPPARAM=MulticoreParam(30))
+  # # Create a named vector for RenameIdents
+  singleR_labels <- pred_bped_main$pruned.labels
+  names(singleR_labels) <- rownames(pred_bped_main)
+  
+  # Update cluster identities in Seurat object based on SingleR results
+  seu <- RenameIdents(seu, singleR_labels)
+  seu[['SingleR_labels']] <- Idents(seu)
+  
+  # define immune cells
+  seu <- scGate(seu, model = scGate_models_DB$human$TME_broad$Immune)
+  barcode_immune <- colnames(seu)[seu$is.pure == 'Pure']
+  
+  # define stromal cells
+  seu <- scGate(seu, model = scGate_models_DB$human$generic$Stromal)
+  barcode_stromal <- colnames(seu)[seu$is.pure == 'Pure']
+  seu <- scGate(seu, model = scGate_models_DB$human$generic$Endothelial)
+  barcode_endo <- colnames(seu)[seu$is.pure == 'Pure']
+  
+  # define malignant cells
+  # malignant_scGate_model <- gating_model(name = "Malignant", signature = c("CHGB","PHOX2B", "TH"))
+  malignant_scGate_model <- gating_model(name = "Malignant",
+                                         signature = c("MYCN","MLLT11", "SLC6A2"))
+  seu <- scGate(data = seu, model = malignant_scGate_model)
+  barcode_malignant <- unique(c(colnames(seu)[seu$is.pure == 'Pure'],
+                         colnames(seu)[seu$infercnv_result == 'malignant']))
+  
+  #define t-cells
+  seu <- scGate(seu, model = scGate_models_DB$human$generic$Tcell)
+  barcode_T <- colnames(seu)[seu$is.pure == 'Pure']
+  
+  seu <- scGate(seu, model = scGate_models_DB$human$generic$NK)
+  barcode_NK <- colnames(seu)[seu$is.pure == 'Pure']
+  
+  #define b-cells
+  seu <- scGate(seu, model = scGate_models_DB$human$generic$Bcell)
+  barcode_B <- colnames(seu)[seu$is.pure == 'Pure']
+  seu <- scGate(seu, model = scGate_models_DB$human$generic$PlasmaCell)
+  barcode_plasma <- colnames(seu)[seu$is.pure == 'Pure']
+  
+  #define myeloid cells
+  seu <- scGate(seu, model = scGate_models_DB$human$generic$Myeloid)
+  barcode_myeloid <- colnames(seu)[seu$is.pure == 'Pure']
+  
+  seu <- scGate(seu, model = scGate_models_DB$human$generic$Monocyte)
+  barcode_monocyte <- colnames(seu)[seu$is.pure == 'Pure']
+  
+  # Assign final labels
+  seu$final_labels <- "unknown"
+  seu$final_labels[colnames(seu) %in% barcode_T] <- "T_cells"
+  seu$final_labels[colnames(seu) %in% barcode_NK] <- "T_cells"
+  seu$final_labels[colnames(seu) %in% barcode_B] <- "B_cells"
+  seu$final_labels[colnames(seu) %in% barcode_plasma] <- "B_cells"
+  seu$final_labels[colnames(seu) %in% barcode_myeloid] <- "myeloid_cells"
+  seu$final_labels[colnames(seu) %in% barcode_monocyte] <- "myeloid_cells"
+  seu$final_labels[colnames(seu) %in% barcode_stromal] <- "stromal_cells"
+  seu$final_labels[colnames(seu) %in% barcode_endo] <- "endothelial_cells"
+  seu$final_labels[colnames(seu) %in% barcode_malignant] <- "malignant_cells"
+  
+  annot_comp <- c("DC" = 'myeloid_cells',
+                  "Smooth_muscle_cells" = "stromal_cells",
+                  "Epithelial_cells" = "stromal_cells",
+                  "B_cell" = "B_cells",
+                  "Neutrophils" = 'myeloid_cells',
+                  "T_cells" = "T_cells",
+                  "Monocyte" = 'myeloid_cells',
+                  "Erythroblast" = 'weird',
+                  "BM & Prog." = 'weird',
+                  "Endothelial_cells" = "endothelial_cells",
+                  "Gametocytes" = 'weird',
+                  "Neurons" = "malignant_cells",
+                  "Keratinocytes" = 'weird',
+                  "HSC_-G-CSF" = 'myeloid_cells',
+                  "Macrophage" = 'myeloid_cells',
+                  "NK_cell" = "T_cells",
+                  "Embryonic_stem_cells" = 'weird',
+                  "Tissue_stem_cells" = "stromal_cells", 
+                  "Chondrocytes" = 'weird',
+                  "Osteoblasts" = 'weird',
+                  "BM" = 'weird',
+                  "Platelets" = 'weird',
+                  "Fibroblasts" = "stromal_cells",
+                  "iPS_cells" = 'weird',
+                  "Hepatocytes" = 'weird',
+                  "MSC" = "stromal_cells",
+                  "Neuroepithelial_cell" = "malignant_cells",
+                  "Astrocyte" = "malignant_cells",
+                  "HSC_CD34+" = 'weird',
+                  "CMP" = 'myeloid_cells',
+                  "GMP" = 'myeloid_cells',
+                  "MEP" = 'weird',
+                  "Myelocyte" = 'myeloid_cells',
+                  "Pre-B_cell_CD34-" = "B_cells",
+                  "Pro-B_cell_CD34+" = "B_cells",
+                  "Pro-Myelocyte" = 'myeloid_cells',
+                  'unknown' = 'unknown')
+  
+  pred_bped_main$pruned.labels[is.na(pred_bped_main$pruned.labels)] <- 'unknown'
+  
+  pred_bped_main$pruned.labels <- annot_comp[as.character(pred_bped_main$pruned.labels)]
+  
+  final_annotation_df <- data.frame(cluster = rownames(pred_bped_main),
+                                    annotation = '-')
+  # Compare SingleR and scGate
+  for (i in rownames(pred_bped_main)) {
+    
+    if (table(seu$RNA_snn_res.1.5)[i] == 0) {
+      next
+    }
+    
+    cells_cluster <- seu[, colnames(seu) %in%  colnames(seu)[seu$RNA_snn_res.1.5 == i]]
+    SingleR_title <- pred_bped_main$pruned.labels[rownames(pred_bped_main) == i]
+    scGate_max <- names(which.max(table(cells_cluster$final_labels)))
+    scGate_max2 <- names(table(cells_cluster$final_labels) %>% sort(decreasing = T))[2]
+    scGate_max2 <- ifelse(is.na(scGate_max2), 'unknown', scGate_max2)
+    
+    if (scGate_max == SingleR_title & scGate_max != 'unknown') {
+      final_annotation_df$annotation[final_annotation_df$cluster == i] <- scGate_max
+    } else if (scGate_max2 == SingleR_title & scGate_max2 != 'unknown') {
+      final_annotation_df$annotation[final_annotation_df$cluster == i] <- scGate_max2
+    } else if (scGate_max == 'unknown' & SingleR_title != 'unknown') {
+      final_annotation_df$annotation[final_annotation_df$cluster == i] <- SingleR_title
+    } else if (scGate_max != 'unknown' & SingleR_title == 'unknown') {
+      final_annotation_df$annotation[final_annotation_df$cluster == i] <- scGate_max
+    } else if (scGate_max == 'stromal_cells' & SingleR_title == 'malignant_cells') {
+      final_annotation_df$annotation[final_annotation_df$cluster == i] <- SingleR_title
+    } else {
+      final_annotation_df$annotation[final_annotation_df$cluster == i] <- 'unresolved'
+    }
+    
+  }
+  
+  final_annotation <- final_annotation_df$annotation
+  names(final_annotation) <- final_annotation_df$cluster
+  
+  Idents(seu) <- 'RNA_snn_res.1.5'
+  seu <- RenameIdents(seu, final_annotation)
+  seu[['ANNOTATION_FINAL']] <- Idents(seu)
+  
+  seu$immune_labels <- "unknown"
+  seu$immune_labels[colnames(seu) %in% barcode_immune] <- "immune"
+  
+  seu$malignant_labels <- "unknown"
+  seu$malignant_labels[colnames(seu) %in% barcode_malignant] <- "malignant"
+  return(seu)
+  
+}
+```
+
+```{r}
+annotated_samples <- mclapply(seu$SampleID %>% unique,
+                              annotate, mc.cores = 5)
+
+names(annotated_samples) <- seu$SampleID %>% unique
+
+qsave(annotated_samples, paste0(PREPRDATADIR, 'seu_list_mypipelineannot_wienke.qs'))
+```
+
+```{r}
+lapply(annotated_samples, function(x) {
+  DimPlot(x, group.by='ANNOTATION_FINAL') +
+  ggtitle(x$SampleID %>% unique())
+  # DimPlot(x, group.by='immune_labels') +
+  #   ggtitle(x$SampleID %>% unique())
+  # DimPlot(x, group.by='malignant_labels') +
+  #   ggtitle(x$SampleID %>% unique())
+})
+```
+
+```{r}
+lapply(annotated_samples, function(x) {
+  DimPlot(x, group.by='final_labels') +
+  ggtitle(x$SampleID %>% unique())
+  # DimPlot(x, group.by='immune_labels') +
+  #   ggtitle(x$SampleID %>% unique())
+  # DimPlot(x, group.by='malignant_labels') +
+  #   ggtitle(x$SampleID %>% unique())
+})
+```
+
+```{r}
+lapply(annotated_samples, function(x) {
+  table(x$ANNOTATION_FINAL)
+  # FeaturePlot(x, c("CHGB","PHOX2B", "TH"))
+  # DimPlot(x, group.by='immune_labels') +
+  #   ggtitle(x$SampleID %>% unique())
+  # DimPlot(x, group.by='malignant_labels') +
+  #   ggtitle(x$SampleID %>% unique())
+})
+```
+
+```{r}
+seu_new <- merge(annotated_samples[[1]], annotated_samples[-1])
+
+table(seu_new$ANNOTATION_FINAL)
+```
+
+# Create new seurat object with filtration by naive-treatment
+
+```{r}
+seu <- qread( paste0(PREPRDATADIR, 'seu_integrated_mypipelineannot_v2.qs'))
+sample_metadata <- read.csv(paste0(DATADIR, 'samples_metadata_v3.csv'))
+sample_metadata[sample_metadata==""] <- NA
+
+rownames(sample_metadata) <- sample_metadata$Sample_dataset
+naive_samples <- sample_metadata %>%
+                  dplyr::filter(Treatment == 'naive') %>%
+                  .$Sample_dataset
+
+seu <- subset(seu, subset = SampleID %in% naive_samples)
+seu <- merge(seu, seu_new)
+
+seu <- seu %>% 
+  NormalizeData() %>% 
+  FindVariableFeatures() %>% 
+  ScaleData() %>% 
+  RunPCA(verbose=FALSE)
+
+seu <- seu %>% 
+  RunHarmony(., 'SampleID',
+             lambda = 1, verbose = FALSE) %>% 
+  RunUMAP(reduction = "harmony", dims = 1:20, verbose=F) 
+
+seu <- subset(seu, ANNOTATION_FINAL %in% c("myeloid_cells", "B_cells", "T_cells",
+                                           "malignant_cells","stromal_cells", "endothelial_cells"))
+
+# qsave(seu, paste0(PREPRDATADIR, 'seu_naivetreatment.qs'))
+seu %>% 
+  DimPlot(group.by='ANNOTATION_FINAL', cols = c("#9ACD32FF", "#FF69B4FF", "#DDA0DDFF", "#4682B4FF",  "#87CEEBFF", "#FFA07AFF")) +
+  ggtitle('Annotation') 
+seu %>% 
+  DimPlot(group.by='Study', cols = c("#9ACD32FF", "#FF69B4FF", "#DDA0DDFF", "#4682B4FF",  "#87CEEBFF")) +
+  ggtitle('Study')
+```
+
