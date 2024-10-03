@@ -1,0 +1,248 @@
+---
+title: "poster_plots"
+author: "Kate Petrenko"
+date: "2024-09-30"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+	echo = FALSE,
+	message = FALSE,
+	warning = FALSE
+)
+library(data.table)
+library(dplyr)
+library(ggplot2)
+library(cowplot)
+library(dittoSeq)
+library(EnhancedVolcano)
+library(tibble)
+library(tidyr)
+library(Seurat)
+library(qs)
+```
+
+
+```{r global variables, include=FALSE}
+set.seed(100)
+DATADIR = '~/neuroblastoma/data/'
+WORKDIR = '~/neuroblastoma/'
+PREPRDATADIR = '~/neuroblastoma/preprocessing_data/'
+
+my_colors <- c("#9ACD32FF", "#4682B4FF",  "#DDA0DDFF", "#FFA07AFF", "#8FBC8BFF",
+               "#40E0D0FF",  "#F0E68CFF", "#5F9EA0FF", "#D2B48CFF",  
+               "#6495EDFF", "#FF69B4FF", "#BA55D3FF",  "#F08080FF", "#32CD32FF",  
+               "#FFDAB9FF",  "#87CEEBFF")
+```
+
+```{r fig.height=4, fig.width=8}
+sample_metadata <- read.csv(paste0(DATADIR, 'samples_metadata_v3.csv'))
+sample_metadata[sample_metadata==""] <- NA
+rownames(sample_metadata) <- sample_metadata$Sample_dataset
+sample_metadata <- sample_metadata %>% 
+  dplyr::filter(Treatment == 'naive')
+
+sample_counts <- sample_metadata %>%
+  group_by(Dataset, less18M) %>%
+  summarise(sample_count = n())
+
+# Plot
+ggplot(sample_counts, aes(x = Dataset, y = sample_count, fill = as.factor(less18M))) +
+  geom_bar(stat = "identity", position = "dodge") +
+  scale_fill_manual(
+    values = c("TRUE" = "#d3abdd", "FALSE" = "#84b0ff"), # Custom colors
+    labels = c("TRUE" = "< 18 months old", "FALSE" = "> 18 months old")  # Custom legend labels
+  ) +
+  scale_y_continuous(breaks = c(2, 4, 6, 8)) + # Custom y-axis ticks
+  labs(title = "Age Distribution of Human Samples",
+       x = "Dataset",
+       y = "Number of Samples",
+       fill = "Age") + # Custom legend title
+  theme_minimal() +
+  theme(
+    text = element_text(family = "Montserrat", size = 14), # Change font family and size
+    axis.title = element_text(size = 16),             # Axis title size
+    axis.text = element_text(size = 12),              # Axis text size
+    plot.title = element_text(size = 18, face = "bold", hjust = 0.5),  # Title size and style
+    legend.title = element_text(size = 14),           # Legend title size
+    legend.text = element_text(size = 12)             # Legend text size
+  )
+```
+
+```{r}
+seu <- qread(paste0(PREPRDATADIR, 'seu_naivetreatment.qs'))
+seu$ANNOTATION_FINAL <- ifelse(seu$ANNOTATION_FINAL == "endothelial_cells", "stromal_cells", seu$ANNOTATION_FINAL)
+```
+
+```{r fig.height=4, fig.width=14}
+plot_grid(seu %>% 
+  DimPlot(group.by='ANNOTATION_FINAL') +
+  ggtitle('Annotation') +
+    scale_color_manual( values = c("#9ACD32FF", "#FF69B4FF", "#DDA0DDFF", "#4682B4FF",  "#87CEEBFF", "#FFA07AFF"),
+    labels = c("B_cells" = "B cells", "malignant_cells" = "Malignant cells",
+               "stromal_cells" = "Stromal cells", "myeloid_cells" = "Myeloid cells",
+               "T_cells" = "T cells")  
+  ), 
+seu %>% 
+  DimPlot(group.by='Study') +
+  ggtitle('Study') +
+    scale_color_manual(
+      values = c("#9ACD32FF", "#FF69B4FF", "#DDA0DDFF", "#4682B4FF",  "#87CEEBFF"),
+    labels = c("jansky" = "Jansky 2021", "verhoeven" = "Verhoeven 2022",
+               "dong" = "Dong 2020", "wienke" = "Wienke 2024")  
+  ))
+```
+
+```{r fig.height=4, fig.width=12}
+plot_grid(DimPlot(seu, group.by='ANNOTATION_FINAL') +
+            ggtitle('Annotation') +
+            scale_color_manual(values = c("#9ACD32FF", "#FF69B4FF", "#DDA0DDFF", "#4682B4FF",  "#87CEEBFF", "#FFA07AFF"),
+    labels = c("B_cells" = "B cells", "malignant_cells" = "Malignant cells",
+               "stromal_cells" = "Stromal cells", "myeloid_cells" = "Myeloid cells",
+               "T_cells" = "T cells")),
+          dittoBarPlot(seu, 'ANNOTATION_FINAL', group.by = 'less18M', split.by = 'Study', color.panel = my_colors) +
+      scale_fill_manual( values = c("#9ACD32FF", "#FF69B4FF", "#DDA0DDFF", "#4682B4FF",  "#87CEEBFF", "#FFA07AFF"),
+    labels = c("B_cells" = "B cells", "malignant_cells" = "Malignant cells",
+               "stromal_cells" = "Stromal cells", "myeloid_cells" = "Myeloid cells",
+               "T_cells" = "T cells") ) + NoLegend() + ggtitle(''),
+          rel_widths = c(1, 0.4),
+          nrow = 1)
+```
+
+```{r}
+seu_mouse <- qread(paste0(PREPRDATADIR, 'seu_mouse.qs'))
+```
+
+```{r fig.height=4, fig.width=9}
+seu_mouse$annotation <- factor(seu_mouse$annotation, levels = c("malignant_cells", "T_cells", "B_cells", "myeloid_cells", "stromal_cells"))
+
+
+plot_grid(seu_mouse %>% 
+  DimPlot(group.by='annotation') +
+    scale_color_manual(values = c("#FF69B4FF", "#87CEEBFF", "#9ACD32FF", "#DDA0DDFF", "#4682B4FF",  "#FFA07AFF"),
+    labels = c("B_cells" = "B cells", "malignant_cells" = "Malignant cells",
+               "stromal_cells" = "Stromal cells", "myeloid_cells" = "Myeloid cells",
+               "T_cells" = "T cells")) +
+  ggtitle('Annotation') +
+    theme_minimal() +
+  theme(
+    text = element_text(family = "Montserrat", size = 14), # Change font family and size
+    axis.title = element_text(size = 16),             # Axis title size
+    axis.text = element_text(size = 12),              # Axis text size
+    plot.title = element_text(size = 18, face = "bold", hjust = 0.5),  # Title size and style
+    legend.title = element_text(size = 14),           # Legend title size
+    legend.text = element_text(size = 12)             # Legend text size
+  ) +
+     NoLegend(), 
+dittoBarPlot(seu_mouse, 'annotation', group.by = 'age', color.panel = my_colors) + 
+  # NoLegend() + 
+  ggtitle('') +
+  scale_fill_manual(
+    values = c("#9ACD32FF", "#FF69B4FF", "#DDA0DDFF", "#4682B4FF", "#87CEEBFF", "#FFA07AFF"),
+    labels = c("B_cells" = "B cells", "malignant_cells" = "Malignant cells",
+               "stromal_cells" = "Stromal cells", "myeloid_cells" = "Myeloid cells",
+               "T_cells" = "T cells")
+  ) +
+  scale_x_discrete(labels =c('young' = "Young", 'adult' = 'Adult')) +
+  theme_minimal() +
+  labs(title = "",
+       x = "Age",
+       fill = "Cell Type") +
+  theme(
+    text = element_text(family = "Montserrat", size = 14), # Change font family and size
+    axis.title = element_text(size = 16),             # Axis title size
+    axis.text = element_text(size = 12),              # Axis text size
+    plot.title = element_text(size = 18, face = "bold", hjust = 0.5),  # Title size and style
+    legend.title = element_text(size = 14),           # Legend title size
+    legend.text = element_text(size = 12),             # Legend text size
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 12)
+  ),
+rel_widths = c(1, 0.6) 
+  )
+```
+
+# ProjectTIL
+
+```{r include=FALSE}
+setwd('~/bigdata/katepetrenko/neuroblastoma/')
+t_cells <- qread(paste0(PREPRDATADIR, 't_cells_mouse_ssGSEAs3.qs'))
+library(ProjecTILs)
+options(timeout = 10000)
+ref <- load.reference.map()
+querydata <- ProjecTILs.classifier(query = t_cells, ref = ref)
+```
+
+```{r}
+querydata <- Run.ProjecTILs(querydata, ref = ref, split.by = "age", ncores = 4)
+plot.projection(ref, querydata, linesize = 0.5, pointsize = 0.5)
+query.list <- SplitObject(querydata, split.by = "age")
+```
+
+
+```{r}
+# Step 1: Combine 'young' cluster information
+young_cluster_info <- query.list[["young"]]$functional.cluster
+young_metadata_vector <- as.character(young_cluster_info)
+names(young_metadata_vector) <- names(young_cluster_info)
+
+# Initialize the vector with NA for all cells
+projection_annotation <- rep(NA, length(Cells(t_cells)))
+names(projection_annotation) <- Cells(t_cells)
+
+# Assign 'young' annotations
+projection_annotation[names(young_metadata_vector)] <- young_metadata_vector
+
+# Step 2: Combine 'adult' cluster information
+adult_cluster_info <- query.list[["adult"]]$functional.cluster
+adult_metadata_vector <- as.character(adult_cluster_info)
+names(adult_metadata_vector) <- names(adult_cluster_info)
+
+# Assign 'adult' annotations, keeping existing 'young' annotations where they exist
+projection_annotation[names(adult_metadata_vector)] <- ifelse(
+  is.na(projection_annotation[names(adult_metadata_vector)]),
+  adult_metadata_vector,
+  projection_annotation[names(adult_metadata_vector)]
+)
+
+# Step 3: Add NK annotation where projection_annotation is still NA
+nk_annotation_vector <- t_cells$NK_annotation  # Assuming NK_annotation exists in t_cells
+
+# Assign NK annotations where projection_annotation is NA
+projection_annotation <- ifelse(
+  is.na(projection_annotation) & !is.na(nk_annotation_vector),
+  "NK_cells",
+  projection_annotation
+)
+
+# Add the final combined annotation to the Seurat object
+t_cells$projection_annotation <- factor(projection_annotation, levels = c("CD8_Tex", "CD8_Tpex", "CD8_EffectorMemory", "CD8_EarlyActiv", "CD8_NaiveLike", "CD4_NaiveLike", "Tfh", "Th1", "Treg", 'NK_cells'))
+```
+
+```{r fig.height=4, fig.width=13}
+
+pll <- list()
+
+pll[[1]] <- plot.projection(ref, query.list[["young"]], linesize = 0.5, pointsize = 0.5, cols  = my_colors) +
+  scale_fill_discrete(type = my_colors, breaks=c("CD8_Tex", "CD8_Tpex", "CD8_EffectorMemory", "CD8_EarlyActiv", "CD8_NaiveLike", "CD4_NaiveLike", "Tfh", "Th1", "Treg")) +
+    ggtitle("Young") + NoLegend()
+# pll[[2]] <- plot.statepred.composition(ref, query.list[["young"]], metric = "Percent") +
+#     ggtitle("Young") + ylim(0, 40)
+# pll[[2]] <- dittoBarPlot(subset(t_cells, age == 'young'), group.by = 'projection_annotation', color.panel = my_colors) +
+#    ggtitle("Young")
+pll[[3]] <- plot.projection(ref, query.list[["adult"]], linesize = 0.5, pointsize = 0.5, cols = my_colors) +
+  scale_fill_discrete(type = my_colors, breaks=c("CD8_Tex", "CD8_Tpex", "CD8_EffectorMemory", "CD8_EarlyActiv", "CD8_NaiveLike", "CD4_NaiveLike", "Tfh", "Th1", "Treg")) +
+    ggtitle("Adult") 
+# pll[[4]] <- plot.statepred.composition(ref, query.list[["adult"]], metric = "Percent") +
+#     ggtitle("Adult") + ylim(0, 40)
+# pll[[4]] <- dittoBarPlot(subset(t_cells, age == 'adult'),  group.by = 'projection_annotation', color.panel = my_colors) +
+#    ggtitle("Adult")
+pll[[5]] <- dittoBarPlot(t_cells, 'projection_annotation', group.by = 'age', color.panel = my_colors) +
+  scale_fill_manual(values = my_colors, breaks=c("CD8_Tex", "CD8_Tpex", "CD8_EffectorMemory", "CD8_EarlyActiv", "CD8_NaiveLike", "CD4_NaiveLike", "Tfh", "Th1", "Treg", 'NK_cells')) +
+  ggtitle('')
+
+plot_grid(pll[[1]], pll[[3]], pll[[5]], ncol = 3, nrow = 1, rel_widths = c(1.3, 2, 1.2))
+
+
+```
+
