@@ -234,7 +234,7 @@ DimPlot(t_cells, group.by = 'SingleR_imm_ref_v2', cols = my_colors)
 ```
 
 ```{r fig.height=5, fig.width=10, include=FALSE}
-# sce <- as.SingleCellExperiment(t_cells)
+sce <- as.SingleCellExperiment(t_cells)
 
 replacement_map <- c(
   # T cells
@@ -400,10 +400,9 @@ replacement_map <- c(
   "T cells (T.DN3-4)" = 'T cells'
 )
 
-
 # #cluster-wise annotation
 pred_bped_main <- SingleR(test = sce, ref = mouse_ref_imm, 
-                          labels = mouse_ref_imm$label.fine.modified, BPPARAM=MulticoreParam(5))
+                          labels = mouse_ref_imm$label.fine, BPPARAM=MulticoreParam(5))
 # # # Create a named vector for RenameIdents
 # singleR_labels <- pred_bped_main$pruned.labels
 # names(singleR_labels) <- rownames(pred_bped_main)
@@ -644,6 +643,7 @@ dittoBarPlot(t_cells_h, 'less18M', group.by = 'SingleR_fine_tune', color.panel =
 dittoBarPlot(t_cells_h, 'SingleR_fine_tune', group.by = 'Study', color.panel = my_colors)
 dittoBarPlot(t_cells_h, 'SingleR_fine_tune', group.by = 'less18M', color.panel = my_colors)
 ```
+
 ```{r echo=FALSE, fig.width=12}
 plot_data <- as.data.frame(table(t_cells_h@meta.data$SampleID, t_cells_h$SingleR_fine_tune, t_cells_h$less18M))
 colnames(plot_data) <- c("SampleID", "Annotation", 'less18M', "Count")

@@ -64,6 +64,7 @@ library(enrichR)
 library(CellChat)
 library(patchwork)
 options(stringsAsFactors = FALSE)
+# reticulate::py_install(packages = c("umap-learn==0.5.4","numpy<2"))
 ```
 
 ```{r global variables server, include=FALSE}
@@ -87,19 +88,37 @@ t_cells <- qread(paste0(PREPRDATADIR, 't_cells_mouse_v3.qs'))
 Added annotation from separated analysis
 
 ```{r}
-seu$deep_annotation <- seu$annotation 
+Idents(object = seu) <- "RNA_snn_res.0.1"
 
+new.cluster.ids <- c('0'='Malignant cells',
+                     '1'='Malignant cells',
+                     '2'='T cells',
+                     '3'='B cells',
+                     '4'='Myeloid cells',
+                     '5'='Fibroblasts',
+                     '6'='Malignant cells',
+                     '6'='Malignant cells',
+                     '7'='Endothelial cells',
+                     '8'='Fibroblasts'
+)
+
+seu <- RenameIdents(seu, new.cluster.ids)
+seu$annotation <- Idents(seu)
+
+seu$deep_annotation <- seu$annotation
+seu$deep_annotation <- as.character(seu$deep_annotation)
+myeloid$annotation <- as.character(myeloid$annotation)
+seu$deep_annotation[Cells(myeloid)] <- myeloid$annotation
+seu$deep_annotation[Cells(t_cells)] <- t_cells$SingleR_imm_ref_v4
 ```
 
 # CellChat
 
-```{r include=FALSE}
-data.input <- seu[["RNA"]]$data
-labels <- Idents(seu)
-meta <- data.frame(labels = labels, row.names = names(labels))
+## Young
 
+```{r include=FALSE}
 seu$samples <- seu$age
-cellchat <- createCellChat(object = seu, group.by = "annotation", assay = "RNA")
+cellchat_young <- createCellChat(object = subset(seu, age == 'young'), group.by = "annotation", assay = "RNA")
 ```
 
 ```{r}
@@ -110,17 +129,264 @@ showDatabaseCategory(CellChatDB)
 ```{r}
 # use all CellChatDB except for "Non-protein Signaling" for cell-cell communication analysis "Non-protein Signaling" (i.e., metabolic and synaptic signaling)
 CellChatDB.use <- subsetDB(CellChatDB) 
-cellchat@DB <- CellChatDB.use
+cellchat_young@DB <- CellChatDB.use
 ```
 
 ```{r}
-cellchat <- subsetData(cellchat)
-future::plan("multisession", workers = 4) # do parallel
-cellchat <- identifyOverExpressedGenes(cellchat)
-cellchat <- identifyOverExpressedInteractions(cellchat)
+cellchat_young <- subsetData(cellchat_young)
+future::plan("multisession", workers = 8) # do parallel
+cellchat_young <- identifyOverExpressedGenes(cellchat_young)
+cellchat_young <- identifyOverExpressedInteractions(cellchat_young)
 ```
 
 ```{r}
-cellchat <- computeCommunProb(cellchat, type = "triMean")
-cellchat <- filterCommunication(cellchat, min.cells = 10)
+cellchat_young <- computeCommunProb(cellchat_young, type = "triMean")
+cellchat_young <- filterCommunication(cellchat_young, min.cells = 10)
 ```
+
+```{r}
+df.net.young <- subsetCommunication(cellchat_young)
+```
+
+```{r}
+cellchat_young <- computeCommunProbPathway(cellchat_young)
+cellchat_young <- aggregateNet(cellchat_young)
+cellchat_young <- netAnalysis_computeCentrality(cellchat_young)
+
+groupSize <- as.numeric(table(cellchat_young@idents))
+par(mfrow = c(1,2), xpd=TRUE)
+netVisual_circle(cellchat_young@net$count, vertex.weight = groupSize, weight.scale = T, label.edge= F, title.name = "Number of interactions")
+netVisual_circle(cellchat_young@net$weight, vertex.weight = groupSize, weight.scale = T, label.edge= F, title.name = "Interaction weights/strength")
+```
+
+## Adult
+
+```{r include=FALSE}
+seu$samples <- seu$age
+cellchat_adult <- createCellChat(object = subset(seu, age == 'adult'), group.by = "annotation", assay = "RNA")
+```
+
+```{r}
+cellchat_adult@DB <- CellChatDB.use
+```
+
+```{r}
+cellchat_adult <- subsetData(cellchat_adult)
+future::plan("multisession", workers = 8) # do parallel
+cellchat_adult <- identifyOverExpressedGenes(cellchat_adult)
+cellchat_adult <- identifyOverExpressedInteractions(cellchat_adult)
+```
+
+```{r}
+cellchat_adult <- computeCommunProb(cellchat_adult, type = "triMean")
+cellchat_adult <- filterCommunication(cellchat_adult, min.cells = 10)
+```
+
+```{r}
+df.net.adult <- subsetCommunication(cellchat_adult)
+```
+
+```{r}
+cellchat_adult <- computeCommunProbPathway(cellchat_adult)
+cellchat_adult <- aggregateNet(cellchat_adult)
+cellchat_adult <- netAnalysis_computeCentrality(cellchat_adult)
+
+groupSize <- as.numeric(table(cellchat_adult@idents))
+par(mfrow = c(1,2), xpd=TRUE)
+netVisual_circle(cellchat_adult@net$count, vertex.weight = groupSize, weight.scale = T, label.edge= F, title.name = "Number of interactions")
+netVisual_circle(cellchat_adult@net$weight, vertex.weight = groupSize, weight.scale = T, label.edge= F, title.name = "Interaction weights/strength")
+```
+
+# Comparison
+
+```{r}
+object.list <- list(young = cellchat_young, adult = cellchat_adult)
+cellchat <- mergeCellChat(object.list, add.names = names(object.list))
+```
+
+```{r}
+qsave(cellchat, paste0(PREPRDATADIR, 'cellchat_mouse.qs'))
+```
+
+```{r}
+gg1 <- compareInteractions(cellchat, show.legend = F, group = c(1,2))
+gg2 <- compareInteractions(cellchat, show.legend = F, group = c(1,2), measure = "weight")
+gg1 + gg2
+```
+
+```{r}
+par(mfrow = c(1,2), xpd=TRUE)
+netVisual_diffInteraction(cellchat, weight.scale = T)
+netVisual_diffInteraction(cellchat, weight.scale = T, measure = "weight")
+```
+
+```{r}
+# red - increased in adult
+gg1 <- netVisual_heatmap(cellchat)
+#> Do heatmap based on a merged object
+gg2 <- netVisual_heatmap(cellchat, measure = "weight")
+#> Do heatmap based on a merged object
+gg1 + gg2
+```
+
+```{r}
+weight.max <- getMaxWeight(object.list, attribute = c("idents","count"))
+par(mfrow = c(1,2), xpd=TRUE)
+for (i in 1:length(object.list)) {
+  netVisual_circle(object.list[[i]]@net$count, weight.scale = T, label.edge= F, edge.weight.max = weight.max[2], edge.width.max = 12, title.name = paste0("Number of interactions - ", names(object.list)[i]))
+}
+```
+
+```{r}
+num.link <- sapply(object.list, function(x) {rowSums(x@net$count) + colSums(x@net$count)-diag(x@net$count)})
+weight.MinMax <- c(min(num.link), max(num.link)) # control the dot size in the different datasets
+gg <- list()
+for (i in 1:length(object.list)) {
+  gg[[i]] <- netAnalysis_signalingRole_scatter(object.list[[i]], title = names(object.list)[i], weight.MinMax = weight.MinMax)
+}
+#> Signaling role analysis on the aggregated cell-cell communication network from all signaling pathways
+#> Signaling role analysis on the aggregated cell-cell communication network from all signaling pathways
+patchwork::wrap_plots(plots = gg)
+```
+
+```{r fig.height=5, fig.width=12}
+gg1 <- netAnalysis_signalingChanges_scatter(cellchat, idents.use = "Malignant cells")
+#> Visualizing differential outgoing and incoming signaling changes from NL to LS
+#> The following `from` values were not present in `x`: 0
+#> The following `from` values were not present in `x`: 0, -1
+gg2 <- netAnalysis_signalingChanges_scatter(cellchat, idents.use = "Myeloid cells")
+#> Visualizing differential outgoing and incoming signaling changes from NL to LS
+#> The following `from` values were not present in `x`: 0, 2
+#> The following `from` values were not present in `x`: 0, -1
+patchwork::wrap_plots(plots = list(gg1,gg2))
+```
+
+
+```{r}
+
+cellchat <- computeNetSimilarityPairwise(cellchat, type = "functional")
+#> Compute signaling network similarity for datasets 1 2
+cellchat <- netEmbedding(cellchat, type = "functional")
+#> Manifold learning of the signaling networks for datasets 1 2
+cellchat <- netClustering(cellchat, type = "functional")
+#> Classification learning of the signaling networks for datasets 1 2
+# Visualization in 2D-space
+netVisual_embeddingPairwise(cellchat, type = "functional", label.size = 3.5)
+#> 2D visualization of signaling networks from datasets 1 2
+```
+
+```{r}
+cellchat <- computeNetSimilarityPairwise(cellchat, type = "structural")
+cellchat <- netEmbedding(cellchat, type = "structural")
+cellchat <- netClustering(cellchat, type = "structural")
+# Visualization in 2D-space
+netVisual_embeddingPairwise(cellchat, type = "structural", label.size = 3.5)
+netVisual_embeddingPairwiseZoomIn(cellchat, type = "structural", nCol = 2)
+```
+
+
+```{r fig.height=8, fig.width=6}
+rankSimilarity(cellchat, type = "functional")
+```
+
+```{r fig.height=10, fig.width=8}
+gg1 <- rankNet(cellchat, mode = "comparison", measure = "weight", sources.use = NULL, targets.use = NULL, stacked = T, do.stat = TRUE)
+gg2 <- rankNet(cellchat, mode = "comparison", measure = "weight", sources.use = NULL, targets.use = NULL, stacked = F, do.stat = TRUE)
+
+gg1 + gg2
+```
+
+```{r fig.height=11, fig.width=8}
+library(ComplexHeatmap)
+#> Loading required package: grid
+#> ========================================
+#> ComplexHeatmap version 2.15.4
+#> Bioconductor page: http://bioconductor.org/packages/ComplexHeatmap/
+#> Github page: https://github.com/jokergoo/ComplexHeatmap
+#> Documentation: http://jokergoo.github.io/ComplexHeatmap-reference
+#> 
+#> If you use it in published research, please cite either one:
+#> - Gu, Z. Complex Heatmap Visualization. iMeta 2022.
+#> - Gu, Z. Complex heatmaps reveal patterns and correlations in multidimensional 
+#>     genomic data. Bioinformatics 2016.
+#> 
+#> 
+#> The new InteractiveComplexHeatmap package can directly export static 
+#> complex heatmaps into an interactive Shiny app with zero effort. Have a try!
+#> 
+#> This message can be suppressed by:
+#>   suppressPackageStartupMessages(library(ComplexHeatmap))
+#> ========================================
+i = 1
+# combining all the identified signaling pathways from different datasets 
+pathway.union <- union(object.list[[i]]@netP$pathways, object.list[[i+1]]@netP$pathways)
+ht1 = netAnalysis_signalingRole_heatmap(object.list[[i]], pattern = "outgoing", signaling = pathway.union, title = names(object.list)[i], width = 5, height = 22)
+ht2 = netAnalysis_signalingRole_heatmap(object.list[[i+1]], pattern = "outgoing", signaling = pathway.union, title = names(object.list)[i+1], width = 5, height = 22)
+draw(ht1 + ht2, ht_gap = unit(0.5, "cm"))
+```
+
+```{r fig.height=11, fig.width=8}
+ht1 = netAnalysis_signalingRole_heatmap(object.list[[i]], pattern = "incoming", signaling = pathway.union, title = names(object.list)[i], width = 5, height = 22, color.heatmap = "GnBu")
+ht2 = netAnalysis_signalingRole_heatmap(object.list[[i+1]], pattern = "incoming", signaling = pathway.union, title = names(object.list)[i+1], width = 5, height = 22, color.heatmap = "GnBu")
+draw(ht1 + ht2, ht_gap = unit(0.5, "cm"))
+```
+
+```{r fig.height=11, fig.width=8}
+ht1 = netAnalysis_signalingRole_heatmap(object.list[[i]], pattern = "all", signaling = pathway.union, title = names(object.list)[i], width = 5, height = 22, color.heatmap = "OrRd")
+ht2 = netAnalysis_signalingRole_heatmap(object.list[[i+1]], pattern = "all", signaling = pathway.union, title = names(object.list)[i+1], width = 5, height = 22, color.heatmap = "OrRd")
+draw(ht1 + ht2, ht_gap = unit(0.5, "cm"))
+```
+
+```{r fig.height=20, fig.width=6}
+netVisual_bubble(cellchat, sources.use = 1, targets.use = c(2:6),  comparison = c(1, 2), angle.x = 45)
+```
+
+```{r fig.height=16, fig.width=10}
+gg1 <- netVisual_bubble(cellchat, sources.use = 1, targets.use = c(2:6),  comparison = c(1, 2), max.dataset = 2, title.name = "Increased signaling in adult", angle.x = 45, remove.isolate = T)
+#> Comparing communications on a merged object
+gg2 <- netVisual_bubble(cellchat, sources.use = 1, targets.use = c(2:6),  comparison = c(1, 2), max.dataset = 1, title.name = "Decreased signaling in adult", angle.x = 45, remove.isolate = T)
+#> Comparing communications on a merged object
+gg1 + gg2
+```
+
+# Dif expr
+
+```{r}
+# define a positive dataset, i.e., the dataset with positive fold change against the other dataset
+pos.dataset = "young"
+# define a char name used for storing the results of differential expression analysis
+features.name = paste0(pos.dataset, ".merged")
+
+# perform differential expression analysis 
+# Of note, compared to CellChat version < v2, CellChat v2 now performs an ultra-fast Wilcoxon test using the presto package, which gives smaller values of logFC. Thus we here set a smaller value of thresh.fc compared to the original one (thresh.fc = 0.1). Users can also provide a vector and dataframe of customized DEGs by modifying the cellchat@var.features$LS.merged and cellchat@var.features$LS.merged.info. 
+
+cellchat <- identifyOverExpressedGenes(cellchat, group.dataset = "datasets", pos.dataset = pos.dataset, features.name = features.name, only.pos = FALSE, thresh.pc = 0.1, thresh.fc = 0.05,thresh.p = 0.05, group.DE.combined = FALSE) 
+#> Use the joint cell labels from the merged CellChat object
+
+# map the results of differential expression analysis onto the inferred cell-cell communications to easily manage/subset the ligand-receptor pairs of interest
+net <- netMappingDEG(cellchat, features.name = features.name, variable.all = TRUE)
+# extract the ligand-receptor pairs with upregulated ligands in LS
+net.up <- subsetCommunication(cellchat, net = net, datasets = "young",ligand.logFC = 0.05, receptor.logFC = NULL)
+# extract the ligand-receptor pairs with upregulated ligands and upregulated receptors in NL, i.e.,downregulated in LS
+net.down <- subsetCommunication(cellchat, net = net, datasets = "adult",ligand.logFC = -0.05, receptor.logFC = NULL)
+
+
+```
+
+```{r}
+gene.up <- extractGeneSubsetFromPair(net.up, cellchat)
+gene.down <- extractGeneSubsetFromPair(net.down, cellchat)
+
+# df <- findEnrichedSignaling(object.list[[2]], features = c("CCL19", "CXCL12"), idents = c("Inflam. FIB", "COL11A1+ FIB"), pattern ="outgoing")
+```
+
+```{r fig.height=15, fig.width=10}
+pairLR.use.up = net.up[, "interaction_name", drop = F]
+gg1 <- netVisual_bubble(cellchat, pairLR.use = pairLR.use.up, sources.use = 1, targets.use = c(2:6), comparison = c(1, 2),  angle.x = 90, remove.isolate = T,title.name = paste0("Down-regulated signaling in ", names(object.list)[2]))
+#> Comparing communications on a merged object
+pairLR.use.down = net.down[, "interaction_name", drop = F]
+gg2 <- netVisual_bubble(cellchat, pairLR.use = pairLR.use.down, sources.use = 1, targets.use = c(2:6), comparison = c(1, 2),  angle.x = 90, remove.isolate = T,title.name = paste0("Up-regulated signaling in ", names(object.list)[2]))
+#> Comparing communications on a merged object
+gg1 + gg2
+```
+

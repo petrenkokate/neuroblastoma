@@ -49,6 +49,19 @@ library(msigdbr)
 library(qs)
 # BiocManager::install('multtest')
 # install.packages('metap')
+library(pheatmap)
+library(edgeR)
+library(limma)
+# BiocManager::install('apeglm')
+# install.packages('ashr')
+# install.packages('VennDiagram')
+library(VennDiagram)
+# BiocManager::install("glmGamPoi")
+library(glmGamPoi)
+# BiocManager::install("metapod")
+library(metapod)
+# install.packages('forestplot')
+library(forestplot)
 ```
 
 ```{r read data, include=FALSE}
@@ -62,36 +75,16 @@ my_colors <- c("#9ACD32FF", "#4682B4FF",  "#DDA0DDFF", "#FFA07AFF", "#8FBC8BFF",
                "#6495EDFF", "#FF69B4FF", "#BA55D3FF",  "#F08080FF", "#32CD32FF",  
                "#FFDAB9FF",  "#87CEEBFF")
 
-t_cells <- qread(paste0(PREPRDATADIR, 't_cells_v2.qs'))
+seu <- qread(paste0(PREPRDATADIR, 'seu_naivetreatment.qs'))
 ```
 
-# Overview of all immune cells
-
-I decided to redo the analysis after reading a lot about integrated analysis. I discovered that it isn’t statistically correct to count differential expression (DE) by cells. They advised using pseudobulk for this purpose, so I did it. Here, I present DE by pseudobulk for each patient. 
-
-```{r fig.height=8, fig.width=15}
-t_cells.de.markers <- read.csv(paste0(PREPRDATADIR, 't_cells_de_markers_bulk.csv'), row.names = 1)
-b_cells.de.markers <- read.csv(paste0(PREPRDATADIR, 'b_cells_de_markers_bulk.csv'), row.names = 1)
-myeloid.de.markers <- read.csv(paste0(PREPRDATADIR, 'myeloid_de_markers_bulk.csv'), row.names = 1)
-
-volcano_plot <- function(de.markers) {
-  EnhancedVolcano(de.markers,
-    lab = rownames(de.markers),
-    x = 'avg_log2FC',
-    y = 'p_val_adj',
-    col = c("grey30", "#9ACD32FF", "#6495EDFF", "#FF69B4FF"),
-    drawConnectors = TRUE,
-    pCutoff = 0.05) +
-  labs(subtitle = "< 18M vs > 18M")
-}
-
-plot_grid(volcano_plot(t_cells.de.markers) +
-            ggtitle('T-cells'),
-          volcano_plot(b_cells.de.markers) +
-            ggtitle('B-cells'),
-          volcano_plot(myeloid.de.markers) +
-            ggtitle('Myeloid cells'), 
-          nrow = 1)
+```{r download references, message=FALSE, warning=FALSE, include=FALSE}
+bped <- celldex::BlueprintEncodeData()
+hum_atlas_data <- celldex::HumanPrimaryCellAtlasData()
+s.genes <- cc.genes$s.genes
+g2m.genes <- cc.genes$g2m.genes 
+data(EnsemblGeneTable.Hs)
+scGate_models_DB <- get_scGateDB()
 ```
 
 ```{r}
@@ -99,6 +92,17 @@ t_cells_h <- subset(seu, ANNOTATION_FINAL == 'T_cells')
 
 t_cells_list <- lapply(t_cells_h$SampleID %>% unique, function(sample) {
   
+  if (sample %in% c('M228AAA_T1_wienke','Tumor_27_dong','M277AAB_T_wienke')) {
+    t_cell_sample <- subset(t_cells_h, SampleID == sample) %>% 
+    NormalizeData() %>%
+    FindVariableFeatures()%>%
+    ScaleData() %>%
+    RunPCA(npcs = 20) %>% 
+    RunUMAP(dims = 1:20) %>%
+    FindNeighbors(dims = 1:20) %>%
+    FindClusters(resolution = 1.5)
+  }
+  else {
   t_cell_sample <- subset(t_cells_h, SampleID == sample) %>% 
     NormalizeData() %>%
     FindVariableFeatures()%>%
@@ -107,7 +111,7 @@ t_cells_list <- lapply(t_cells_h$SampleID %>% unique, function(sample) {
     RunUMAP(dims = 1:20) %>%
     FindNeighbors(dims = 1:20) %>%
     FindClusters(resolution = 1.5)
-  
+  }
   sce <- as.SingleCellExperiment(t_cell_sample)
   colLabels(sce) <- t_cell_sample$RNA_snn_res.1.5
   Idents(t_cell_sample) <- 'RNA_snn_res.1.5'
@@ -142,13 +146,11 @@ t_cells_list <- lapply(t_cells_h$SampleID %>% unique, function(sample) {
   return(t_cell_sample)
 })
 
-qsave(t_cells_list, paste0(PREPRDATADIR, 't_cells_human_list_annotation.qs'))
+qsave(t_cells_list, paste0(PREPRDATADIR, 't_cells_human_list_annotation_v2.qs'))
 ```
 
 ```{r}
-t_cells_list <- qread(paste0(PREPRDATADIR, 't_cells_human_list_annotation.qs'))
-t_cells_list$NB5_yuan <- NULL
-t_cells_list$Tumor_27_dong <- NULL
+t_cells_list <- qread(paste0(PREPRDATADIR, 't_cells_human_list_annotationv2.qs'))
 t_cells_h <- merge(x=t_cells_list[[1]], y=t_cells_list[2:length(t_cells_list)])
 rm(t_cells_list)
 ```
@@ -175,4 +177,507 @@ DimPlot(t_cells_h, group.by = 'SingleR_main')
 DimPlot(t_cells_h, group.by = 'SingleR_fine')
 DimPlot(t_cells_h, group.by = 'scGate_multi')
 ```
+
+# DE
+
+```{r fig.height=8, fig.width=5}
+t_cells_h <- JoinLayers(t_cells_h)
+Idents(t_cells_h) <- "less18M"
+t_cells.de.markers <- FindMarkers(t_cells_h, 
+                                  ident.1 = "TRUE", ident.2 = "FALSE", 
+                                  min.pct = 0.25)
+
+volcano_plot <- function(de.markers) {
+  EnhancedVolcano(de.markers,
+    lab = rownames(de.markers),
+    x = 'avg_log2FC',
+    y = 'p_val_adj',
+    col = c("grey30","#8FBC8BFF", "#6495EDFF", "#BA55D3FF"),
+    drawConnectors = TRUE,
+    pCutoff = 0.05, 
+    FCcutoff = 0.5,
+    max.overlaps = 30,
+    titleLabSize = 14, 
+    subtitleLabSize = 12,
+    captionLabSize = 12,
+    legendLabSize = 12,
+    legendIconSize = 3
+    ) +
+  labs(subtitle = "Young vs Adult")
+}
+
+plot_grid(volcano_plot(t_cells.de.markers) +
+            ggtitle('T-cells'))
+```
+
+```{r}
+t_cells.de.markers %>% 
+  dplyr::filter(p_val_adj < 0.05) %>% 
+  arrange(avg_log2FC)
+```
+
+# DEseq2
+
+```{r create pseudoreplicates, eval=FALSE, include=FALSE}
+seu$less18M <- as.character(seu$less18M)
+seu$rep <- NA
+create_pseudorep <- function(seu) {
+  
+  rep1 <- c()
+  rep2 <- c()
+  rep3 <- c()
+  reps <- list(rep1, rep2, rep3)
+  
+  samples <- seu$SampleID %>% unique
+  cell_types <- seu$ANNOTATION_FINAL %>% unique
+  sample_annot_table <- table(seu$ANNOTATION_FINAL, seu$SampleID)
+  for (sample in samples) {
+    for (celltype in cell_types) {
+      
+      if (sample_annot_table[celltype, sample] >= 150) {
+        
+        cells <- WhichCells(seu, expression = ANNOTATION_FINAL ==  celltype & SampleID == sample)
+        cells_split <- split(cells,  cut(seq_along(cells), 3, labels = FALSE))
+        reps[[1]] <- c(reps[[1]], cells_split[1])
+        reps[[2]] <- c(reps[[2]], cells_split[2])
+        reps[[3]] <- c(reps[[3]], cells_split[3])
+      }
+      else if (sample_annot_table[celltype, sample] >= 90) {
+        cells <- WhichCells(seu, expression = ANNOTATION_FINAL ==  celltype & SampleID == sample)
+        cells_split <- split(cells,  cut(seq_along(cells), 2, labels = FALSE))
+        reps[[1]] <- c(reps[[1]], cells_split[1])
+        reps[[2]] <- c(reps[[2]], cells_split[2])
+      }
+    }
+  }
+  return(reps)
+}
+
+replicates_list <- create_pseudorep(seu)
+
+for (i in seq_along(replicates_list)) {
+  replicate_name <- paste0("rep", i)
+  cells <- unlist(replicates_list[[i]])
+  seu$rep[cells] <- replicate_name
+}
+```
+
+```{r eval=FALSE, include=FALSE}
+seu_bulk <- subset(seu, rep %in% c('rep1', 'rep2', 'rep3'))
+# seu_bulk <- subset(seu_bulk, Study != 'jansky')
+bulk <- AggregateExpression(seu_bulk, return.seurat = T, slot = "counts", assays = "RNA", 
+                            group.by = c("ANNOTATION_FINAL", "SampleID", "less18M", 'rep'))
+Idents(bulk) <- "less18M"
+```
+
+# Create matrices for DEseq
+
+```{r create matrices for deseq}
+create_count_matrix_from_bulk <- function(bulk) {
+  cts <- bulk[["RNA"]]$counts %>% as.matrix()
+
+  coldata <- bulk@meta.data 
+  
+  coldata$Study <- sapply(str_split(coldata$SampleID, "-"), function(x) {
+    if (length(x) == 2) {
+      return(x[2])
+    } else if (length(x) == 3) {
+      return(x[3])
+    } else {
+      return(NA)
+    }
+  })
+  
+  coldata$Technology <- '10x'
+  coldata$Technology[coldata$Study == 'wienke'] <- 'Cel-Seq2'
+  
+  ## SPLIT MATRIX BY CELL TYPE
+  # transpose
+  cts.t <- t(cts)
+  # convert to data.frame
+  cts.t <- as.data.frame(cts.t)
+  # get values where to split
+  splitRows <- gsub('_.*', '', rownames(cts.t))
+  # split data.frame
+  cts.split <- split.data.frame(cts.t,
+                   f = factor(splitRows))
+  
+  # fix colnames and transpose
+  cts.split.modified <- lapply(cts.split, function(x){
+    rownames(x) <- rownames(x) %>% str_extract("[A-Za-z0-9-]+_(.*)", group = 1)
+    t(x)
+  
+  })
+  return(list(count_matrix = cts.split.modified, metadata = coldata))
+}
+
+cts.split.modified <- create_count_matrix_from_bulk(bulk)
+coldata <- cts.split.modified$metadata
+cts.split.modified <- cts.split.modified$count_matrix
+```
+
+# DEseq 
+
+```{r function for deseq}
+deseq_batch_correct <- function(list_matrix, coldata, cell_type, design) {
+  
+  count_matrix <- as.matrix(list_matrix[cell_type][[1]])
+  coldata_cell <- coldata %>% dplyr::filter(ANNOTATION_FINAL == cell_type) %>%
+                                set_rownames(rownames(.) %>% str_extract("[A-Za-z0-9-]+_(.*)",
+                                                                         group = 1))
+  dds <- DESeqDataSetFromMatrix(round(count_matrix), 
+                              colData = coldata_cell, 
+                              design = design)
+  
+  dds <- DESeq(dds)
+  
+  res <- results(dds,
+                contrast= list('less18M_TRUE_vs_FALSE'))
+  res <- lfcShrink(dds,
+                   contrast= list('less18M_TRUE_vs_FALSE'),
+                   type='ashr',
+                   res=res)
+
+  res_tbl <- res %>%
+        data.frame() %>%
+        rownames_to_column(var="gene") %>%
+        as_tibble()
+  
+  normalized_counts <- counts(dds, 
+                            normalized = TRUE)
+  
+  sig_res <- dplyr::filter(res_tbl, padj < 0.05) %>%
+        dplyr::arrange(padj)
+  
+  sig_norm <- data.frame(normalized_counts) %>%
+        rownames_to_column(var = "gene") %>%
+        dplyr::filter(gene %in% sig_res$gene)
+
+  # Set a color palette
+  heat_colors <- brewer.pal(6, "RdBu")
+  
+  # Run pheatmap using the metadata data frame for the annotation
+  p <- pheatmap(sig_norm[ , 2:length(colnames(sig_norm))], 
+      color = heat_colors, 
+      breaks = seq(-2, 2, length.out = 6),
+      cluster_rows = T, 
+      show_rownames = F,
+      annotation = coldata_cell %>% 
+        set_rownames(gsub('-', '.', rownames(.))) %>% dplyr::select(less18M), 
+      border_color = NA, 
+      fontsize = 10, 
+      scale = "row", 
+      silent=T,
+      fontsize_row = 10, 
+      height = 20)
+
+  return(list(res = res_tbl, plot = p))
+}
+```
+
+```{r run deseq}
+b_cell_deseq_res <- deseq_batch_correct(cts.split.modified, coldata, 'B-cells', as.formula(' ~ Study + less18M'))
+b_cells_plot <- b_cell_deseq_res$plot
+b_cell_deseq_res <- b_cell_deseq_res$res
+
+t_cell_deseq_res <- deseq_batch_correct(cts.split.modified, coldata, 'T-cells', as.formula(' ~ Study + less18M'))
+t_cells_plot <- t_cell_deseq_res$plot
+t_cell_deseq_res <- t_cell_deseq_res$res
+
+myel_cell_deseq_res <- deseq_batch_correct(cts.split.modified, coldata, 'myeloid-cells', as.formula(' ~ Study + less18M'))
+myel_cells_plot <- myel_cell_deseq_res$plot
+myel_cell_deseq_res <- myel_cell_deseq_res$res
+
+mal_cell_deseq_res <- deseq_batch_correct(cts.split.modified, coldata, 'malignant-cells', as.formula(' ~ Study + less18M'))
+mal_cells_plot <- mal_cell_deseq_res$plot
+mal_cell_deseq_res <- mal_cell_deseq_res$res
+```
+
+## Pseudobulk results
+
+```{r fig.height=25, fig.width=18}
+plot_grid(b_cells_plot[[4]], t_cells_plot[[4]], myel_cells_plot[[4]], mal_cells_plot[[4]], nrow=4, 
+          labels = c('A - B-cells', 'B - T-cells', 'C - Myeloid cells', 'D - Mallignant cells'))
+```
+
+```{r fig.height=10, fig.width=18}
+plot_grid(t_cells_plot[[4]])
+```
+
+# DEseq by study
+
+```{r}
+bulk$Study <- sapply(str_split(bulk$SampleID, "-"), function(x) {
+  if (length(x) == 2) {
+    return(x[2])
+  } else if (length(x) == 3) {
+    return(x[3])
+  } else {
+    return(NA)
+  }
+})
+
+de_study <- function(study) {
+  
+  verh <- create_count_matrix_from_bulk(subset(bulk, Study == study))
+  coldata2 <- verh$metadata
+  verh <- verh$count_matrix
+  
+  if (study %in% c('verhoeven')) {
+    b_cell_deseq_verh <- deseq_batch_correct(verh, coldata2, 'B-cells', as.formula('~less18M'))
+    b_cells_plot_verh <- b_cell_deseq_verh$plot
+    b_cell_deseq_verh <- b_cell_deseq_verh$res
+  }
+  else {
+    b_cells_plot_verh = ''
+    b_cell_deseq_verh = ''
+  }
+  if (study %in% c('wienke', 'verhoeven', 'dong')) {
+    t_cell_deseq_verh <- deseq_batch_correct(verh, coldata2, 'T-cells', as.formula('~less18M'))
+    t_cells_plot_verh <- t_cell_deseq_verh$plot
+    t_cell_deseq_verh <- t_cell_deseq_verh$res
+  }
+  else {
+    t_cells_plot_verh = ''
+    t_cell_deseq_verh = ''
+  }
+  if (study %in% c('jansky', 'verhoeven', 'dong')) {
+  myel_cell_deseq_verh <- deseq_batch_correct(verh, coldata2, 'myeloid-cells',  as.formula('~less18M'))
+  myel_cells_plot_verh <- myel_cell_deseq_verh$plot
+  myel_cell_deseq_verh <- myel_cell_deseq_verh$res
+  }
+  else {
+    myel_cells_plot_verh = ''
+    myel_cell_deseq_verh = ''
+  }
+  return(list(b_cell = list(plot = b_cells_plot_verh, res = b_cell_deseq_verh),
+         t_cell = list(plot = t_cells_plot_verh, res = t_cell_deseq_verh),
+         myeloid_cell = list(plot = myel_cells_plot_verh, res = myel_cell_deseq_verh)))
+}
+```
+
+
+```{r run deseq by studies}
+deseq_res_study <- mclapply(bulk$Study %>% unique, de_study, mc.cores = 5)
+deseq_res_study <- lapply(bulk$Study %>% unique, de_study)
+names(deseq_res_study) <- bulk$Study %>% unique
+```
+
+## Wienke
+
+```{r fig.height=10, fig.width=18}
+plot_grid(deseq_res_study$wienke$t_cell$plot[[4]], 
+          nrow=1, 
+          labels = c('A - T-cells'))
+```
+
+## Jansky
+
+```{r fig.height=9, fig.width=18}
+plot_grid(deseq_res_study$jansky$myeloid_cell$plot[[4]], 
+          nrow=1, 
+          labels = c('Myeloid cells'))
+```
+
+## Verhoeven
+
+```{r fig.height=25, fig.width=18}
+plot_grid(deseq_res_study$verhoeven$b_cell$plot[[4]], 
+          deseq_res_study$verhoeven$t_cell$plot[[4]], 
+          deseq_res_study$verhoeven$myeloid_cell$plot[[4]], 
+          nrow=3, 
+          labels = c('A - B-cells', 'B - T-cells', 'C - Myeloid cells'))
+```
+
+## Dong
+
+```{r fig.height=14, fig.width=18}
+plot_grid(
+          deseq_res_study$dong$t_cell$plot[[4]], 
+          deseq_res_study$dong$myeloid_cell$plot[[4]], 
+          nrow=2, 
+          labels = c('B - T-cells', 'C - Myeloid cells'))
+```
+
+## Intersections
+
+```{r fig.height=5, fig.width=14}
+myCol <- brewer.pal(5, "Pastel2")
+
+t_cells_vienn <- venn.diagram(
+        x = list(deseq_res_study$wienke$t_cell$res %>% 
+                   dplyr::filter(padj < 0.05) %>% .$gene,
+                 deseq_res_study$dong$t_cell$res %>% 
+                   dplyr::filter(padj < 0.05) %>% .$gene,
+                 deseq_res_study$verhoeven$b_cell$res %>% 
+                   dplyr::filter(padj < 0.05) %>% .$gene),
+        category.names = c("wienke" , "Dong", "Verhoeven"),
+        filename = NULL,
+        output=TRUE,
+        
+        # Circles
+        lwd = 1,
+        lty = 'blank',
+        fill = myCol[1:3],
+        
+        # Numbers
+        cex = .6,
+        fontface = "bold",
+        fontfamily = "sans",
+        
+        # Set names
+        cat.cex = 0.6,
+        cat.fontface = "bold",
+        cat.default.pos = "outer",
+        cat.pos = c(0, 0, 180)
+)
+
+myCol <- brewer.pal(3, "Pastel2")
+m_cells_vienn <- venn.diagram(
+        x = list(deseq_res_study$dong$myeloid_cell$res %>% 
+                   dplyr::filter(padj < 0.05) %>% .$gene,
+                 deseq_res_study$verhoeven$myeloid_cell$res %>% 
+                   dplyr::filter(padj < 0.05) %>% .$gene,
+                 deseq_res_study$jansky$myeloid_cell$res %>% 
+                   dplyr::filter(padj < 0.05) %>% .$gene),
+        category.names = c("Dong", "Verhoeven", 'Jansky'),
+        filename = NULL,
+        output=TRUE,
+        
+        # Circles
+        lwd = 1,
+        lty = 'blank',
+        fill = myCol,
+        
+        # Numbers
+        cex = .6,
+        fontface = "bold",
+        fontfamily = "sans",
+        
+        # Set names
+        cat.cex = 0.6,
+        cat.fontface = "bold",
+        cat.default.pos = "outer"
+)
+
+plot_grid(t_cells_vienn, m_cells_vienn,
+          nrow = 1, 
+          labels = c('T-cells', 'Myeloid cells'),
+          rel_widths = c(1.3, 1.8))
+```
+
+# Forest plot
+```{r}
+merged_t_cells <- merge(deseq_res_study$dong$t_cell$res %>% dplyr::select(gene, log2FoldChange, pvalue, padj, lfcSE), 
+                 deseq_res_study$verhoeven$t_cell$res %>% dplyr::select(gene, log2FoldChange, pvalue, padj, lfcSE), 
+                 
+                 by = "gene", suffixes = c("_dong", "_verhoeven")) %>% 
+  merge(deseq_res_study$wienke$t_cell$res %>% dplyr::select(gene, log2FoldChange, pvalue, padj, lfcSE) %>% 
+          set_colnames(paste0(colnames(.), '_wienke')) %>% mutate(gene = gene_wienke) %>% dplyr::select(-gene_wienke), 
+        by = "gene")
+
+tcells_genes_up <- merged_t_cells %>%
+  filter(across(all_of(grep("^log2FoldChange", names(.), value = TRUE)), ~ . > 0)) %>% .$gene
+tcells_genes_down <- merged_t_cells %>%
+  filter(across(all_of(grep("^log2FoldChange", names(.), value = TRUE)), ~ . < 0)) %>% .$gene
+```
+
+# Combine pvalue - scran
+
+```{r}
+tcells_genes_up <- merged_t_cells %>%
+  filter(across(all_of(grep("^log2FoldChange", names(.), value = TRUE)), ~ . > 0))
+tcells_genes_down <- merged_t_cells %>%
+  filter(across(all_of(grep("^log2FoldChange", names(.), value = TRUE)), ~ . < 0)) 
+```
+
+```{r}
+t_cells_up_comp_pval <- combineParallelPValues(list(tcells_genes_up$pvalue_dong, 
+                                    tcells_genes_up$pvalue_verhoeven, 
+                                    tcells_genes_up$pvalue_wienke),
+                                    method='berger')
+tcells_genes_up$combined_pval <- t_cells_up_comp_pval$p.value
+t_cells_down_comp_pval <- combineParallelPValues(list(tcells_genes_down$pvalue_dong, 
+                                    tcells_genes_down$pvalue_verhoeven, 
+                                    tcells_genes_down$pvalue_wienke),
+                                    method='berger')
+tcells_genes_down$combined_pval <- t_cells_down_comp_pval$p.value
+
+tcells_genes_up$avg_log2FoldChange <- rowMeans(tcells_genes_up[, grep("log2FoldChange", names(tcells_genes_up), value = TRUE)], na.rm = TRUE)
+tcells_genes_down$avg_log2FoldChange <- rowMeans(tcells_genes_down[, grep("log2FoldChange", names(tcells_genes_down), value = TRUE)], na.rm = TRUE)
+```
+
+```{r fig.height=8, fig.width=7}
+volcano_plot_2df <- function(df1, df2) {
+  
+  df = rbind(df1, df2)
+  
+  EnhancedVolcano(df,
+    lab = df$gene,
+    x = 'avg_log2FoldChange',
+    y = 'combined_pval',
+    pCutoff = 0.05,
+    FCcutoff=0.5) 
+}
+
+
+plot_grid(volcano_plot_2df(tcells_genes_up, tcells_genes_down) +
+            ggtitle('T-cells'), 
+          nrow = 1)
+```
+
+```{r fig.height=7}
+# Select the top 5 genes by avg_log2FoldChange
+top_genes <- tcells_genes_up[order(tcells_genes_up$combined_pval), ] %>% 
+  rbind(tcells_genes_down[order(tcells_genes_down$combined_pval), ]) %>% 
+  dplyr::filter(combined_pval < 0.05)
+
+top_genes <- top_genes[order(-top_genes$avg_log2FoldChange), ]
+
+# Create a factor for gene to ensure the correct order in the plot
+top_genes$gene <- factor(top_genes$gene, levels = top_genes$gene)
+
+# Calculate 95% confidence intervals
+top_genes$CI_lower_dong <- top_genes$log2FoldChange_dong - 1.96 * top_genes$lfcSE_dong
+top_genes$CI_upper_dong <- top_genes$log2FoldChange_dong + 1.96 * top_genes$lfcSE_dong
+top_genes$CI_lower_verhoeven <- top_genes$log2FoldChange_verhoeven - 1.96 * top_genes$lfcSE_verhoeven
+top_genes$CI_upper_verhoeven <- top_genes$log2FoldChange_verhoeven + 1.96 * top_genes$lfcSE_verhoeven
+top_genes$CI_lower_wienke <- top_genes$log2FoldChange_wienke - 1.96 * top_genes$lfcSE_wienke
+top_genes$CI_upper_wienke <- top_genes$log2FoldChange_wienke + 1.96 * top_genes$lfcSE_wienke
+
+# Prepare data in long format for ggplot2
+library(tidyr)
+library(dplyr)
+
+forest_data <- top_genes %>%
+  dplyr::select(gene, 
+         starts_with("log2FoldChange"), 
+         starts_with("CI_lower"), 
+         starts_with("CI_upper")) %>%
+  pivot_longer(cols = -gene, 
+               names_to = c(".value", "study"), 
+               names_pattern = "(log2FoldChange|CI_lower|CI_upper)_(.*)")
+
+forest_data <- forest_data %>%
+  mutate(study = factor(study, levels = c("dong", "verhoeven", "wienke")))
+
+library(ggplot2)
+
+ggplot(forest_data, aes(x = log2FoldChange, y = study, color = study)) +
+  geom_point(position = position_dodge(width = 0.8)) +
+  geom_errorbar(aes(xmin = CI_lower, xmax = CI_upper), width = 0.2, position = position_dodge(width = 0.8)) +
+  scale_color_manual(values = c("dong" = "blue", "verhoeven" = "green", "wienke" = "red")) +
+  labs(x = "log2FoldChange", y = "Gene", title = "T cells") +
+  theme_minimal() +
+  theme(legend.title = element_blank(), 
+  strip.text.y = element_text(angle=0)) +
+  facet_grid(gene ~ .)
+```
+
+```{r}
+top_genes
+```
+
+# ProjecTIL
+
 

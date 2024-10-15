@@ -116,23 +116,5 @@ t_cells_list <- lapply(t_cells_h$SampleID %>% unique, function(sample) {
   })
 })
 
-print('merging')
-t_cells_h <- merge(x=t_cells_list[[1]], y=t_cells_list[2:length(t_cells_list)])
 
-print('integration')
-t_cells_h <- t_cells_h %>%
-  NormalizeData() %>%
-  FindVariableFeatures() %>%
-  ScaleData() %>%
-  RunPCA(verbose=FALSE) %>%
-  RunHarmony(., 'SampleID',
-             lambda = 1, verbose = FALSE) %>%
-  RunUMAP(reduction = "harmony", dims = 1:20, verbose=F) %>%
-  FindNeighbors(dims = 1:20) %>%
-  FindClusters(resolution = seq(0.1, 1, 0.1))
-
-print('join layers')
-t_cells_h <- JoinLayers(t_cells_h)
-
-print('saving')
-qsave(t_cells_h, paste0(PREPRDATADIR, 't_cells_human_annotation_merged_v2.qs'))
+qsave(t_cells_list, paste0(PREPRDATADIR, 't_cells_human_annotation_list_v2.qs'))
