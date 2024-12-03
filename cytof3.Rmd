@@ -1,0 +1,471 @@
+---
+title: "Cytof"
+author: "Kate Petrenko"
+date: "2024-10-25"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set()
+# BiocManager::install("CATALYST")
+library(CATALYST)    # For CyTOF data preprocessing
+library(flowCore)    # Basic flow cytometry data handling
+library(flowWorkspace) # Additional flow cytometry tools
+library(openCyto)    # Automated gating methods
+library(flowAI)
+library(ggplot2)     
+library(gridExtra)   
+library(dplyr)      
+library(readr)     
+library(tidyr) 
+library(cowplot)
+# BiocManager::install("diffcyt")
+library(diffcyt)
+```
+
+```{r global variables, include=FALSE}
+set.seed(100)
+DATADIR = '~/neuroblastoma/data/'
+WORKDIR = '~/neuroblastoma/'
+PREPRDATADIR = '~/neuroblastoma/preprocessing_data/'
+
+my_colors <- c("#9ACD32FF", "#4682B4FF",  "#DDA0DDFF", "#FFA07AFF", "#8FBC8BFF",
+               "#40E0D0FF",  "#F0E68CFF", "#5F9EA0FF", "#D2B48CFF",  
+               "#6495EDFF", "#FF69B4FF", "#BA55D3FF",  "#F08080FF", "#32CD32FF",  
+               "#FFDAB9FF",  "#87CEEBFF")
+```
+
+# Read Data
+
+```{r include=FALSE}
+fcs_files_fs1 <- list.files(path = paste0(DATADIR, "cytof_data"), pattern = "LIC.fcs", full.names = TRUE)
+fcs_files_fs2 <- list.files(path = paste0(DATADIR, "cytof_data"), pattern = "cells.fcs", full.names = TRUE)
+```
+
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+markers <- read_table('cytof_markers.tsv') %>% as.data.frame()
+markers$Name <- sapply(markers$Metal, function(x) {
+  # Extract the number and element
+  num <- gsub("[A-Za-z]", "", x)  # Extract numbers
+  element <- gsub("[0-9]", "", x)  # Extract letters
+  
+  # Format it like fs1's column names (ElementNumDi)
+  paste0(tools::toTitleCase(tolower(element)), num, "Di")
+})
+markers$marker_class = "type"
+
+# Add technical markers to your existing markers data frame
+technical_markers <- data.frame(
+    Metal = c("190BCKG", "191Ir", "193Ir", "140Ce", "103Rh"),
+    Marker = c("Background", "DNA1", "DNA2", "Beads", "Rhodium"),
+    Name = c("BCKG190Di", "Ir191Di", "Ir193Di", "Ce140Di", "Rh103Di"),
+    marker_class = 'none',
+    stringsAsFactors = FALSE
+)
+
+# Combine with existing markers
+markers <- rbind(markers, technical_markers)
+
+# Map names to markers
+panel <- data.frame(fcs_colname = markers$Name, antigen = markers$Marker, marker_class = markers$marker_class)
+```
+
+# Metadata
+
+```{r include=FALSE}
+# Define metadata for fs1
+md_fs1 <- data.frame(
+    file_name = basename(fcs_files_fs1),
+    sample_id = gsub("^\\d+_(.*?)_QC_.*\\.fcs$", "\\1", basename(fcs_files_fs1)),
+    tumor = ifelse(grepl("NTB", basename(fcs_files_fs1)), "Non-tumor", "Tumor"),
+    condition = ifelse(grepl("_P_", basename(fcs_files_fs1)), "Pups", "Adult"),
+    tissue = case_when(
+        grepl("_B_", basename(fcs_files_fs1)) ~ "Bone marrow",
+        grepl("_BM_", basename(fcs_files_fs1)) ~ "Bone marrow",
+        grepl("_T_", basename(fcs_files_fs1)) ~ "Tumor",
+        grepl("_S_", basename(fcs_files_fs1)) ~ "Spleen"
+    ),
+    stringsAsFactors = FALSE
+)
+
+# Define metadata for fs2
+md_fs2 <- data.frame(
+    file_name = basename(fcs_files_fs2),
+    sample_id = gsub("^export_\\d+_(.*?)_.*\\.fcs$", "\\1", basename(fcs_files_fs2)),
+    condition = case_when(
+        grepl("ABM|AS", basename(fcs_files_fs2)) ~ "Adult",
+        grepl("PBM|PS", basename(fcs_files_fs2)) ~ "Pups"
+    ),
+    tissue = case_when(
+        grepl("ABM|PBM", basename(fcs_files_fs2)) ~ "Bone marrow",
+        grepl("AS|PS", basename(fcs_files_fs2)) ~ "Spleen"
+    ),
+    stringsAsFactors = FALSE
+)
+```
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+fs1 <- read.flowSet(fcs_files_fs1)
+fs2 <- read.flowSet(fcs_files_fs2)
+```
+
+```{r include=FALSE}
+# Create SingleCellExperiment objects
+sce_fs1 <- prepData(fcs_files_fs1, panel = panel %>% dplyr::filter(fcs_colname %in% colnames(fs1)), md = md_fs1, md_cols = list(factors = c("condition", "tissue", "tumor")), normalize = FALSE)
+sce_fs2 <- prepData(fcs_files_fs2, panel = panel %>% dplyr::filter(fcs_colname %in% colnames(fs2)), md = md_fs2, md_cols = list(factors = c("condition", "tissue")), normalize = FALSE)
+```
+
+```{r eval=FALSE, include=FALSE}
+plotExprs(sce_fs1, features = c('CD4', 'CD3', 'CD8', 'CD45'))
+```
+
+# Tumor dataset
+
+```{r echo=FALSE}
+plotCounts(sce_fs1, group_by = "sample_id", color_by = "condition")
+```
+
+The MDS plot reveals clear patterns of separation in the data. We can see that the main differenci in our dataset is the tissue.
+
+```{r echo=FALSE}
+pbMDS(sce_fs1, color_by = "condition", label_by = "sample_id", shape_by = 'tumor')
+```
+
+The heatmap shows median marker intensities with clustered columns (markers) and rows (samples).
+
+```{r echo=FALSE, fig.height=4, fig.width=9}
+plotExprHeatmap(sce_fs1, scale = "last",
+    hm_pal = rev(hcl.colors(10, "YlGnBu")))
+```
+
+In this step, we identify the ability of markers to explain the variance observed in each sample. In particular, we calculate the PCA-based non-redundancy score (NRS). Markers with higher score explain a larger portion of variability present in a given sample.
+
+```{r}
+plotNRS(sce_fs1, features = "type", color_by = "condition")
+```
+
+
+## Clustering
+
+```{r include=FALSE}
+sce_fs1 <- cluster(sce_fs1, features = "type",
+    xdim = 10, ydim = 10, maxK = 20, seed = 100)
+```
+
+```{r eval=FALSE, fig.height=9, fig.width=10, include=FALSE}
+plotExprHeatmap(sce_fs1, features = "type", 
+    by = "cluster_id", k = "meta20", 
+    bars = TRUE, perc = TRUE)
+```
+
+
+
+```{r echo=FALSE}
+sce_fs1 <- runDR(sce_fs1, "UMAP", cells = 1e3, features = "type")
+
+plotDR(sce_fs1, "UMAP", color_by = "meta20")
+plotDR(sce_fs1, "UMAP", color_by = "meta20", facet_by = "condition")
+plotDR(sce_fs1, "UMAP", color_by = "meta20", facet_by = "tumor")
+```
+
+## Annotation
+
+```{r include=FALSE}
+merging_table1 <- data.frame(
+  original_cluster = seq(1, 20),
+  new_cluster = c('Myeloid cells',
+                  'Myeloid cells',
+                  'Myeloid cells',
+                  'T cells CD4+',
+                  'Non-immune cells',
+                  'Myeloid cells',
+                  'T cells CD8+',
+                  'Myeloid cells',
+                  'Myeloid cells',
+                  'Unknown',
+                  'Myeloid cells',
+                  'Unknown',
+                  'Myeloid cells',
+                  'Myeloid cells',
+                  'B cells',
+                  'Myeloid cells',
+                  'Myeloid cells',
+                  'Unknown',
+                  'B cells',
+                  'B cells'
+                  )
+)
+
+sce_fs1 <- mergeClusters(sce_fs1, k = "meta20", 
+    table = merging_table1, id = "merging1", overwrite = T)
+```
+
+```{r echo=FALSE}
+plotDR(sce_fs1, "UMAP", color_by = "merging1")
+plotDR(sce_fs1, "UMAP", color_by = "merging1", facet_by = 'condition')
+```
+
+This heatmap provides a visual representation of marker expression across different clusters. Each column corresponds to a marker gene, while each row represents a cluster identified in the dataset. The intensity of the colors indicates the median scaled expression of each marker within a given cluster, with red signifying high expression and blue signifying low expression.
+
+The heatmap allows for the identification of cluster-specific markers, enabling the characterization of clusters based on their unique expression patterns. I used them to annotate clusters so you can use it to check me.
+
+```{r echo=FALSE, fig.height=9, fig.width=10}
+plotExprHeatmap(sce_fs1, features = "type", 
+    by = "cluster_id", k = "meta20", m = "merging1")
+```
+
+That's combined heatmap by celltypes.
+
+```{r echo=FALSE, fig.height=7, fig.width=11}
+plotExprHeatmap(sce_fs1, features = "type", 
+    by = "cluster_id", k = "merging1",
+    bars = TRUE, perc = TRUE)
+```
+
+## Analysis
+
+### Differential Abundances Analysis
+
+```{r echo=FALSE}
+plotAbundances(sce_fs1, k = "merging1", by = "sample_id", group_by = 'tissue')
+```
+
+It may be quite hard to see the differences in cluster abundances in the plot above, especially for clusters with very low frequency. And, since boxplots cannot represent multimodal distributions, we show boxplots with jittered points of the sample-level cluster proportions overlaid
+
+```{r}
+plotAbundances(sce_fs1, k = "merging1", by = "cluster_id", shape_by = "sample_id")
+```
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+ei <- metadata(sce_fs1)$experiment_info
+(da_formula1 <- createFormula(ei, 
+    cols_fixed = "condition", 
+    cols_random = "sample_id"))
+
+(da_formula2 <- createFormula(ei, 
+    cols_fixed = "condition", 
+    cols_random = c("sample_id", "tissue")))
+
+contrast <- createContrast(c(0, 1))
+```
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+da_res2 <- diffcyt(sce_fs1, 
+    formula = da_formula2, contrast = contrast,
+    analysis_type = "DA", method_DA = "diffcyt-DA-GLMM",
+    clustering_to_use = "merging1", verbose = FALSE)
+```
+
+```{r include=FALSE}
+FDR_cutoff = 0.05
+rowData(da_res2$res) 
+table(rowData(da_res2$res)$p_adj < FDR_cutoff)
+```
+
+```{r echo=FALSE}
+sce_fs1$sample_id <- factor(sce_fs1$sample_id, levels = c('TB_A_BM', 'TB_P_BM', 'NTB_P_B',  
+                                                          'TB_A_S', 'TB_P_S', 'NTB_P_S',
+                                                          'TB_A_T', 'TB_P_T'))
+plotDiffHeatmap(sce_fs1, rowData(da_res2$res), all = TRUE, fdr = FDR_cutoff)
+```
+
+# Naive dataset
+
+The MDS plot reveals clear patterns of separation in the data. Dim1 predominantly distinguishes samples based on tissue type, indicating a strong tissue-specific effect. In contrast, Dim2 differentiates samples by age, reflecting age-associated variation. This separation along Dim2 highlights notable differences between age groups in the dataset.
+
+```{r echo=FALSE}
+pbMDS(sce_fs2, color_by = "condition", label_by = "sample_id", shape_by = 'tissue')
+```
+
+The heatmap shows median marker intensities with clustered columns (markers) and rows (samples).
+
+```{r echo=FALSE, fig.height=4, fig.width=9}
+plotExprHeatmap(sce_fs2, scale = "last",
+    hm_pal = rev(hcl.colors(10, "YlGnBu")))
+```
+
+In this step, we identify the ability of markers to explain the variance observed in each sample. In particular, we calculate the PCA-based non-redundancy score (NRS). Markers with higher score explain a larger portion of variability present in a given sample.
+
+```{r echo=FALSE, fig.height=4, fig.width=7}
+plotNRS(sce_fs2, features = "type", color_by = "condition")
+```
+
+## Clustering
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+sce_fs2 <- cluster(sce_fs2, features = "type",
+    xdim = 10, ydim = 10, maxK = 30, seed = 100)
+```
+
+```{r eval=FALSE, fig.height=6, fig.width=10, include=FALSE}
+plotExprHeatmap(sce_fs2, features = "type", 
+    by = "cluster_id", k = "meta30", 
+    bars = TRUE, perc = TRUE)
+```
+
+
+```{r echo=FALSE}
+sce_fs2 <- runDR(sce_fs2, "UMAP", cells = 1e3, features = "type")
+
+plotDR(sce_fs2, "UMAP", color_by = "meta30")
+plotDR(sce_fs2, "UMAP", color_by = "meta30", facet_by = "condition")
+plotDR(sce_fs2, "UMAP", color_by = "meta30", facet_by = "tissue")
+```
+
+## Annotation
+
+```{r include=FALSE}
+merging_table <- data.frame(
+  original_cluster = seq(1, 30),
+  new_cluster = c('Activated B cells', # 1
+                  'Activated B cells',
+                  'T helper cells (CD4)',
+                  'T helper cells (CD4)',
+                  'Plasmablast', # 5
+                  'Unknown',
+                  'Myeloid cells',
+                  'Plasmablast',
+                  'T helper cells (CD4)',
+                  'Myeloid cells', # 10
+                  'Unknown',
+                  'Non-immune cells',
+                  'HSC',
+                  'Plasmacytoid DCs',
+                  'Unknown', # 15
+                  'Cytotoxic T-cells (CD8)',
+                  'Myeloid cells',
+                  'Unknown',
+                  'Unknown',
+                  'gd T cells', # 20
+                  'NK',
+                  'Cytotoxic T-cells (CD8)',
+                  'Unknown',
+                  'Unknown',
+                  'Myeloid cells', # 25
+                  'Unknown',
+                  'Myeloid cells',
+                  'LS-K',
+                  'Myeloid cells',
+                  'Plasmacytoid DCs' # 30
+                  )
+)
+
+sce_fs2 <- mergeClusters(sce_fs2, k = "meta30", 
+    table = merging_table, id = "merging1", overwrite = T)
+```
+
+```{r echo=FALSE, fig.height=5, fig.width=10}
+plotDR(sce_fs2, "UMAP", color_by = "merging1")
+plotDR(sce_fs2, "UMAP", color_by = "merging1", facet_by = 'condition')
+```
+
+This heatmap provides a visual representation of marker expression across different clusters. Each column corresponds to a marker gene, while each row represents a cluster identified in the dataset. The intensity of the colors indicates the median scaled expression of each marker within a given cluster, with red signifying high expression and blue signifying low expression.
+
+The heatmap allows for the identification of cluster-specific markers, enabling the characterization of clusters based on their unique expression patterns. I used them to annotate clusters so you can use it to check me.
+
+```{r echo=FALSE, fig.height=9, fig.width=10}
+plotExprHeatmap(sce_fs2, features = "type", 
+    by = "cluster_id", k = "meta30", m = "merging1")
+```
+
+That's combined heatmap by celltypes.
+
+```{r echo=FALSE, fig.height=7, fig.width=11}
+plotExprHeatmap(sce_fs2, features = "type", 
+    by = "cluster_id", k = "merging1",
+    bars = TRUE, perc = TRUE)
+```
+
+## Analysis
+
+### Differential Abundances Analysis
+
+```{r echo=FALSE}
+plotAbundances(sce_fs2, k = "merging1", by = "sample_id", group_by = 'tissue')
+```
+
+```{r echo=FALSE}
+plotAbundances(sce_fs2, k = "merging1", by = "cluster_id", shape_by = "sample_id")
+```
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+ei <- metadata(sce_fs2)$experiment_info
+(da_formula1 <- createFormula(ei, 
+    cols_fixed = "condition", 
+    cols_random = "sample_id"))
+
+(da_formula2 <- createFormula(ei, 
+    cols_fixed = "condition", 
+    cols_random = c("sample_id", "tissue")))
+
+contrast <- createContrast(c(0, 1))
+```
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+da_res2 <- diffcyt(sce_fs2, 
+    formula = da_formula2, contrast = contrast,
+    analysis_type = "DA", method_DA = "diffcyt-DA-GLMM",
+    clustering_to_use = "merging1", verbose = FALSE)
+```
+
+```{r include=FALSE}
+FDR_cutoff = 0.05
+rowData(da_res2$res) 
+table(rowData(da_res2$res)$p_adj < FDR_cutoff)
+```
+
+```{r echo=FALSE}
+sce_fs2$sample_id <- factor(sce_fs2$sample_id, levels = c('ABM', 'PBM', 'AS', 'PS'))
+plotDiffHeatmap(sce_fs2, rowData(da_res2$res), all = TRUE, fdr = FDR_cutoff)
+```
+
+
+
+```{r eval=FALSE, include=FALSE}
+# Let's fix marker classifications
+all_markers <- rownames(sce_fs2)
+
+marker_classes <- list(
+    # Technical markers/channels
+    technical = c("Background", "DNA1", "DNA2", "Beads", "Rhodium",
+                 "Time", "Event_length", "Center", "Offset", "Width", "Residual"),
+    
+    # Markers used primarily for cell type identification/annotation
+    type = c("CD3", "CD4", "CD8", "CD19", "CD45", "CD45R",
+             "CD11c", "F4/80", "Ly6c", "Ly6g", "NK1.1", "TCRyd",
+             "CD64", "CD11b", "CD24", "CD138", "CD21", "CD127",
+             "Sca-1", "CD115", "SiglecF", "CD79b"),
+    
+    # Markers for activation/function - these are what we want to test
+    state = c("CCR4", "PDL2", "CD25", "IgM", "PD-L1", "IFN-gr",
+              "CD28", "CD5", "CD93", "CD117", "CD62L", "CD44",
+              "CD43", "CD69", "Ia-Ie", "IgD", "CD48")
+)
+
+# Update marker classes in rowData
+rowData(sce_fs2)$marker_class <- "type"  # Default as type
+rowData(sce_fs2)$marker_class[rownames(sce_fs2) %in% marker_classes$technical] <- "none"
+rowData(sce_fs2)$marker_class[rownames(sce_fs2) %in% marker_classes$state] <- "state"
+
+
+ds_res1 <- diffcyt(sce_fs2, 
+    formula = ds_formula2, contrast = contrast,
+    analysis_type = "DS", method_DS = "diffcyt-DS-LMM",
+    clustering_to_use = "merging1", verbose = FALSE)
+
+table(rowData(ds_res1$res)$p_adj < FDR_cutoff)
+
+topTable(ds_res1, top_n = 5, order_by = "cluster_id", 
+    show_meds = TRUE, format_vals = TRUE, digits = 3)
+
+table(rowData(ds_res1$res)$p_adj < FDR_cutoff)
+```
+
+```{r eval=FALSE, fig.height=11, fig.width=7, include=FALSE}
+df1 <-  rowData(ds_res1$res)
+df1$p_val <- 1
+df1$p_adj <- 1
+plotDiffHeatmap(sce_fs2, df1, top_n = 60, all = T)
+```
+

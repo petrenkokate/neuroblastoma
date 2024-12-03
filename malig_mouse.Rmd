@@ -1,0 +1,181 @@
+---
+title: "malig_cells_mouse"
+author: "Kate Petrenko"
+date: "2024-10-31"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+	echo = FALSE,
+	message = FALSE,
+	warning = FALSE
+)
+library(data.table)
+library(Seurat)
+library(scDblFinder)
+library(DoubletFinder)
+library(dplyr)
+library(remotes)
+# remotes::install_github("carmonalab/STACAS")
+library(STACAS)
+library(SingleR)
+# install.packages("scGate")
+library(scGate)
+library(ggplot2)
+library(BiocParallel)
+library(harmony)
+library(RColorBrewer)
+library(stringr)
+library(cowplot)
+library(scuttle)
+# install.packages("devtools")
+# BiocManager::install("Homo.sapiens")
+# BiocManager::install("jpmam1/scalop") #forked copy of a really good guy 
+# devtools::install_github("jlaffy/infercna")
+library(infercna)
+# library(infercnv)
+library(parallel)
+library(future)
+library(clustree)
+library(dittoSeq)
+# install.packages("ggh4x")
+library(ggh4x)
+#BiocManager::install('EnhancedVolcano')
+library(EnhancedVolcano)
+library(clusterProfiler)
+# BiocManager::install('org.Mm.eg.db')
+library("org.Mm.eg.db")
+library(ReactomePA)
+library(msigdbr)
+# install.packages('qs')
+library(qs)
+# devtools::install_github("ncborcherding/escape")
+# devtools::install_github("rcastelo/GSVA")
+library(escape)
+```
+
+```{r global variables, include=FALSE}
+set.seed(100)
+DATADIR = '~/neuroblastoma/data/'
+WORKDIR = '~/neuroblastoma/'
+PREPRDATADIR = '~/neuroblastoma/preprocessing_data/'
+
+my_colors <- c("#9ACD32FF", "#4682B4FF",  "#DDA0DDFF", "#FFA07AFF", "#8FBC8BFF",
+               "#40E0D0FF",  "#F0E68CFF", "#5F9EA0FF", "#D2B48CFF",  
+               "#6495EDFF", "#FF69B4FF", "#BA55D3FF",  "#F08080FF", "#32CD32FF",  
+               "#FFDAB9FF",  "#87CEEBFF")
+```
+
+```{r download references, message=FALSE, warning=FALSE, include=FALSE}
+mouse_ref <- celldex::MouseRNAseqData()
+mouse_ref_imm <- celldex::ImmGenData()
+scGate_models_DB <- get_scGateDB()
+```
+
+```{r fig.height=5, fig.width=12,}
+malig_cells <- qread(paste0(PREPRDATADIR, 'malig_cells_mouse_gsvas3_ssGSEA.qs'))
+
+Idents(malig_cells) <- malig_cells$RNA_snn_res.0.2
+plot_grid(DimPlot(malig_cells, group.by = 'RNA_snn_res.0.2', cols = my_colors) +
+  ggtitle("Clusters"), 
+  DimPlot(malig_cells, group.by = 'age', cols = c("#6495EDFF", "#FF69B4FF")) +
+  ggtitle("Age"),
+  nrow = 1)
+```
+
+```{r fig.height=4, fig.width=13}
+plot_grid(dittoBarPlot(malig_cells, 'age', group.by = 'RNA_snn_res.0.2', color.panel = my_colors),
+          dittoBarPlot(malig_cells, 'Phase', group.by = 'RNA_snn_res.0.2', color.panel = my_colors),
+          dittoBarPlot(malig_cells, 'RNA_snn_res.0.2', group.by = 'age', color.panel = my_colors),
+          rel_widths = c(1, 1, 0.7),
+          nrow = 1)
+```
+
+# Cluster's markers
+
+```{r fig.height=7, fig.width=12}
+Idents(malig_cells) <- 'RNA_snn_res.0.2'
+
+maligcells.markers <- FindAllMarkers(malig_cells, only.pos = TRUE, min.pct = 0.25)
+top5 <- maligcells.markers %>%
+  dplyr::filter(p_val_adj < 0.05) %>% 
+  group_by(cluster) %>%
+  top_n(n = 7, wt = avg_log2FC)
+
+DotPlot(malig_cells, c('Mycn', top5$gene), cols = c('lightgrey', "#BA55D3FF")) +
+  RotatedAxis()
+```
+
+# DEG in 3 cluster
+
+```{r fig.height=4, fig.width=8}
+Idents(malig_cells) <- 'age'
+
+maligcells.markers3 <- FindAllMarkers(subset(malig_cells, RNA_snn_res.0.2  == '3'), only.pos = TRUE, min.pct = 0.25)
+top10 <- maligcells.markers3 %>%
+  dplyr::filter(!str_starts(gene, "Hb")) %>% 
+  dplyr::filter(p_val_adj < 0.05) %>% 
+  group_by(cluster) %>%
+  top_n(n = 10, wt = avg_log2FC)
+
+DotPlot(subset(malig_cells, RNA_snn_res.0.2  == '3'), c('Mycn', top10$gene), cols = c('lightgrey', "#BA55D3FF")) +
+  RotatedAxis()
+```
+
+# DEG by age
+
+```{r fig.height=4, fig.width=12}
+Idents(malig_cells) <- 'age'
+
+maligcells.markers.age <- FindAllMarkers(malig_cells, only.pos = TRUE, min.pct = 0.25)
+top10 <- maligcells.markers.age %>%
+  dplyr::filter(!str_starts(gene, "Hb")) %>% 
+  dplyr::filter(p_val_adj < 0.05) %>% 
+  group_by(cluster) %>%
+  top_n(n = 15, wt = avg_log2FC)
+
+DotPlot(malig_cells, c('Mycn', top10$gene), cols = c('lightgrey', "#BA55D3FF")) +
+  RotatedAxis()
+```
+
+```{r}
+dittoBoxPlot(malig_cells, c('Lef1'), color.panel=c("#FF69B4FF", "#6495EDFF"), group.by='age', jitter.size = NA)
+FeaturePlot(malig_cells, 'Lef1', split.by = 'age')
+```
+
+```{r}
+FeaturePlot(malig_cells, c('Col8a1', 'Fgfr1', 'Fgfr2', 'Efnb1'))
+
+FeaturePlot(malig_cells, c('Vegfa', 'Vegfd', 'Fgfr2', 'Efnb1'))
+```
+
+```{r fig.height=6, fig.width=8}
+FeaturePlot(malig_cells, c('Cd274', 'Psmb9', 'Psmb8', 'Ctla4', 'Tap2', 'B2m', 'H2-Q7', 'Tgfb1', 'Il10'))
+```
+
+```{r}
+dittoBoxPlot(malig_cells, c('Tgfb1', 'Tgfb2'), color.panel=c("#FF69B4FF", "#6495EDFF"), group.by='age', jitter.size = NA)
+
+FeaturePlot(malig_cells, c('Tgfb1', 'Tgfb2'))
+
+dittoBoxPlot(malig_cells, c('H2-K1', 'H2-D1'), color.panel=c("#FF69B4FF", "#6495EDFF"), group.by='age', jitter.size = NA)
+
+FeaturePlot(malig_cells, c('H2-K1', 'H2-D1'))
+
+dittoBoxPlot(malig_cells, c('Cd274', 'Cd200'), color.panel=c("#FF69B4FF", "#6495EDFF"), group.by='age', jitter.size = NA)
+
+FeaturePlot(malig_cells, c('Cd274', 'Cd200'))
+
+dittoBoxPlot(malig_cells, c('Lgals1', 'Mif', 'Smarcd2', 'Arg2'), color.panel=c("#FF69B4FF", "#6495EDFF"), group.by='age', jitter.size = NA)
+
+FeaturePlot(malig_cells, c('Lgals1', 'Mif', 'Smarcd2', 'Arg2'))
+
+dittoBoxPlot(malig_cells, c('Pvr', 'Nectin2', 'Ulbp1'), color.panel=c("#FF69B4FF", "#6495EDFF"), group.by='age', jitter.size = NA)
+
+FeaturePlot(malig_cells, c('Pvr', 'Nectin2', 'Ulbp1'))
+
+dittoBoxPlot(malig_cells, c('Il10', 'Nectin2', 'Ulbp1'), color.panel=c("#FF69B4FF", "#6495EDFF"), group.by='age', jitter.size = NA)
+
+FeaturePlot(malig_cells, c('Il10', 'Nectin2', 'Ulbp1'))
+```

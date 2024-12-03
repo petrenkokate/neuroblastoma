@@ -64,7 +64,10 @@ library(enrichR)
 library(CellChat)
 library(patchwork)
 options(stringsAsFactors = FALSE)
+# install.packages('pryr')
+# library(pryr)
 # reticulate::py_install(packages = c("umap-learn==0.5.4","numpy<2"))
+library(ComplexHeatmap)
 ```
 
 ```{r global variables server, include=FALSE}
@@ -79,15 +82,13 @@ my_colors <- c("#9ACD32FF", "#4682B4FF",  "#DDA0DDFF", "#FFA07AFF", "#8FBC8BFF",
                "#FFDAB9FF",  "#87CEEBFF")
 ```
 
-```{r}
+```{r eval=FALSE, include=FALSE}
 seu <- qread(paste0(PREPRDATADIR, 'seu_mouse.qs'))
 myeloid <- qread(paste0(PREPRDATADIR, 'myeloid_cells_mouse.qs'))
 t_cells <- qread(paste0(PREPRDATADIR, 't_cells_mouse_v3.qs'))
 ```
 
-Added annotation from separated analysis
-
-```{r}
+```{r eval=FALSE, include=FALSE}
 Idents(object = seu) <- "RNA_snn_res.0.1"
 
 new.cluster.ids <- c('0'='Malignant cells',
@@ -114,41 +115,43 @@ seu$deep_annotation[Cells(t_cells)] <- t_cells$SingleR_imm_ref_v4
 
 # CellChat
 
-## Young
+I decided to apply CellChat to identify major signaling changes across ages.
 
-```{r include=FALSE}
+```{r eval=FALSE, include=FALSE}
 seu$samples <- seu$age
 cellchat_young <- createCellChat(object = subset(seu, age == 'young'), group.by = "annotation", assay = "RNA")
 ```
 
-```{r}
+I used CellChatDB v2 that contains ~3,300 validated molecular interactions, including ~40% of secrete autocrine/paracrine signaling interactions, ~17% of extracellular matrix (ECM)-receptor interactions, ~13% of cell-cell contact interactions and ~30% non-protein signaling. But I used all CellChatDB except for "Non-protein Signaling".
+
+```{r echo=FALSE}
 CellChatDB <- CellChatDB.mouse 
 showDatabaseCategory(CellChatDB)
 ```
 
-```{r}
+```{r eval=FALSE, include=FALSE}
 # use all CellChatDB except for "Non-protein Signaling" for cell-cell communication analysis "Non-protein Signaling" (i.e., metabolic and synaptic signaling)
 CellChatDB.use <- subsetDB(CellChatDB) 
 cellchat_young@DB <- CellChatDB.use
 ```
 
-```{r}
+```{r eval=FALSE, include=FALSE}
 cellchat_young <- subsetData(cellchat_young)
 future::plan("multisession", workers = 8) # do parallel
 cellchat_young <- identifyOverExpressedGenes(cellchat_young)
 cellchat_young <- identifyOverExpressedInteractions(cellchat_young)
 ```
 
-```{r}
+```{r eval=FALSE, include=FALSE}
 cellchat_young <- computeCommunProb(cellchat_young, type = "triMean")
 cellchat_young <- filterCommunication(cellchat_young, min.cells = 10)
 ```
 
-```{r}
+```{r eval=FALSE, include=FALSE}
 df.net.young <- subsetCommunication(cellchat_young)
 ```
 
-```{r}
+```{r eval=FALSE, include=FALSE}
 cellchat_young <- computeCommunProbPathway(cellchat_young)
 cellchat_young <- aggregateNet(cellchat_young)
 cellchat_young <- netAnalysis_computeCentrality(cellchat_young)
@@ -159,34 +162,34 @@ netVisual_circle(cellchat_young@net$count, vertex.weight = groupSize, weight.sca
 netVisual_circle(cellchat_young@net$weight, vertex.weight = groupSize, weight.scale = T, label.edge= F, title.name = "Interaction weights/strength")
 ```
 
-## Adult
 
-```{r include=FALSE}
+
+```{r eval=FALSE, include=FALSE}
 seu$samples <- seu$age
 cellchat_adult <- createCellChat(object = subset(seu, age == 'adult'), group.by = "annotation", assay = "RNA")
 ```
 
-```{r}
+```{r eval=FALSE, include=FALSE}
 cellchat_adult@DB <- CellChatDB.use
 ```
 
-```{r}
+```{r eval=FALSE, include=FALSE}
 cellchat_adult <- subsetData(cellchat_adult)
 future::plan("multisession", workers = 8) # do parallel
 cellchat_adult <- identifyOverExpressedGenes(cellchat_adult)
 cellchat_adult <- identifyOverExpressedInteractions(cellchat_adult)
 ```
 
-```{r}
+```{r eval=FALSE, include=FALSE}
 cellchat_adult <- computeCommunProb(cellchat_adult, type = "triMean")
 cellchat_adult <- filterCommunication(cellchat_adult, min.cells = 10)
 ```
 
-```{r}
+```{r eval=FALSE, include=FALSE}
 df.net.adult <- subsetCommunication(cellchat_adult)
 ```
 
-```{r}
+```{r eval=FALSE, include=FALSE}
 cellchat_adult <- computeCommunProbPathway(cellchat_adult)
 cellchat_adult <- aggregateNet(cellchat_adult)
 cellchat_adult <- netAnalysis_computeCentrality(cellchat_adult)
@@ -197,39 +200,11 @@ netVisual_circle(cellchat_adult@net$count, vertex.weight = groupSize, weight.sca
 netVisual_circle(cellchat_adult@net$weight, vertex.weight = groupSize, weight.scale = T, label.edge= F, title.name = "Interaction weights/strength")
 ```
 
-# Comparison
-
-```{r}
-object.list <- list(young = cellchat_young, adult = cellchat_adult)
-cellchat <- mergeCellChat(object.list, add.names = names(object.list))
+```{r include=FALSE}
+object.list <- qread(paste0(PREPRDATADIR, 'cellchat_list_mouse.qs'))
 ```
 
-```{r}
-qsave(cellchat, paste0(PREPRDATADIR, 'cellchat_mouse.qs'))
-```
-
-```{r}
-gg1 <- compareInteractions(cellchat, show.legend = F, group = c(1,2))
-gg2 <- compareInteractions(cellchat, show.legend = F, group = c(1,2), measure = "weight")
-gg1 + gg2
-```
-
-```{r}
-par(mfrow = c(1,2), xpd=TRUE)
-netVisual_diffInteraction(cellchat, weight.scale = T)
-netVisual_diffInteraction(cellchat, weight.scale = T, measure = "weight")
-```
-
-```{r}
-# red - increased in adult
-gg1 <- netVisual_heatmap(cellchat)
-#> Do heatmap based on a merged object
-gg2 <- netVisual_heatmap(cellchat, measure = "weight")
-#> Do heatmap based on a merged object
-gg1 + gg2
-```
-
-```{r}
+```{r echo=FALSE}
 weight.max <- getMaxWeight(object.list, attribute = c("idents","count"))
 par(mfrow = c(1,2), xpd=TRUE)
 for (i in 1:length(object.list)) {
@@ -237,32 +212,71 @@ for (i in 1:length(object.list)) {
 }
 ```
 
+## Compare the total number of interactions and interaction strength
+
+```{r eval=FALSE, include=FALSE}
+object.list <- list(young = cellchat_young, adult = cellchat_adult)
+cellchat <- mergeCellChat(object.list, add.names = names(object.list))
+```
+
+```{r eval=FALSE, include=FALSE}
+qsave(cellchat, paste0(PREPRDATADIR, 'cellchat_mouse.qs'))
+```
+
+```{r include=FALSE}
+cellchat <- qread(paste0(PREPRDATADIR, 'cellchat_mouse.qs'))
+```
+
+```{r echo=FALSE}
+gg1 <- compareInteractions(cellchat, show.legend = F, group = c(1,2))
+gg2 <- compareInteractions(cellchat, show.legend = F, group = c(1,2), measure = "weight")
+gg1 + gg2
+```
+
+The differential number of interactions or interaction strength in the cell-cell communication network between two datasets can be visualized using circle plot, where red (or blue) colored edges represent increased (or decreased) signaling in the second dataset (adult) compared to the first one (young). We observe that although the overall interaction strength is higher in young mice, certain cell type interactions are stronger in adults (indicated in red on the plot). For example, interactions between fibroblasts and malignant cells, malignant cells and T cells, as well as myeloid cells and T cells, show higher strength in adult mice.
+
+```{r, fig.show='hold', fig.width=12, fig.height=6}
+# Suppress automatic printing with invisible()
+invisible(par(mfrow = c(1,2), xpd=TRUE))
+invisible(netVisual_diffInteraction(cellchat, weight.scale = T))
+invisible(netVisual_diffInteraction(cellchat, weight.scale = T, measure = "weight"))
+```
+
+# Compare the major sources and targets in a 2D space
+
+Identifying cell populations with significant changes in sending or receiving signals between different age.
+
 ```{r}
 num.link <- sapply(object.list, function(x) {rowSums(x@net$count) + colSums(x@net$count)-diag(x@net$count)})
 weight.MinMax <- c(min(num.link), max(num.link)) # control the dot size in the different datasets
 gg <- list()
 for (i in 1:length(object.list)) {
-  gg[[i]] <- netAnalysis_signalingRole_scatter(object.list[[i]], title = names(object.list)[i], weight.MinMax = weight.MinMax)
+  gg[[i]] <- netAnalysis_signalingRole_scatter(object.list[[i]], title = names(object.list)[i], weight.MinMax = weight.MinMax) + ylim(0.9,5) + xlim(0.2,6)
 }
-#> Signaling role analysis on the aggregated cell-cell communication network from all signaling pathways
-#> Signaling role analysis on the aggregated cell-cell communication network from all signaling pathways
+
 patchwork::wrap_plots(plots = gg)
 ```
+Young tumors demonstrated high incoming signals in B cells. Adult tumors demonstrated high outgoing signals in Stromal cells, probably indicating a more tumor-supportive microenvironment, and low outgoing signals in malignant cells.
 
-```{r fig.height=5, fig.width=12}
+Identifying the signaling changes of specific cell populations
+
+```{r fig.height=12, fig.width=16}
 gg1 <- netAnalysis_signalingChanges_scatter(cellchat, idents.use = "Malignant cells")
-#> Visualizing differential outgoing and incoming signaling changes from NL to LS
-#> The following `from` values were not present in `x`: 0
-#> The following `from` values were not present in `x`: 0, -1
+
 gg2 <- netAnalysis_signalingChanges_scatter(cellchat, idents.use = "Myeloid cells")
-#> Visualizing differential outgoing and incoming signaling changes from NL to LS
-#> The following `from` values were not present in `x`: 0, 2
-#> The following `from` values were not present in `x`: 0, -1
-patchwork::wrap_plots(plots = list(gg1,gg2))
+
+gg3 <- netAnalysis_signalingChanges_scatter(cellchat, idents.use = "Fibroblasts")
+
+gg4 <- netAnalysis_signalingChanges_scatter(cellchat, idents.use = "Endothelial cells")
+
+gg5 <- netAnalysis_signalingChanges_scatter(cellchat, idents.use = "B cells")
+
+gg6 <- netAnalysis_signalingChanges_scatter(cellchat, idents.use = "T cells")
+
+patchwork::wrap_plots(plots = list(gg1,gg2,gg3,gg4,gg5,gg6), nrow=2)
 ```
 
-
-```{r}
+```{r include=FALSE}
 
 cellchat <- computeNetSimilarityPairwise(cellchat, type = "functional")
 #> Compute signaling network similarity for datasets 1 2
@@ -275,19 +289,17 @@ netVisual_embeddingPairwise(cellchat, type = "functional", label.size = 3.5)
 #> 2D visualization of signaling networks from datasets 1 2
 ```
 
-```{r}
-cellchat <- computeNetSimilarityPairwise(cellchat, type = "structural")
-cellchat <- netEmbedding(cellchat, type = "structural")
-cellchat <- netClustering(cellchat, type = "structural")
-# Visualization in 2D-space
-netVisual_embeddingPairwise(cellchat, type = "structural", label.size = 3.5)
-netVisual_embeddingPairwiseZoomIn(cellchat, type = "structural", nCol = 2)
-```
-
+This plot illustrates the distance, representing the differences in communication networks between the two datasets in terms of functional similarity. A larger distance indicates a greater disparity. It is important to note that the distance calculation is based solely on the signaling pathways that are shared between the two datasets.
 
 ```{r fig.height=8, fig.width=6}
 rankSimilarity(cellchat, type = "functional")
 ```
+
+# Identify altered signaling with distinct interaction strength
+
+By comparing the information flow/interaction strength of each signaling pathway, CellChat identifies signaling pathways that: (i) turn off, (ii) decrease, (iii) turn on, or (iv) increase, by changing their information flow at one condition as compared to another condition. Identifying the altered signaling pathways or ligand-receptor pairs based on the overall information. Significant differencw
+
+### All pathways 
 
 ```{r fig.height=10, fig.width=8}
 gg1 <- rankNet(cellchat, mode = "comparison", measure = "weight", sources.use = NULL, targets.use = NULL, stacked = T, do.stat = TRUE)
@@ -296,62 +308,152 @@ gg2 <- rankNet(cellchat, mode = "comparison", measure = "weight", sources.use = 
 gg1 + gg2
 ```
 
-```{r fig.height=11, fig.width=8}
-library(ComplexHeatmap)
-#> Loading required package: grid
-#> ========================================
-#> ComplexHeatmap version 2.15.4
-#> Bioconductor page: http://bioconductor.org/packages/ComplexHeatmap/
-#> Github page: https://github.com/jokergoo/ComplexHeatmap
-#> Documentation: http://jokergoo.github.io/ComplexHeatmap-reference
-#> 
-#> If you use it in published research, please cite either one:
-#> - Gu, Z. Complex Heatmap Visualization. iMeta 2022.
-#> - Gu, Z. Complex heatmaps reveal patterns and correlations in multidimensional 
-#>     genomic data. Bioinformatics 2016.
-#> 
-#> 
-#> The new InteractiveComplexHeatmap package can directly export static 
-#> complex heatmaps into an interactive Shiny app with zero effort. Have a try!
-#> 
-#> This message can be suppressed by:
-#>   suppressPackageStartupMessages(library(ComplexHeatmap))
-#> ========================================
-i = 1
-# combining all the identified signaling pathways from different datasets 
-pathway.union <- union(object.list[[i]]@netP$pathways, object.list[[i+1]]@netP$pathways)
-ht1 = netAnalysis_signalingRole_heatmap(object.list[[i]], pattern = "outgoing", signaling = pathway.union, title = names(object.list)[i], width = 5, height = 22)
-ht2 = netAnalysis_signalingRole_heatmap(object.list[[i+1]], pattern = "outgoing", signaling = pathway.union, title = names(object.list)[i+1], width = 5, height = 22)
-draw(ht1 + ht2, ht_gap = unit(0.5, "cm"))
-```
+### Drop outliers
 
-```{r fig.height=11, fig.width=8}
-ht1 = netAnalysis_signalingRole_heatmap(object.list[[i]], pattern = "incoming", signaling = pathway.union, title = names(object.list)[i], width = 5, height = 22, color.heatmap = "GnBu")
-ht2 = netAnalysis_signalingRole_heatmap(object.list[[i+1]], pattern = "incoming", signaling = pathway.union, title = names(object.list)[i+1], width = 5, height = 22, color.heatmap = "GnBu")
-draw(ht1 + ht2, ht_gap = unit(0.5, "cm"))
-```
+```{r fig.height=10, fig.width=8}
+# Get all pathways except the outliers
+all_paths <- union(cellchat@netP$young$pathways, cellchat@netP$adult$pathways)
+filtered_paths <- setdiff(all_paths, c("PTN", "LAMININ", "APP", "MIF", "COLLAGEN", "FN1"))
 
-```{r fig.height=11, fig.width=8}
-ht1 = netAnalysis_signalingRole_heatmap(object.list[[i]], pattern = "all", signaling = pathway.union, title = names(object.list)[i], width = 5, height = 22, color.heatmap = "OrRd")
-ht2 = netAnalysis_signalingRole_heatmap(object.list[[i+1]], pattern = "all", signaling = pathway.union, title = names(object.list)[i+1], width = 5, height = 22, color.heatmap = "OrRd")
-draw(ht1 + ht2, ht_gap = unit(0.5, "cm"))
-```
+# Create plot with filtered pathways
+gg1 <- rankNet(cellchat, mode = "comparison", measure = "weight", signaling = filtered_paths, sources.use = NULL, targets.use = NULL, stacked = T, do.stat = TRUE)
+gg2 <- rankNet(cellchat, mode = "comparison", measure = "weight", signaling = filtered_paths, sources.use = NULL, targets.use = NULL, stacked = F, do.stat = TRUE)
 
-```{r fig.height=20, fig.width=6}
-netVisual_bubble(cellchat, sources.use = 1, targets.use = c(2:6),  comparison = c(1, 2), angle.x = 45)
-```
-
-```{r fig.height=16, fig.width=10}
-gg1 <- netVisual_bubble(cellchat, sources.use = 1, targets.use = c(2:6),  comparison = c(1, 2), max.dataset = 2, title.name = "Increased signaling in adult", angle.x = 45, remove.isolate = T)
-#> Comparing communications on a merged object
-gg2 <- netVisual_bubble(cellchat, sources.use = 1, targets.use = c(2:6),  comparison = c(1, 2), max.dataset = 1, title.name = "Decreased signaling in adult", angle.x = 45, remove.isolate = T)
-#> Comparing communications on a merged object
 gg1 + gg2
 ```
 
-# Dif expr
+Our CellChat analysis revealed distinct signaling patterns between young and adult neuroblastoma microenvironments, providing insights into the accelerated tumor progression observed in adult mice:
 
-```{r}
+**Adult-Specific Signaling Profile**
+
+Demonstrated significantly enhanced activity in pathways associated with tumor progression:  
+
+- Elevated CCL signaling
+- Upregulated FGF pathway activity. Inappropriate expression of FGF and improper activation of FGFRs are associated with various pathologic conditions, unregulated cell growth, and tumorigenesis.
+- Higher FLRT signaling, potentially facilitating cell migration and invasion  
+- Enhanced ECM-related signaling (CLEC, MMP), suggesting active tissue remodeling. 
+- PARs - All of these agents (TF, thrombin, PARs—mainly PAR-1 and PAR-2) are thought to promote cancer invasion and metastasis at least in part by facilitating tumor cell migration, angiogenesis, and interactions with host vascular cells, including platelets, fibroblasts, and endothelial cells lining blood vessels.
+
+**Young-Specific Signaling Profile**
+
+Exhibited stronger activity in regulatory and immune-related pathways:
+
+- Enhanced MHC-I signaling, indicating stronger immune surveillance. 
+- Elevated BMP signaling, suggesting better growth regulation. 
+- Higher CD6, CD200 and TNF pathways activity, pointing to more controlled immune modulation. 
+
+# Outgoing and incoming signalings
+
+Identify the altered signaling pathways or ligand-receptor pairs based on the outgoing (or incoming) signaling patterns.
+
+In this heatmap, colobar represents the relative signaling strength of a signaling pathway across cell groups (Note that values are row-scaled). The top colored bar plot shows the total signaling strength of a cell group by summarizing all signaling pathways displayed in the heatmap. The right grey bar plot shows the total signaling strength of a signaling pathway by summarizing all cell groups displayed in the heatmap.
+
+```{r fig.height=11, fig.width=8}
+i = 1
+
+pathway.union <- union(object.list[[i]]@netP$pathways, object.list[[i+1]]@netP$pathways)
+ht1 = netAnalysis_signalingRole_heatmap(object.list[[i]], pattern = "outgoing", signaling =  filtered_paths, title = names(object.list)[i], width = 5, height = 22)
+ht2 = netAnalysis_signalingRole_heatmap(object.list[[i+1]], pattern = "outgoing", signaling =  filtered_paths, title = names(object.list)[i+1], width = 5, height = 22)
+draw(ht1 + ht2, ht_gap = unit(0.5, "cm"))
+```
+
+**Malignant cells:**
+
+- THBS - At the early stage of carcinogenesis, THBS1 and THBS2 secreted by normal tissue act as an antiangiogenic wall. However, with tumor progression, they may switch to enhance angiogenic phenotype in order to support tumor development and metastasis.  
+- NOTCH - The Notch signaling pathway has been shown to inhibit neuroblastoma tumor cell differentiation [8–11], and Notch1 receptor expression has been shown to be associated with high-risk tumor features and poor prognosis in a cohort of children with neuroblastoma [11].    
+- ANGPTL - Angiopoietin-like protein 1 (ANGPTL1) is a member of the ANGPTL family that suppresses angiogenesis, cancer invasion, metastasis, and cancer progression.    
+- EPHA - ectopic high-level expression of EPHA2 in N-type neuroblastoma cell lines resulted in significant growth suppression. 
+- ANGPT - angiogenesis. 
+- IL1 - IL-1 has been shown to promote tumor growth. 
+- CD137 - CD137 is a kind of costimulatory molecule that mediates T cell activation, which regulates the activity of immune cells in a variety of physiological and pathological processes. 
+
+**T cells:**
+
+- MHC-1  
+- CD 52 - Studies clearly showed that CD52 can modulate T-cell activation either by its intracellular signal pathways or by the interaction of soluble CD52 and Siglec-10 expressing on T cells.  
+- SELL - CD62L/L-selectin is a marker found on naïve T cells. 
+- CCL. 
+- CD6 - CD6 mainly functions as an adhesion and an intracellular signal-transducing receptor and participates in the formation and stabilization of T-cell contacts with antigen-presenting cells.   
+
+
+```{r fig.height=11, fig.width=8}
+ht1 = netAnalysis_signalingRole_heatmap(object.list[[i]], pattern = "incoming", signaling = filtered_paths, title = names(object.list)[i], width = 5, height = 22, color.heatmap = "GnBu")
+ht2 = netAnalysis_signalingRole_heatmap(object.list[[i+1]], pattern = "incoming", signaling = filtered_paths, title = names(object.list)[i+1], width = 5, height = 22, color.heatmap = "GnBu")
+draw(ht1 + ht2, ht_gap = unit(0.5, "cm"))
+```
+
+MK incoming signaling exists in young mice only in all cell types, but outgoing MK signsling is in young Fibroblasts only
+
+# Dif expression
+
+## TGFb signaling
+
+### Young is coral
+
+```{r fig.height=6, fig.width=8}
+cellchat@meta$datasets = factor(cellchat@meta$datasets, levels = c("young", "adult")) # set factor level
+plotGeneExpression(cellchat, signaling = "TGFb", split.by = "datasets", colors.ggplot = T, type = "violin") 
+
+# seu$age <- factor(seu$age, levels = c("young", "adult"))
+# extractEnrichedLR(cellchat, signaling = "TGFb", geneLR.return = T)$geneLR
+# VlnPlot(seu, features = 'Tgfb1', split.by = "age")
+```
+
+## PECAM2 signaling
+
+```{r fig.height=4, fig.width=6}
+plotGeneExpression(cellchat, signaling = "PECAM2", split.by = "datasets", colors.ggplot = T, type = "violin") 
+```
+
+## CCL signaling
+
+Increased CCL2, CCL9, CCL6 in adult myeloid cells:
+
+CCL2: Known to recruit immunosuppressive cells like MDSCs (Myeloid-Derived Suppressor Cells) and M2 macrophages
+High expression suggests more immunosuppressive myeloid cell recruitment in adult tumors
+
+Higher CCL5 in adult T cells:
+
+CCL5 can paradoxically promote tumor growth by:
+
+- Recruiting Tregs (regulatory T cells)
+- Supporting immunosuppressive microenvironment
+- Enhancing tumor cell survival
+
+The elevated chemokine expression in adult tumors likely creates a more immunosuppressive microenvironment through enhanced recruitment of regulatory immune cells, potentially explaining the more aggressive tumor growth in adult mice. 
+
+```{r fig.height=7, fig.width=12}
+# Chord diagram
+pathways.show <- c("CCL") 
+par(mfrow = c(1,2), xpd=TRUE)
+for (i in 1:length(object.list)) {
+  netVisual_aggregate(object.list[[i]], signaling = pathways.show, layout = "chord", signaling.name = paste(pathways.show, names(object.list)[i]))
+}
+```
+
+```{r fig.height=10, fig.width=8}
+plotGeneExpression(cellchat, signaling = "CCL", split.by = "datasets", colors.ggplot = T, type = "violin") 
+```
+
+## MHC_I signaling
+
+The critical observation is that malignant cells lack both MHC-I and MHC-II expression in both age groups, which is highly significant as MHC-I should normally be expressed by all nucleated cells. This dual absence of MHC molecules on tumor cells suggests a strong immune evasion mechanism through "hiding" from both CD4+ and CD8+ T cell recognition, potentially contributing to tumor progression. The presence of CD8a and CD8b1 exclusively in T cells from young mice (coral) indicates that while cytotoxic T cells are present in young tumors, they may be unable to recognize tumor cells due to missing MHC-I, creating a "missing self" scenario. The higher expression of various H2 genes in immune and stromal cells in adult condition (teal) might represent a compensatory mechanism, but without MHC expression on tumor cells, effective anti-tumor immunity would be severely compromised.
+
+```{r fig.height=8, fig.width=8}
+plotGeneExpression(cellchat, features = c('H2-M3', "H2-Q7", "H2-T22", "H2-T23", "H2-D1", "H2-K1", "H2-Q4", "Cd8a", "Cd8b1"), split.by = "datasets", colors.ggplot = T, type = "violin") 
+```
+
+## SELL signaling
+
+```{r fig.height=6, fig.width=8}
+plotGeneExpression(cellchat, signaling = "SELL", split.by = "datasets", colors.ggplot = T, type = "violin") 
+```
+
+# Conclusion
+
+
+
+```{r include=FALSE}
 # define a positive dataset, i.e., the dataset with positive fold change against the other dataset
 pos.dataset = "young"
 # define a char name used for storing the results of differential expression analysis
@@ -373,20 +475,120 @@ net.down <- subsetCommunication(cellchat, net = net, datasets = "adult",ligand.l
 
 ```
 
-```{r}
+```{r include=FALSE}
 gene.up <- extractGeneSubsetFromPair(net.up, cellchat)
 gene.down <- extractGeneSubsetFromPair(net.down, cellchat)
 
 # df <- findEnrichedSignaling(object.list[[2]], features = c("CCL19", "CXCL12"), idents = c("Inflam. FIB", "COL11A1+ FIB"), pattern ="outgoing")
 ```
 
-```{r fig.height=15, fig.width=10}
-pairLR.use.up = net.up[, "interaction_name", drop = F]
-gg1 <- netVisual_bubble(cellchat, pairLR.use = pairLR.use.up, sources.use = 1, targets.use = c(2:6), comparison = c(1, 2),  angle.x = 90, remove.isolate = T,title.name = paste0("Down-regulated signaling in ", names(object.list)[2]))
+```{r echo=FALSE, fig.height=10, fig.width=10}
+pairLR.use.up = net.up %>% 
+  filter(abs(ligand.logFC) > 0.2 | abs(receptor.logFC) > 0.2) %>% 
+  .[, "interaction_name", drop = F]
+gg1 <- netVisual_bubble(cellchat, pairLR.use = pairLR.use.up, sources.use = 1, targets.use = 1, comparison = c(1, 2),  angle.x = 90, remove.isolate = T,title.name = paste0("Down-regulated signaling in ", names(object.list)[1]))
 #> Comparing communications on a merged object
-pairLR.use.down = net.down[, "interaction_name", drop = F]
-gg2 <- netVisual_bubble(cellchat, pairLR.use = pairLR.use.down, sources.use = 1, targets.use = c(2:6), comparison = c(1, 2),  angle.x = 90, remove.isolate = T,title.name = paste0("Up-regulated signaling in ", names(object.list)[2]))
+pairLR.use.down = net.down %>% 
+  filter(abs(ligand.logFC) > 0.2 | abs(receptor.logFC) > 0.2) %>% 
+  .[, "interaction_name", drop = F]
+gg2 <- netVisual_bubble(cellchat, pairLR.use = pairLR.use.down, sources.use = 1, targets.use = 1, comparison = c(1, 2),  angle.x = 90, remove.isolate = T,title.name = paste0("Up-regulated signaling in ", names(object.list)[1]))
 #> Comparing communications on a merged object
 gg1 + gg2
 ```
+
+
+
+```{r eval=FALSE, include=FALSE}
+# Chord diagram
+par(mfrow = c(1,2), xpd=TRUE)
+netVisual_chord_gene(object.list[[2]], sources.use = 4, targets.use = c(5:11), slot.name = 'net', net = net.up, lab.cex = 0.8, small.gap = 3.5, title.name = paste0("Up-regulated signaling in ", names(object.list)[2]))
+netVisual_chord_gene(object.list[[1]], sources.use = 4, targets.use = c(5:11), slot.name = 'net', net = net.down, lab.cex = 0.8, small.gap = 3.5, title.name = paste0("Down-regulated signaling in ", names(object.list)[2]))
+#> You may try the function `netVisual_chord_cell` for visualizing individual signaling pathway
+```
+
+# Fibroblasts
+
+It isn't full plot. Full plot was presented above
+
+```{r echo=FALSE, fig.height=7, fig.width=6}
+fibr_pl <- netAnalysis_signalingChanges_scatter(cellchat, idents.use = "Fibroblasts", ylims = c(-0.03, 0.03))
+fibr_pl
+```
+
+### Adult specific pathways in Fibroblasts
+
+```{r}
+fibr_pl$data %>% 
+  filter(specificity == 'adult specific') 
+```
+
+```{r fig.height=7, fig.width=12}
+# Chord diagram
+pathways.show <- c("VEGF") 
+par(mfrow = c(1,2), xpd=TRUE)
+for (i in 1:length(object.list)) {
+  netVisual_aggregate(object.list[[i]], signaling = pathways.show, layout = "chord", signaling.name = paste(pathways.show, names(object.list)[i]))
+}
+```
+
+```{r fig.height=4, fig.width=8}
+plotGeneExpression(cellchat, features = c('Vegfd','Flt4'), split.by = "datasets", colors.ggplot = T, type = "violin") 
+```
+
+EphB signaling supports the formation of epithelial cell junctions through an interaction with E-cadherin
+
+```{r fig.height=7, fig.width=12}
+# Chord diagram
+pathways.show <- c("EPHB") 
+par(mfrow = c(1,2), xpd=TRUE)
+for (i in 1:length(object.list)) {
+  netVisual_aggregate(object.list[[i]], signaling = pathways.show, layout = "chord", signaling.name = paste(pathways.show, names(object.list)[i]))
+}
+```
+
+```{r fig.height=3, fig.width=8}
+plotGeneExpression(cellchat, features = c('Efnb1'), split.by = "datasets", colors.ggplot = T, type = "violin") 
+```
+
+
+# Malignant cells
+
+```{r echo=FALSE, fig.height=7, fig.width=6}
+malig_pl <- netAnalysis_signalingChanges_scatter(cellchat, idents.use = "Malignant cells", ylims = c(-0.03, 0.02))
+malig_pl
+```
+
+### Adult specific pathways in Fibroblasts
+
+```{r}
+malig_pl$data %>% 
+  filter(specificity == 'adult specific') 
+```
+
+```{r fig.height=7, fig.width=12}
+# Chord diagram
+pathways.show <- c("FGF") 
+invisible(netVisual_aggregate(object.list[[2]], signaling = pathways.show, layout = "chord", signaling.name = paste(pathways.show, names(object.list)[2])))
+
+```
+
+```{r fig.height=4, fig.width=8}
+plotGeneExpression(cellchat, features = c('Fgf1', 'Fgf2', 'Fgfr1', 'Fgfr2'), split.by = "datasets", colors.ggplot = T, type = "violin") 
+```
+
+```{r fig.height=7, fig.width=12}
+# Chord diagram
+pathways.show <- c("PARs") 
+invisible(netVisual_aggregate(object.list[[2]], signaling = pathways.show, layout = "chord", signaling.name = paste(pathways.show, names(object.list)[2])))
+
+```
+
+```{r fig.height=6, fig.width=8}
+plotGeneExpression(cellchat, signaling = 'PARs', split.by = "datasets", colors.ggplot = T, type = "violin") 
+```
+
+
+
+
+
 

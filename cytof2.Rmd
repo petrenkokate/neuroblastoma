@@ -1,0 +1,573 @@
+---
+title: "Cytof"
+author: "Kate Petrenko"
+date: "2024-10-25"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set()
+# BiocManager::install("CATALYST")
+library(CATALYST)    # For CyTOF data preprocessing
+library(flowCore)    # Basic flow cytometry data handling
+library(flowWorkspace) # Additional flow cytometry tools
+library(openCyto)    # Automated gating methods
+library(flowAI)
+library(ggplot2)     
+library(gridExtra)   
+library(dplyr)      
+library(readr)     
+library(tidyr) 
+```
+
+```{r global variables, include=FALSE}
+set.seed(100)
+DATADIR = '~/neuroblastoma/data/'
+WORKDIR = '~/neuroblastoma/'
+PREPRDATADIR = '~/neuroblastoma/preprocessing_data/'
+
+my_colors <- c("#9ACD32FF", "#4682B4FF",  "#DDA0DDFF", "#FFA07AFF", "#8FBC8BFF",
+               "#40E0D0FF",  "#F0E68CFF", "#5F9EA0FF", "#D2B48CFF",  
+               "#6495EDFF", "#FF69B4FF", "#BA55D3FF",  "#F08080FF", "#32CD32FF",  
+               "#FFDAB9FF",  "#87CEEBFF")
+```
+
+# Read Data
+
+```{r}
+fs1 <- read.flowSet(path = paste0(DATADIR, "cytof_data"), pattern = "LIC.fcs",alter.names = T,
+                    transformation = FALSE,     # Don't transform data during reading
+                    truncate_max_range = FALSE) # Don't truncate high values)
+fs2 <- read.flowSet(path = paste0(DATADIR, "cytof_data"), pattern = "cells.fcs",alter.names = T,
+                    transformation = FALSE,     # Don't transform data during reading
+                    truncate_max_range = FALSE) # Don't truncate high values)
+```
+
+```{r}
+markers <- read_table('cytof_markers.tsv') %>% as.data.frame()
+markers$Name <- sapply(markers$Metal, function(x) {
+  # Extract the number and element
+  num <- gsub("[A-Za-z]", "", x)  # Extract numbers
+  element <- gsub("[0-9]", "", x)  # Extract letters
+  
+  # Format it like fs1's column names (ElementNumDi)
+  paste0(tools::toTitleCase(tolower(element)), num, "Di")
+})
+
+# Add technical markers to your existing markers data frame
+technical_markers <- data.frame(
+    Metal = c("190BCKG", "191Ir", "193Ir", "140Ce", "103Rh"),
+    Marker = c("Background", "DNA1", "DNA2", "Beads", "Rhodium"),
+    Name = c("BCKG190Di", "Ir191Di", "Ir193Di", "Ce140Di", "Rh103Di"),
+    stringsAsFactors = FALSE
+)
+
+# Combine with existing markers
+markers <- rbind(markers, technical_markers)
+
+# Create name mapping from markers data frame
+name_mapping <- setNames(markers$Marker, markers$Name)
+name_mapping <- name_mapping[!is.na(name_mapping)]
+
+# Apply mapping
+colnames(fs1) <- ifelse(colnames(fs1) %in% names(name_mapping),
+                       name_mapping[colnames(fs1)],
+                       colnames(fs1))
+```
+
+```{r}
+# Replace column names in fs2 
+colnames(fs2) <- ifelse(colnames(fs2) %in% names(name_mapping),
+                       name_mapping[colnames(fs2)],
+                       colnames(fs2))
+
+
+```
+
+```{r}
+# Extract information from file names and add to phenotypic data
+pData(fs1)$condition <- ifelse(grepl("NTB", pData(fs1)$name), "Non-tumor", "Tumor")
+pData(fs1)$age <- ifelse(grepl("_P_", pData(fs1)$name), "Pups", "Adult")
+pData(fs1)$tissue <- case_when(
+  grepl("_B_", pData(fs1)$name) ~ "Bone marrow",
+  grepl("_BM_", pData(fs1)$name) ~ "Bone marrow",
+  grepl("_T_", pData(fs1)$name) ~ "Tumor",
+  grepl("_S_", pData(fs1)$name) ~ "Spleen"
+)
+
+pData(fs1)
+```
+
+```{r}
+pData(fs2)$age <- case_when(
+  grepl("ABM|AS", pData(fs2)$name) ~ "Adult",
+  grepl("PBM|PS", pData(fs2)$name) ~ "Pups"
+)
+
+pData(fs2)$tissue <- case_when(
+  grepl("ABM|PBM", pData(fs2)$name) ~ "Bone marrow",
+  grepl("AS|PS", pData(fs2)$name) ~ "Spleen"
+)
+
+pData(fs2)
+```
+
+# QC 
+
+```{r}
+# Function to plot marker intensity vs time
+plotQC <- function(fs, markers, sample_id) {
+    data <- as.data.frame(exprs(fs[[sample_id]]))
+    data$Time <- seq_len(nrow(data))
+    
+    plots <- lapply(markers, function(marker) {
+        ggplot(data, aes_string(x = "Time", y = marker)) +
+            geom_point(alpha = 0.1, size = 0.5) +
+            theme_bw() +
+            ggtitle(marker)
+    })
+    
+    grid.arrange(grobs = plots, ncol = 3)
+}
+
+# Plot QC for DNA and technical markers
+key_markers <- c("Time", "Event_length", "DNA1", "DNA2", "Beads", "Rhodium")
+plotQC(fs1, key_markers, 1)
+plotQC(fs2, key_markers, 1)
+```
+
+# Cleaning
+
+```{r fig.height=8, fig.width=6}
+clean_cytof <- function(fs, plot_qc = TRUE) {
+    # Function to clean one sample
+    clean_one_sample <- function(ff) {
+        data <- exprs(ff)
+        
+        # 1. Remove events with low DNA signals (debris)
+        dna_thresh <- 50
+        dna_ok <- data[, "DNA1"] > dna_thresh & data[, "DNA2"] > dna_thresh
+        
+        # 2. Remove beads based on high Ce140Di (Beads) signal
+        bead_thresh <- quantile(data[, "Beads"], 0.95)
+        not_beads <- data[, "Beads"] < bead_thresh
+        
+        # 3. Remove time-based anomalies
+        # Calculate inter-event time
+        time_diff <- diff(data[, "Time"])
+        time_ok <- c(TRUE, time_diff < quantile(time_diff, 0.99))
+        
+        # Combine all filters
+        keep <- dna_ok & not_beads & time_ok
+        
+        # Create QC stats
+        qc_stats <- list(
+            total_events = nrow(data),
+            events_kept = sum(keep),
+            percent_kept = round(sum(keep)/nrow(data) * 100, 2),
+            low_dna = sum(!dna_ok),
+            beads = sum(!not_beads),
+            time_anomalies = sum(!time_ok)
+        )
+        
+        # Return cleaned flowFrame and stats
+        return(list(
+            frame = ff[keep,],
+            stats = qc_stats
+        ))
+    }
+    
+    # Process all samples
+    results <- fsApply(fs, clean_one_sample)
+    
+    # Extract cleaned frames and stats
+    cleaned_frames <- flowSet(lapply(results, function(x) x$frame))
+    all_stats <- do.call(rbind, lapply(results, function(x) 
+        data.frame(x$stats, row.names = NULL)))
+    
+    # Add sample names to stats
+    all_stats$sample <- sampleNames(fs)
+    
+    # Plot QC summary if requested
+    if(plot_qc) {
+        # Plot 1: Events kept per sample
+        p1 <- ggplot(all_stats, aes(x = sample, y = percent_kept)) +
+            geom_bar(stat = "identity") +
+            theme_bw() +
+            theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+            ggtitle("Percentage of Events Kept") +
+            ylab("Percent")
+        
+        # Plot 2: Reasons for removal
+        removal_stats <- data.frame(
+            sample = all_stats$sample,
+            low_DNA = all_stats$low_dna,
+            beads = all_stats$beads,
+            time_anomalies = all_stats$time_anomalies
+        ) %>%
+            tidyr::pivot_longer(-sample, 
+                              names_to = "reason", 
+                              values_to = "count")
+        
+        p2 <- ggplot(removal_stats, aes(x = sample, y = count, fill = reason)) +
+            geom_bar(stat = "identity", position = "dodge") +
+            theme_bw() +
+            theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+            ggtitle("Events Removed by Reason")
+        
+        grid.arrange(p1, p2, ncol = 1)
+    }
+    
+    # Print summary
+    cat("\nCleaning Summary:\n")
+    cat("----------------\n")
+    for(i in seq_len(nrow(all_stats))) {
+        cat(sprintf("Sample %s:\n", all_stats$sample[i]))
+        cat(sprintf("  Events kept: %d/%d (%.1f%%)\n",
+                   all_stats$events_kept[i],
+                   all_stats$total_events[i],
+                   all_stats$percent_kept[i]))
+    }
+    
+    return(cleaned_frames)
+}
+
+
+# Clean both datasets
+fs1_clean <- clean_cytof(fs1)
+fs2_clean <- clean_cytof(fs2)
+```
+
+```{r fig.height=8, fig.width=6}
+normalize_by_beads <- function(fs, bead_channel = "Beads", 
+                             bead_thresh = 0.95,
+                             plot_beads = TRUE) {
+
+    
+    # Function to identify bead events and calculate normalization factor
+    process_sample <- function(ff) {
+        data <- exprs(ff)
+        
+        # Identify bead events
+        bead_intensities <- data[, bead_channel]
+        bead_events <- bead_intensities > quantile(bead_intensities, bead_thresh)
+        
+        # Calculate normalization factor from beads
+        bead_factor <- median(bead_intensities[bead_events])
+        
+        return(list(
+            frame = ff,
+            bead_events = bead_events,
+            factor = bead_factor,
+            bead_ints = bead_intensities
+        ))
+    }
+    
+    # Process all samples
+    sample_stats <- lapply(seq_along(fs), function(i) {
+        stats <- process_sample(fs[[i]])
+        stats$name <- sampleNames(fs)[i]
+        return(stats)
+    })
+    
+    # Plot bead identification if requested
+    if(plot_beads) {
+        # Create density plots of bead channel with cutoff
+        plots <- lapply(sample_stats, function(stats) {
+            data <- data.frame(intensity = stats$bead_ints)
+            cutoff <- quantile(stats$bead_ints, bead_thresh)
+            
+            ggplot(data, aes(x = intensity)) +
+                geom_density() +
+                geom_vline(xintercept = cutoff, color = "red", linetype = "dashed") +
+                ggtitle(paste("Sample:", stats$name)) +
+                theme_bw()
+        })
+        
+        gridExtra::grid.arrange(grobs = plots, ncol = 2)
+    }
+    
+    # Normalize each sample
+    normalized_fs <- fsApply(fs, function(ff) {
+        data <- exprs(ff)
+        stats <- process_sample(ff)
+        
+        # Channels to normalize (exclude technical parameters)
+        exclude_cols <- c("Time", "Event_length", "Center", "Offset", 
+                         "Width", "Residual", "Anomaly")
+        channels_to_norm <- setdiff(colnames(data), exclude_cols)
+        
+        # Apply normalization
+        data[, channels_to_norm] <- data[, channels_to_norm] / stats$factor
+        
+        # Remove bead events
+        ff_norm <- ff[!stats$bead_events, ]
+        exprs(ff_norm) <- data[!stats$bead_events, ]
+        
+        return(ff_norm)
+    })
+    return(normalized_fs)
+}
+
+
+fs1_normalized <- normalize_by_beads(fs1_clean, bead_channel = "Beads")
+
+```
+
+```{r}
+
+fs2_normalized <- normalize_by_beads(fs2_clean, bead_channel = "Beads")
+```
+
+```{r fig.height=9, fig.width=9}
+check_normalization <- function(fs_before, fs_after, markers_to_check) {
+    # Combine data
+    get_data <- function(fs, status) {
+        do.call(rbind, lapply(seq_along(fs), function(i) {
+            data <- as.data.frame(exprs(fs[[i]]))
+            data$Sample <- factor(pData(fs)$name[i])
+            data$Status <- status
+            return(data)
+        }))
+    }
+    
+    before_data <- get_data(fs_before, "Before")
+    after_data <- get_data(fs_after, "After")
+    all_data <- rbind(before_data, after_data)
+    
+    # Create plots
+    plots <- lapply(markers_to_check, function(marker) {
+        ggplot(all_data, aes_string(x = "Sample", y = marker)) +
+            geom_boxplot(aes(fill = Status)) +
+            theme_bw() +
+            theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+            ggtitle(marker)
+    })
+    
+    grid.arrange(grobs = plots, ncol = 2)
+}
+
+# Check some key markers
+key_markers <- c("CD3", "CD4", "CD8", "CD45")
+check_normalization(fs1_clean, fs1_normalized, key_markers)
+```
+
+```{r}
+check_beads <- function(fs, bead_channel = "Beads") {
+    # Plot bead distribution for each sample
+    bead_data <- do.call(rbind, lapply(seq_along(fs), function(i) {
+        data.frame(
+            intensity = exprs(fs[[i]])[, bead_channel],
+            sample = sampleNames(fs)[i]
+        )
+    }))
+    
+    # Plot with log scale for better visualization
+    p <- ggplot(bead_data, aes(x = log10(intensity + 1))) +
+        geom_density() +
+        facet_wrap(~sample) +
+        theme_bw() +
+        ggtitle("Bead Channel Distribution (log10 scale)")
+    
+    print(p)
+    
+    # Return summary statistics
+    return(tapply(bead_data$intensity, bead_data$sample, summary))
+}
+
+#--------------------
+# 2. Outlier Removal
+#--------------------
+remove_outliers <- function(fs, markers, n_sds = 4) {
+    message("Removing outliers...")
+    
+    fs_clean <- fsApply(fs, function(ff) {
+        data <- exprs(ff)
+        keep <- rep(TRUE, nrow(data))
+        
+        # Check each marker
+        for(marker in markers) {
+            x <- data[, marker]
+            x_mean <- mean(x, na.rm = TRUE)
+            x_sd <- sd(x, na.rm = TRUE)
+            
+            # Mark outliers
+            outliers <- abs(x - x_mean) > n_sds * x_sd
+            keep <- keep & !outliers
+        }
+        
+        # Return cleaned flowFrame
+        ff_clean <- ff[keep, ]
+        return(ff_clean)
+    })
+    
+    # Report results
+    cells_before <- sum(fsApply(fs, nrow))
+    cells_after <- sum(fsApply(fs_clean, nrow))
+    message(sprintf("Removed %d cells (%0.1f%%)", 
+                   cells_before - cells_after,
+                   (1 - cells_after/cells_before) * 100))
+    
+    return(fs_clean)
+}
+
+
+# Key markers to check
+key_markers <- c("CD3", "CD4", "CD8", "CD45")
+
+check_beads(fs1)
+
+
+fs1_no_outliers <- remove_outliers(fs1, key_markers)
+fs2_no_outliers <- remove_outliers(fs2, key_markers) 
+```
+
+```{r}
+
+normalize_by_beads_improved <- function(fs, bead_channel = "Beads", plot_checks = TRUE) {
+    message("Starting improved bead normalization...")
+    
+    # Function to find bead cutoff using robust method
+    find_bead_cutoff <- function(intensities) {
+        # Use robust statistics for cutoff
+        q75 <- quantile(intensities, 0.75)
+        q25 <- quantile(intensities, 0.25)
+        iqr <- q75 - q25
+        
+        # Cutoff based on upper quartile + IQR multiplier
+        cutoff <- q75 + 1.5 * iqr
+        
+        return(cutoff)
+    }
+    
+    # Process each sample
+    normalized_fs <- fsApply(fs, function(ff) {
+        data <- exprs(ff)
+        sample_name <- identifier(ff)
+        
+        # Find bead cutoff
+        cutoff <- find_bead_cutoff(data[, bead_channel])
+        bead_events <- data[, bead_channel] > cutoff
+        
+        # Plot check if requested
+        if(plot_checks) {
+            # Create density plot with cutoff
+            df <- data.frame(intensity = data[, bead_channel])
+            p <- ggplot(df, aes(x = intensity)) +
+                geom_density() +
+                geom_vline(xintercept = cutoff, color = "red", linetype = "dashed") +
+                ggtitle(paste("Sample:", sample_name)) +
+                theme_bw()
+            print(p)
+        }
+        
+        # Calculate normalization factor from beads
+        bead_factor <- median(data[bead_events, bead_channel])
+        
+        message(sprintf("Sample %s: Found %d bead events (%.1f%%), normalization factor: %.2f", 
+                       sample_name, sum(bead_events), 
+                       100 * mean(bead_events), bead_factor))
+        
+        # Normalize all channels except technical ones
+        exclude_cols <- c("Time", "Event_length", "Center", "Offset", 
+                         "Width", "Residual", "Anomaly")
+        channels_to_norm <- setdiff(colnames(data), exclude_cols)
+        
+        data[, channels_to_norm] <- data[, channels_to_norm] / bead_factor
+        
+        # Remove bead events
+        ff_norm <- ff[!bead_events, ]
+        exprs(ff_norm) <- data[!bead_events, ]
+        
+        return(ff_norm)
+    })
+    
+    return(normalized_fs)
+}
+
+#--------------------
+# 2. Compare Before/After
+#--------------------
+plot_normalization_comparison <- function(fs_before, fs_after, markers) {
+    # Combine data
+    get_data <- function(fs, status) {
+        do.call(rbind, lapply(seq_along(fs), function(i) {
+            data <- as.data.frame(exprs(fs[[i]]))
+            data$Sample <- factor(pData(fs)$name[i])
+            data$Status <- status
+            return(data)
+        }))
+    }
+    
+    before_data <- get_data(fs_before, "Before")
+    after_data <- get_data(fs_after, "After")
+    all_data <- rbind(before_data, after_data)
+    
+    # Create plots
+    plots <- lapply(markers, function(marker) {
+        ggplot(all_data, aes_string(x = "Sample", y = marker)) +
+            geom_boxplot(aes(fill = Status)) +
+            theme_bw() +
+            theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+            ggtitle(marker)
+    })
+    
+    grid.arrange(grobs = plots, ncol = 2)
+}
+
+#--------------------
+# 3. Apply Pipeline
+#--------------------
+# Apply improved normalization
+fs1_norm_improved <- normalize_by_beads_improved(fs1_no_outliers, bead_channel = "Beads")
+fs2_norm_improved <- normalize_by_beads_improved(fs2_no_outliers, bead_channel = "Beads")
+
+# Check results
+key_markers <- c("CD3", "CD4", "CD8", "CD45")
+plot_normalization_comparison(fs1_no_outliers, fs1_norm_improved, key_markers)
+
+# Transform data
+transform_cytof <- function(fs, cofactor = 5) {
+    marker_cols <- colnames(fs)[!grepl("^(Time|Event|Center|Offset|Width|Residual|Rhodium|Beads|Background|DNA|Anomaly)", 
+                                     colnames(fs))]
+    
+    fs_transformed <- fsApply(fs, function(ff) {
+        data <- exprs(ff)
+        data[, marker_cols] <- asinh(data[, marker_cols] / cofactor)
+        exprs(ff) <- data
+        return(ff)
+    })
+    
+    return(fs_transformed)
+}
+
+# Apply transformation
+fs1_processed <- transform_cytof(fs1_norm_improved)
+fs2_processed <- transform_cytof(fs2_norm_improved)
+
+```
+
+```{r}
+# Plot histogram of CD8 marker
+hist(exprs(fs1_processed[[1]])[, "CD8"], main = "CD8 Expression", xlab = "Intensity", col = "blue")
+
+# Scatter plot: CD8 vs. CD4
+plot(exprs(fs2_processed[[2]])[, "CD8"], exprs(fs2_processed[[2]])[, "CD4"],
+     xlab = "CD8 Intensity", ylab = "CD4 Intensity", 
+     main = "CD8 vs CD4", pch = 16, col = "darkgreen")
+
+# Compute correlation matrix for selected markers
+markers <- c("CD8", "CD4", "CD3", "CD45")
+cor_matrix <- cor(exprs(fs1_processed[[1]])[, markers], use = "complete.obs")
+print(cor_matrix)
+
+# Visualize correlation matrix
+library(corrplot)
+corrplot(cor_matrix, method = "circle")
+```
+
+```{r}
+sce <- prepData(fs1)  # Prepare data
+sce <- normCytof(sce)
+```
+

@@ -1,0 +1,871 @@
+---
+title: "ECM"
+author: "Kate Petrenko"
+date: "2024-11-17"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+	echo = FALSE,
+	message = FALSE,
+	warning = FALSE
+)
+library(data.table)
+library(Seurat)
+library(scDblFinder)
+library(DoubletFinder)
+library(dplyr)
+library(remotes)
+# remotes::install_github("carmonalab/STACAS")
+library(STACAS)
+library(SingleR)
+# install.packages("scGate")
+library(scGate)
+library(ggplot2)
+library(BiocParallel)
+library(harmony)
+library(RColorBrewer)
+library(stringr)
+library(cowplot)
+library(scuttle)
+# install.packages("devtools")
+# BiocManager::install("Homo.sapiens")
+# BiocManager::install("jpmam1/scalop") #forked copy of a really good guy 
+# devtools::install_github("jlaffy/infercna")
+library(infercna)
+# library(infercnv)
+library(parallel)
+library(future)
+library(clustree)
+library(dittoSeq)
+# install.packages("ggh4x")
+library(ggh4x)
+#BiocManager::install('EnhancedVolcano')
+library(EnhancedVolcano)
+library(clusterProfiler)
+# BiocManager::install('org.Mm.eg.db')
+library("org.Mm.eg.db")
+library(ReactomePA)
+library(msigdbr)
+# install.packages('qs')
+library(qs)
+# devtools::install_github("ncborcherding/escape")
+# devtools::install_github("rcastelo/GSVA")
+library(escape)
+library(biomaRt)
+library(tidyverse)
+```
+
+```{r global variables, include=FALSE}
+set.seed(100)
+DATADIR = '~/neuroblastoma/data/'
+WORKDIR = '~/neuroblastoma/'
+PREPRDATADIR = '~/neuroblastoma/preprocessing_data/'
+
+my_colors <- c("#9ACD32FF", "#4682B4FF",  "#DDA0DDFF", "#FFA07AFF", "#8FBC8BFF",
+               "#40E0D0FF",  "#F0E68CFF", "#5F9EA0FF", "#D2B48CFF",  
+               "#6495EDFF", "#FF69B4FF", "#BA55D3FF",  "#F08080FF", "#32CD32FF",  
+               "#FFDAB9FF",  "#87CEEBFF")
+```
+
+```{r download references, message=FALSE, warning=FALSE, include=FALSE}
+mouse_ref <- celldex::MouseRNAseqData()
+mouse_ref_imm <- celldex::ImmGenData()
+scGate_models_DB <- get_scGateDB()
+```
+
+Let me remind you what our data looks like :)
+
+```{r echo=FALSE, fig.height=5, fig.width=12}
+seu <- qread(paste0(PREPRDATADIR, 'seu_mouse.qs'))
+
+Idents(object = seu) <- "RNA_snn_res.0.1"
+
+new.cluster.ids <- c('0'='Malignant cells',
+                     '1'='Malignant cells',
+                     '2'='T cells',
+                     '3'='B cells',
+                     '4'='Myeloid cells',
+                     '5'='Fibroblasts',
+                     '6'='Malignant cells',
+                     '6'='Malignant cells',
+                     '7'='Endothelial cells',
+                     '8'='Fibroblasts'
+)
+
+seu <- RenameIdents(seu, new.cluster.ids)
+seu$annotation <- Idents(seu)
+
+plot_grid(DimPlot(seu, cols = c("#FF69B4FF", "#40E0D0FF", "#6495EDFF",  "#9ACD32FF", "#BA55D3FF", "#DDA0DDFF")) +
+  ggtitle("Annotation"), 
+  DimPlot(seu, group.by = 'age', cols = c("#6495EDFF", "#FF69B4FF")) +
+  ggtitle("Age"),
+  nrow = 1, rel_widths = c(1, 0.9))
+```
+
+# ECM check
+
+My goal was to check all ECM genes that Yuval sent us in our data. There 1027 genes at all. 710 genes are represented in our data. All genes were devided in 5 groups as it was in the original table:
+1. ECM Glycoproteins       
+2. Collagens               
+3. Proteoglycans           
+4. ECM-affiliated Proteins
+5. ECM Regulators          
+6. Secreted Factors
+
+
+```{r}
+esm_genes_df <- read.csv(paste0(WORKDIR, 'matrisome.csv'), sep = ',', header = T)
+```
+
+```{r}
+convert_human_to_mouse <- function(gene_list) {
+    output = c()
+    mouse_human_genes = read.csv("https://www.informatics.jax.org/downloads/reports/HOM_MouseHumanSequence.rpt",sep="\t")
+
+    for(gene in gene_list) {
+          class_key = (mouse_human_genes %>% filter(Symbol == gene & Common.Organism.Name == "human"))[['DB.Class.Key']]
+          if( !identical(class_key, integer(0)) ) {
+            human_genes = (mouse_human_genes %>% filter(DB.Class.Key == class_key & Common.Organism.Name=="mouse, laboratory"))[,"Symbol"]
+            for(human_gene in human_genes) {
+                output = rbind(c(gene, human_gene), output)
+            }
+          }
+     }
+     return (output)
+}
+
+esm_genes_df.mouse <- convert_human_to_mouse(esm_genes_df$Gene.Symbol)[,2]
+```
+
+## Enrichment 
+
+Firstly, I decided to calculate module score for for each cell, representing the aggregate expression of a predefined set of genes (a module - each groupd of genes in our case) relative to the background gene expression.
+
+```{r fig.height=5, fig.width=8}
+# Add a module score
+seu <- AddModuleScore(seu, features = list(esm_genes_df.mouse), name = "ECM_Module")
+
+# Plot module score by condition
+# VlnPlot(seu, features = "ECM_Module1", group.by = "annotation", split.by = 'age', cols = c("#6495EDFF", "#FF69B4FF")) + 
+#   ggtitle("ECM all genes Score by Condition") +
+#   theme_minimal()
+
+dittoBoxPlot(seu, "ECM_Module1", group.by = "age", split.by = 'annotation', color.panel = c("#6495EDFF", "#FF69B4FF"), 
+             jitter.size = NA, boxplot.width = 0.4, split.nrow = 1, boxplot.lineweight = 0.5) +
+  ggtitle('ECM_Module - all genes')
+```
+
+```{r fig.height=5, fig.width=8}
+# Add a module score
+seu <- AddModuleScore(seu, features = list(convert_human_to_mouse(esm_genes_df %>% 
+                                                                    dplyr::filter(Category == 'ECM Glycoproteins') %>% .$Gene.Symbol)[,2]), 
+                      name = "ECM_Glycoproteins")
+
+# Plot module score by condition
+# VlnPlot(seu, features = "ECM_Glycoproteins1", group.by = "annotation", split.by = 'age', cols = c("#6495EDFF", "#FF69B4FF")) + 
+#   ggtitle("ECM_Glycoproteins Module Score by Condition") +
+#   theme_minimal()
+
+dittoBoxPlot(seu, "ECM_Glycoproteins1", group.by = "age", split.by = 'annotation', color.panel = c("#6495EDFF", "#FF69B4FF"), 
+             jitter.size = NA, boxplot.width = 0.4, split.nrow = 1, boxplot.lineweight = 0.5)
+```
+
+```{r fig.height=5, fig.width=8}
+# Add a module score
+seu <- AddModuleScore(seu, features = list(convert_human_to_mouse(esm_genes_df %>% 
+                                                                    dplyr::filter(Category == 'Collagens')%>% .$Gene.Symbol)[,2]),
+                      name = "ECM_Collagens")
+
+# Plot module score by condition
+# VlnPlot(seu, features = "ECM_Collagens1", group.by = "annotation", split.by = 'age', cols = c("#6495EDFF", "#FF69B4FF")) + 
+#   ggtitle("ECM_Collagens Module Score by Condition") +
+#   theme_minimal()
+
+dittoBoxPlot(seu, "ECM_Collagens1", group.by = "age", split.by = 'annotation', color.panel = c("#6495EDFF", "#FF69B4FF"), 
+             jitter.size = NA, boxplot.width = 0.4, split.nrow = 1, boxplot.lineweight = 0.5)
+```
+
+```{r fig.height=5, fig.width=8}
+# Add a module score
+seu <- AddModuleScore(seu, features = list(convert_human_to_mouse(esm_genes_df %>% 
+                                                                    dplyr::filter(Category == 'Proteoglycans')%>% .$Gene.Symbol)[,2]),
+                      name = "ECM_Proteoglycans")
+
+# Plot module score by condition
+# VlnPlot(seu, features = "ECM_Proteoglycans1", group.by = "annotation", split.by = 'age', cols = c("#6495EDFF", "#FF69B4FF")) + 
+#   ggtitle("ECM_Proteoglycans Module Score by Condition") +
+#   theme_minimal()
+
+dittoBoxPlot(seu, "ECM_Proteoglycans1", group.by = "age", split.by = 'annotation', color.panel = c("#6495EDFF", "#FF69B4FF"), 
+             jitter.size = NA, boxplot.width = 0.4, split.nrow = 1, boxplot.lineweight = 0.5)
+```
+
+```{r fig.height=5, fig.width=8}
+# Add a module score
+seu <- AddModuleScore(seu, features = list(convert_human_to_mouse(esm_genes_df %>% 
+                                                                    dplyr::filter(Category == 'ECM-affiliated Proteins')%>% .$Gene.Symbol)[,2]),
+                      name = "ECM_affiliated_Proteins")
+
+# Plot module score by condition
+# VlnPlot(seu, features = "ECM_affiliated_Proteins1", group.by = "annotation", split.by = 'age', cols = c("#6495EDFF", "#FF69B4FF")) + 
+#   ggtitle("ECM_affiliated_Proteins Module Score by Condition") +
+#   theme_minimal()
+
+dittoBoxPlot(seu, "ECM_affiliated_Proteins1", group.by = "age", split.by = 'annotation', color.panel = c("#6495EDFF", "#FF69B4FF"), 
+             jitter.size = NA, boxplot.width = 0.4, split.nrow = 1, boxplot.lineweight = 0.5)
+```
+
+```{r fig.height=5, fig.width=8}
+# Add a module score
+seu <- AddModuleScore(seu, features = list(convert_human_to_mouse(esm_genes_df %>% 
+                                                                    dplyr::filter(Category == 'ECM Regulators')%>% .$Gene.Symbol)[,2]),
+                      name = "ECM_Regulators")
+
+# Plot module score by condition
+# VlnPlot(seu, features = "ECM_Regulators1", group.by = "annotation", split.by = 'age', cols = c("#6495EDFF", "#FF69B4FF")) + 
+#   ggtitle("ECM_Regulators Module Score by Condition") +
+#   theme_minimal()
+
+dittoBoxPlot(seu, "ECM_Regulators1", group.by = "age", split.by = 'annotation', color.panel = c("#6495EDFF", "#FF69B4FF"), 
+             jitter.size = NA, boxplot.width = 0.4, split.nrow = 1, boxplot.lineweight = 0.5)
+```
+
+```{r fig.height=5, fig.width=8}
+# Add a module score
+seu <- AddModuleScore(seu, features = list(convert_human_to_mouse(esm_genes_df %>% 
+                                                                    dplyr::filter(Category == 'Secreted Factors')%>% .$Gene.Symbol)[,2]),
+                      name = "ECM_Secreted_Factors")
+
+# Plot module score by condition
+# VlnPlot(seu, features = "ECM_Secreted_Factors1", group.by = "annotation", split.by = 'age', cols = c("#6495EDFF", "#FF69B4FF")) + 
+#   ggtitle("ECM_Secreted_Factors Module Score by Condition") +
+#   theme_minimal()
+
+dittoBoxPlot(seu, "ECM_Secreted_Factors1", group.by = "age", split.by = 'annotation', color.panel = c("#6495EDFF", "#FF69B4FF"), 
+             jitter.size = NA, boxplot.width = 0.4, split.nrow = 1, boxplot.lineweight = 0.5)
+```
+
+We can see that average module score is higher for adult in approximately all cases
+. 
+# DEG
+
+Let's look at specific genes that are differently express. 
+
+```{r}
+de_results <- list()
+esm_genes_df.mouse <- intersect(rownames(seu), esm_genes_df.mouse)
+for (cell_type in seu$annotation %>% unique) {
+  # Subset cells of the current cell type
+  subset_obj <- subset(seu, idents = cell_type)
+  
+  # Run DE analysis
+  Idents(subset_obj) <- "age" # Assuming 'condition' is the metadata column
+  de_results[[cell_type]] <- FindMarkers(subset_obj, ident.1 = "young", ident.2 = "adult", features = esm_genes_df.mouse)
+}
+
+# Combine DE results into a single dataframe for easy handling
+de_results_df <- bind_rows(
+  lapply(names(de_results), function(cell_type) {
+    de_results[[cell_type]] %>% 
+      mutate(CellType = cell_type) %>% 
+      rownames_to_column("Gene")
+  })
+)
+```
+
+```{r}
+top_genes <- de_results_df %>% 
+  dplyr::filter(p_val_adj < 0.05) %>% 
+  dplyr::filter(pct.1 > 0.25 | pct.2 > 0.25) %>% 
+  dplyr::filter(abs(avg_log2FC) > 0.5) 
+```
+
+## T cells
+
+```{r fig.height=3, fig.width=7}
+dittoHeatmap(seu, genes = top_genes %>% 
+               dplyr::filter(CellType == 'T cells') %>% .$Gene, cells.use = seu$annotation == 'T cells', 
+             annot.by = c('age', 'annotation'), 
+             annot.colors = c("#6495EDFF", "#FF69B4FF", "#BA55D3FF", "#9ACD32FF", 
+                              "#4682B4FF",  "#DDA0DDFF", "#FFA07AFF", "#8FBC8BFF"), 
+             cluster_cols = F, breaks = seq(-2, 2, 0.08)) 
+```
+
+## Myeloid cells
+
+```{r fig.height=3, fig.width=7}
+dittoHeatmap(seu, genes = top_genes %>% 
+               dplyr::filter(CellType == 'Myeloid cells') %>% .$Gene, cells.use = seu$annotation == 'Myeloid cells', 
+             annot.by = c('age', 'annotation'), 
+             annot.colors = c("#6495EDFF", "#FF69B4FF", "#BA55D3FF", "#9ACD32FF", 
+                              "#4682B4FF",  "#DDA0DDFF", "#FFA07AFF", "#8FBC8BFF"), 
+             cluster_cols = F, breaks = seq(-2, 2, 0.08)) 
+```
+
+## Fibroblasts
+
+```{r fig.height=3, fig.width=7}
+dittoHeatmap(seu, genes = top_genes %>% 
+               dplyr::filter(CellType == 'Fibroblasts') %>% .$Gene, cells.use = seu$annotation == 'Fibroblasts', 
+             annot.by = c('age', 'annotation'), 
+             annot.colors = c("#6495EDFF", "#FF69B4FF", "#BA55D3FF", "#9ACD32FF", 
+                              "#4682B4FF",  "#DDA0DDFF", "#FFA07AFF", "#8FBC8BFF"), 
+             cluster_cols = F, breaks = seq(-2, 2, 0.08)) 
+```
+
+## Malignant cells
+
+```{r fig.height=6, fig.width=6}
+dittoHeatmap(seu, genes = top_genes %>% 
+               dplyr::filter(CellType == 'Malignant cells') %>% .$Gene, cells.use = seu$annotation == 'Malignant cells', 
+             annot.by = c('age', 'annotation'), 
+             annot.colors = c("#6495EDFF", "#FF69B4FF", "#BA55D3FF", "#9ACD32FF", 
+                              "#4682B4FF",  "#DDA0DDFF", "#FFA07AFF", "#8FBC8BFF"), 
+             cluster_cols = F, breaks = seq(-2, 2, 0.08)) 
+```
+
+Based on the heatmap we can see that ECM genes in malignant cells are distributed unevenly. So I decided to look at it closer to probably find some intereting subset of genes.
+
+```{r fig.height=5, fig.width=12,}
+malig_cells <- qread(paste0(PREPRDATADIR, 'malig_cells_mouse_gsvas3_ssGSEA.qs'))
+
+Idents(malig_cells) <- malig_cells$RNA_snn_res.0.2
+plot_grid(DimPlot(malig_cells, group.by = 'RNA_snn_res.0.2', cols = my_colors) +
+  ggtitle("Clusters"), 
+  DimPlot(malig_cells, group.by = 'age', cols = c("#6495EDFF", "#FF69B4FF")) +
+  ggtitle("Age"),
+  nrow = 1)
+```
+
+Third cluster express genes of ECM more than other clusters. So we found some ECM specific subset of malignant cells. Intersting that in all clusters module score is higher for adult except of this 3 cluster.
+
+```{r}
+malig_cells <- AddModuleScore(malig_cells, features = list(esm_genes_df.mouse), name = "ECM_Module")
+
+FeaturePlot(malig_cells, "ECM_Module1")
+dittoBoxPlot(malig_cells, "ECM_Module1", group.by = "age", split.by = 'RNA_snn_res.0.2', color.panel = c("#6495EDFF", "#FF69B4FF"), 
+             jitter.size = NA, boxplot.width = 0.4, split.nrow = 1, boxplot.lineweight = 0.5)
+```
+
+Moreover, we know that adult have much more cells of 3 sluster.
+
+```{r}
+plot_grid(dittoBarPlot(malig_cells, 'age', group.by = 'RNA_snn_res.0.2', color.panel = my_colors, scale = 'count') + ggtitle('Age'), dittoBarPlot(malig_cells, 'RNA_snn_res.0.2', group.by = 'age', color.panel = my_colors) + ggtitle('Clusters'),
+          rel_widths = c(2, 0.8),
+          nrow = 1)
+```
+
+### Cluster's markers
+
+```{r fig.height=7, fig.width=12}
+Idents(malig_cells) <- 'RNA_snn_res.0.2'
+
+maligcells.markers <- FindAllMarkers(malig_cells, only.pos = TRUE, min.pct = 0.25)
+top5 <- maligcells.markers %>%
+  dplyr::filter(p_val_adj < 0.05) %>% 
+  group_by(cluster) %>%
+  top_n(n = 7, wt = avg_log2FC)
+
+DotPlot(malig_cells, c('Mycn', top5$gene), cols = c('lightgrey', "#BA55D3FF")) +
+  RotatedAxis()
+```
+
+```{r}
+# Find markers for cluster 3 vs. all other clusters
+cluster3_markers <- FindMarkers(
+  object = malig_cells,
+  ident.1 = "3",                
+  only.pos = TRUE,              
+  min.pct = 0.25     
+)
+
+# Filter significant markers
+cluster3_markers <- cluster3_markers %>%
+  dplyr::filter(p_val_adj < 0.05) %>% 
+  dplyr::filter(abs(avg_log2FC) > 1)
+
+# View the top markers
+cluster3_markers <- cluster3_markers %>% 
+  top_n(n = 50, wt = avg_log2FC)
+```
+
+```{r fig.height=7, fig.width=7}
+dittoHeatmap(malig_cells, genes = rownames(cluster3_markers),
+             annot.by = c('RNA_snn_res.0.2'), 
+             annot.colors = c("#6495EDFF", "#FF69B4FF", "#BA55D3FF", "#9ACD32FF", 
+                              "#4682B4FF",  "#DDA0DDFF", "#FFA07AFF", "#8FBC8BFF"), 
+             cluster_cols = F, breaks = seq(-2, 2, 0.08)) 
+```
+
+# Human
+
+## single cell
+
+I decided to check if the same picture in human samples too.
+
+```{r}
+sc <- qread(paste0(PREPRDATADIR, 'sc_v1.qs'))
+sn <- qread(paste0(PREPRDATADIR, 'sn_v1.qs'))
+```
+
+```{r eval=FALSE, include=FALSE}
+seu_h <- qread(paste0(PREPRDATADIR, 'seu_naivetreatment_v2.qs'))
+sn <- subset(seu, Study %in% c('grossman', 'jansky'))
+
+sc <- subset(seu_h, Study %in% c('dong', 'verhoeven', 'wienke'))
+sc <- sc %>% 
+  NormalizeData() %>% 
+  FindVariableFeatures() %>% 
+  ScaleData() %>% 
+  RunPCA(verbose=FALSE)
+
+sc <- sc %>% 
+  RunHarmony(., 'SampleID',
+             lambda = 1, verbose = FALSE) %>% 
+  RunUMAP(reduction = "harmony", dims = 1:20, verbose=F) 
+
+qsave(sc, paste0(PREPRDATADIR, 'sc_v1.qs'))
+```
+
+```{r fig.height=4, fig.width=12}
+
+plot_grid(DimPlot(sc, reduction = "umap", group.by = 'ANNOTATION_FINAL', cols = my_colors),
+DimPlot(sc, reduction = "umap", group.by = 'Study', cols = my_colors), nrow = 1)
+```
+
+```{r fig.height=4, fig.width=12}
+
+plot_grid(DimPlot(sn, reduction = "umap", group.by = 'ANNOTATION_FINAL', cols = my_colors),
+DimPlot(sn, reduction = "umap", group.by = 'Study', cols = my_colors), nrow = 1)
+```
+
+```{r fig.height=5, fig.width=8}
+# Add a module score
+sc <- AddModuleScore(sc, features = list(esm_genes_df$Gene.Symbol), name = "ECM_Module")
+
+# Plot module score by condition
+# VlnPlot(seu, features = "ECM_Module1", group.by = "annotation", split.by = 'age', cols = c("#6495EDFF", "#FF69B4FF")) + 
+#   ggtitle("ECM all genes Score by Condition") +
+#   theme_minimal()
+
+dittoBoxPlot(sc, "ECM_Module1", group.by = "less18M", split.by = 'ANNOTATION_FINAL', color.panel = c("#6495EDFF", "#FF69B4FF"), 
+             # jitter.size = NA, 
+             boxplot.width = 0.4, split.nrow = 1, boxplot.lineweight = 0.5) +
+  ggtitle('ECM_Module - all genes')
+```
+
+```{r fig.height=5, fig.width=8}
+# Add a module score
+sc <- AddModuleScore(sc, features = list(esm_genes_df %>% dplyr::filter(Category == 'ECM Glycoproteins') %>% .$Gene.Symbol), 
+                      name = "ECM_Glycoproteins")
+
+# Plot module score by condition
+# VlnPlot(seu, features = "ECM_Glycoproteins1", group.by = "annotation", split.by = 'age', cols = c("#6495EDFF", "#FF69B4FF")) + 
+#   ggtitle("ECM_Glycoproteins Module Score by Condition") +
+#   theme_minimal()
+
+dittoBoxPlot(sc, "ECM_Glycoproteins1", group.by = "less18M", split.by = 'ANNOTATION_FINAL', color.panel = c("#6495EDFF", "#FF69B4FF"), 
+             # jitter.size = NA,
+             boxplot.width = 0.4, split.nrow = 1, boxplot.lineweight = 0.5)
+```
+
+```{r fig.height=5, fig.width=8}
+# Add a module score
+sc <- AddModuleScore(sc, features = list(esm_genes_df %>% dplyr::filter(Category == 'Collagens')%>% .$Gene.Symbol),
+                      name = "ECM_Collagens")
+
+# Plot module score by condition
+# VlnPlot(seu, features = "ECM_Collagens1", group.by = "annotation", split.by = 'age', cols = c("#6495EDFF", "#FF69B4FF")) + 
+#   ggtitle("ECM_Collagens Module Score by Condition") +
+#   theme_minimal()
+
+dittoBoxPlot(sc, "ECM_Collagens1", group.by = "less18M", split.by = 'ANNOTATION_FINAL', color.panel = c("#6495EDFF", "#FF69B4FF"), 
+             # jitter.size = NA, 
+             boxplot.width = 0.4, split.nrow = 1, boxplot.lineweight = 0.5)
+```
+
+```{r fig.height=5, fig.width=8}
+# Add a module score
+sc <- AddModuleScore(sc, features = list(esm_genes_df %>% dplyr::filter(Category == 'Proteoglycans')
+                                         %>% .$Gene.Symbol),
+                      name = "ECM_Proteoglycans")
+
+# Plot module score by condition
+# VlnPlot(seu, features = "ECM_Proteoglycans1", group.by = "annotation", split.by = 'age', cols = c("#6495EDFF", "#FF69B4FF")) + 
+#   ggtitle("ECM_Proteoglycans Module Score by Condition") +
+#   theme_minimal()
+
+dittoBoxPlot(sc, "ECM_Proteoglycans1", group.by = "less18M", split.by = 'ANNOTATION_FINAL', color.panel = c("#6495EDFF", "#FF69B4FF"), 
+             # jitter.size = NA, 
+             boxplot.width = 0.4, split.nrow = 1, boxplot.lineweight = 0.5)
+```
+
+```{r fig.height=5, fig.width=8}
+# Add a module score
+sc <- AddModuleScore(sc, features = list(esm_genes_df %>% 
+                                           dplyr::filter(Category == 'ECM-affiliated Proteins') %>%
+                                           .$Gene.Symbol),
+                      name = "ECM_affiliated_Proteins")
+
+# Plot module score by condition
+# VlnPlot(seu, features = "ECM_affiliated_Proteins1", group.by = "annotation", split.by = 'age', cols = c("#6495EDFF", "#FF69B4FF")) + 
+#   ggtitle("ECM_affiliated_Proteins Module Score by Condition") +
+#   theme_minimal()
+
+dittoBoxPlot(sc, "ECM_affiliated_Proteins1", group.by = "less18M", split.by = 'ANNOTATION_FINAL', color.panel = c("#6495EDFF", "#FF69B4FF"), 
+             # jitter.size = NA, 
+             boxplot.width = 0.4, split.nrow = 1, boxplot.lineweight = 0.5)
+```
+
+```{r fig.height=5, fig.width=8}
+# Add a module score
+sc <- AddModuleScore(sc, features = list(esm_genes_df %>% 
+                                           dplyr::filter(Category == 'ECM Regulators') %>%
+                                           .$Gene.Symbol),
+                      name = "ECM_Regulators")
+
+# Plot module score by condition
+# VlnPlot(seu, features = "ECM_Regulators1", group.by = "annotation", split.by = 'age', cols = c("#6495EDFF", "#FF69B4FF")) + 
+#   ggtitle("ECM_Regulators Module Score by Condition") +
+#   theme_minimal()
+
+dittoBoxPlot(sc, "ECM_Regulators1", group.by = "less18M", split.by = 'ANNOTATION_FINAL', color.panel = c("#6495EDFF", "#FF69B4FF"), 
+             # jitter.size = NA, 
+             boxplot.width = 0.4, split.nrow = 1, boxplot.lineweight = 0.5)
+```
+
+```{r fig.height=5, fig.width=8}
+# Add a module score
+sc <- AddModuleScore(sc, features = list(esm_genes_df %>% 
+                                           dplyr::filter(Category == 'Secreted Factors') %>%
+                                           .$Gene.Symbol),
+                      name = "ECM_Secreted_Factors")
+
+# Plot module score by condition
+# VlnPlot(seu, features = "ECM_Secreted_Factors1", group.by = "annotation", split.by = 'age', cols = c("#6495EDFF", "#FF69B4FF")) + 
+#   ggtitle("ECM_Secreted_Factors Module Score by Condition") +
+#   theme_minimal()
+
+dittoBoxPlot(sc, "ECM_Secreted_Factors1", group.by = "less18M", split.by = 'ANNOTATION_FINAL', color.panel = c("#6495EDFF", "#FF69B4FF"), 
+             # jitter.size = NA, 
+             boxplot.width = 0.4, split.nrow = 1, boxplot.lineweight = 0.5)
+```
+
+
+## single-nuclei
+
+```{r eval=FALSE, fig.height=4, fig.width=12, include=FALSE}
+sn <- sn %>% 
+  NormalizeData() %>% 
+  FindVariableFeatures() %>% 
+  ScaleData() %>% 
+  RunPCA(verbose=FALSE)
+
+sn <- sn %>% 
+  RunHarmony(., 'SampleID',
+             lambda = 1, verbose = FALSE) %>% 
+  RunUMAP(reduction = "harmony", dims = 1:20, verbose=F) 
+
+
+qsave(sn, paste0(PREPRDATADIR, 'sn_v1.qs'))
+```
+
+```{r echo=FALSE, fig.height=4, fig.width=12}
+plot_grid(DimPlot(sn, reduction = "umap", group.by = 'ANNOTATION_FINAL', cols = my_colors),
+DimPlot(sn, reduction = "umap", group.by = 'Study', cols = my_colors), nrow = 1)
+```
+
+```{r fig.height=5, fig.width=8}
+# Add a module snore
+sn <- AddModuleScore(sn, features = list(esm_genes_df$Gene.Symbol), name = "ECM_Module")
+
+# Plot module snore by condition
+# VlnPlot(seu, features = "ECM_Module1", group.by = "annotation", split.by = 'age', cols = c("#6495EDFF", "#FF69B4FF")) + 
+#   ggtitle("ECM all genes snore by Condition") +
+#   theme_minimal()
+
+dittoBoxPlot(sn, "ECM_Module1", group.by = "less18M", split.by = 'ANNOTATION_FINAL', color.panel = c("#6495EDFF", "#FF69B4FF"), 
+             # jitter.size = NA, 
+             boxplot.width = 0.4, split.nrow = 1, boxplot.lineweight = 0.5) +
+  ggtitle('ECM_Module - all genes')
+```
+
+```{r fig.height=5, fig.width=8}
+# Add a module snore
+sn <- AddModuleScore(sn, features = list(esm_genes_df %>% dplyr::filter(Category == 'ECM Glycoproteins') %>% .$Gene.Symbol), 
+                     name = "ECM_Glycoproteins")
+
+# Plot module snore by condition
+# VlnPlot(seu, features = "ECM_Glycoproteins1", group.by = "annotation", split.by = 'age', cols = c("#6495EDFF", "#FF69B4FF")) + 
+#   ggtitle("ECM_Glycoproteins Module snore by Condition") +
+#   theme_minimal()
+
+dittoBoxPlot(sn, "ECM_Glycoproteins1", group.by = "less18M", split.by = 'ANNOTATION_FINAL', color.panel = c("#6495EDFF", "#FF69B4FF"), 
+             # jitter.size = NA,
+             boxplot.width = 0.4, split.nrow = 1, boxplot.lineweight = 0.5)
+```
+
+```{r fig.height=5, fig.width=8}
+# Add a module snore
+sn <- AddModuleScore(sn, features = list(esm_genes_df %>% dplyr::filter(Category == 'Collagens')%>% .$Gene.Symbol),
+                     name = "ECM_Collagens")
+
+# Plot module snore by condition
+# VlnPlot(seu, features = "ECM_Collagens1", group.by = "annotation", split.by = 'age', cols = c("#6495EDFF", "#FF69B4FF")) + 
+#   ggtitle("ECM_Collagens Module snore by Condition") +
+#   theme_minimal()
+
+dittoBoxPlot(sn, "ECM_Collagens1", group.by = "less18M", split.by = 'ANNOTATION_FINAL', color.panel = c("#6495EDFF", "#FF69B4FF"), 
+             # jitter.size = NA, 
+             boxplot.width = 0.4, split.nrow = 1, boxplot.lineweight = 0.5)
+```
+
+```{r fig.height=5, fig.width=8}
+# Add a module snore
+sn <- AddModuleScore(sn, features = list(esm_genes_df %>% dplyr::filter(Category == 'Proteoglycans')
+                                         %>% .$Gene.Symbol),
+                     name = "ECM_Proteoglycans")
+
+# Plot module snore by condition
+# VlnPlot(seu, features = "ECM_Proteoglycans1", group.by = "annotation", split.by = 'age', cols = c("#6495EDFF", "#FF69B4FF")) + 
+#   ggtitle("ECM_Proteoglycans Module snore by Condition") +
+#   theme_minimal()
+
+dittoBoxPlot(sn, "ECM_Proteoglycans1", group.by = "less18M", split.by = 'ANNOTATION_FINAL', color.panel = c("#6495EDFF", "#FF69B4FF"), 
+             # jitter.size = NA, 
+             boxplot.width = 0.4, split.nrow = 1, boxplot.lineweight = 0.5)
+```
+
+```{r fig.height=5, fig.width=8}
+# Add a module snore
+sn <- AddModuleScore(sn, features = list(esm_genes_df %>% 
+                                           dplyr::filter(Category == 'ECM-affiliated Proteins') %>%
+                                           .$Gene.Symbol),
+                     name = "ECM_affiliated_Proteins")
+
+# Plot module snore by condition
+# VlnPlot(seu, features = "ECM_affiliated_Proteins1", group.by = "annotation", split.by = 'age', cols = c("#6495EDFF", "#FF69B4FF")) + 
+#   ggtitle("ECM_affiliated_Proteins Module snore by Condition") +
+#   theme_minimal()
+
+dittoBoxPlot(sn, "ECM_affiliated_Proteins1", group.by = "less18M", split.by = 'ANNOTATION_FINAL', color.panel = c("#6495EDFF", "#FF69B4FF"), 
+             # jitter.size = NA, 
+             boxplot.width = 0.4, split.nrow = 1, boxplot.lineweight = 0.5)
+```
+
+```{r fig.height=5, fig.width=8}
+# Add a module snore
+sn <- AddModuleScore(sn, features = list(esm_genes_df %>% 
+                                           dplyr::filter(Category == 'ECM Regulators') %>%
+                                           .$Gene.Symbol),
+                     name = "ECM_Regulators")
+
+# Plot module snore by condition
+# VlnPlot(seu, features = "ECM_Regulators1", group.by = "annotation", split.by = 'age', cols = c("#6495EDFF", "#FF69B4FF")) + 
+#   ggtitle("ECM_Regulators Module snore by Condition") +
+#   theme_minimal()
+
+dittoBoxPlot(sn, "ECM_Regulators1", group.by = "less18M", split.by = 'ANNOTATION_FINAL', color.panel = c("#6495EDFF", "#FF69B4FF"), 
+             # jitter.size = NA, 
+             boxplot.width = 0.4, split.nrow = 1, boxplot.lineweight = 0.5)
+```
+
+```{r fig.height=5, fig.width=8}
+# Add a module snore
+sn <- AddModuleScore(sn, features = list(esm_genes_df %>% 
+                                           dplyr::filter(Category == 'Secreted Factors') %>%
+                                           .$Gene.Symbol),
+                     name = "ECM_Secreted_Factors")
+
+# Plot module snore by condition
+# VlnPlot(seu, features = "ECM_Secreted_Factors1", group.by = "annotation", split.by = 'age', cols = c("#6495EDFF", "#FF69B4FF")) + 
+#   ggtitle("ECM_Secreted_Factors Module snore by Condition") +
+#   theme_minimal()
+
+dittoBoxPlot(sn, "ECM_Secreted_Factors1", group.by = "less18M", split.by = 'ANNOTATION_FINAL', color.panel = c("#6495EDFF", "#FF69B4FF"), 
+             # jitter.size = NA, 
+             boxplot.width = 0.4, split.nrow = 1, boxplot.lineweight = 0.5)
+```
+
+
+# Malignant cells check
+
+```{r}
+malig_cells <- subset(sc, ANNOTATION_FINAL == 'malignant_cells')
+
+malig_cells <- malig_cells %>% 
+  NormalizeData() %>% 
+  FindVariableFeatures() %>% 
+  ScaleData(vars.to.regress = c("S.Score", "G2M.Score")) %>% 
+  RunPCA(verbose=FALSE) %>% 
+  RunHarmony(., 'Study',
+             lambda = 1, verbose = FALSE) %>% 
+  RunUMAP(reduction = "harmony", dims = 1:20, verbose=F) %>% 
+  FindNeighbors(dims = 1:20) %>%
+  FindClusters(resolution = seq(0.1, 1, 0.1))
+```
+
+```{r}
+clustree(malig_cells)
+```
+
+```{r fig.height=5, fig.width=16,}
+Idents(malig_cells) <- malig_cells$RNA_snn_res.0.1
+plot_grid(DimPlot(malig_cells, group.by = 'RNA_snn_res.0.1') +
+  ggtitle("Clusters"), 
+  DimPlot(malig_cells, group.by = 'less18M', cols = c("#6495EDFF", "#FF69B4FF")) +
+  ggtitle("Age"),
+  DimPlot(malig_cells, group.by = 'SampleID') + NoLegend() +
+  ggtitle("Sample"),
+  nrow = 1)
+```
+
+```{r}
+FeaturePlot(malig_cells, 'MYCN')
+```
+
+# Angiogenesis check
+
+mouse genes
+
+```{r}
+hallmark_angio_m <- msigdbr(species = "Mus musculus", 
+                           category = "H") %>%
+    dplyr::filter(gs_name == "HALLMARK_ANGIOGENESIS") %>%
+    dplyr::pull(gene_symbol)
+
+hallmark_angio_m
+```
+
+human genes
+
+```{r}
+hallmark_angio <- msigdbr(species = "Homo sapiens", 
+                           category = "H") %>%
+    dplyr::filter(gs_name == "HALLMARK_ANGIOGENESIS") %>%
+    dplyr::pull(gene_symbol)
+
+hallmark_angio
+```
+
+## Mouse
+
+```{r}
+  
+# Calculate module score
+seu <- AddModuleScore(
+  object = seu,
+  features = list(hallmark_angio_m),
+  name = "angiogenesis_score"
+)
+
+dittoBoxPlot(seu, "angiogenesis_score1", group.by = "age", split.by = 'annotation', color.panel = c("#6495EDFF", "#FF69B4FF"), 
+             # jitter.size = NA, 
+             boxplot.width = 0.4, split.nrow = 1, boxplot.lineweight = 0.5) +
+  ggtitle('Angiogenesis score - mouse')
+```
+
+### DEG
+
+Let's look at specific genes that are differently express. 
+
+```{r}
+de_results <- list()
+hallmark_angio_m <- intersect(rownames(seu), hallmark_angio_m)
+for (cell_type in seu$annotation %>% unique) {
+  # Subset cells of the current cell type
+  subset_obj <- subset(seu, idents = cell_type)
+  
+  # Run DE analysis
+  Idents(subset_obj) <- "age" # Assuming 'condition' is the metadata column
+  de_results[[cell_type]] <- FindMarkers(subset_obj, ident.1 = "young", ident.2 = "adult", features = hallmark_angio_m)
+}
+
+# Combine DE results into a single dataframe for easy handling
+de_results_df <- bind_rows(
+  lapply(names(de_results), function(cell_type) {
+    de_results[[cell_type]] %>% 
+      mutate(CellType = cell_type) %>% 
+      rownames_to_column("Gene")
+  })
+)
+```
+
+```{r}
+top_genes <- de_results_df %>% 
+  dplyr::filter(p_val_adj < 0.05) %>% 
+  dplyr::filter(pct.1 > 0.25 | pct.2 > 0.25) %>% 
+  dplyr::filter(abs(avg_log2FC) > 0.5) 
+```
+
+#### T cells
+
+```{r fig.height=3, fig.width=7}
+dittoHeatmap(seu, genes = top_genes %>% 
+               dplyr::filter(CellType == 'T cells') %>% .$Gene, cells.use = seu$annotation == 'T cells', 
+             annot.by = c('age', 'annotation'), 
+             annot.colors = c("#6495EDFF", "#FF69B4FF", "#BA55D3FF", "#9ACD32FF", 
+                              "#4682B4FF",  "#DDA0DDFF", "#FFA07AFF", "#8FBC8BFF"), 
+             cluster_cols = F, breaks = seq(-2, 2, 0.08)) 
+```
+
+#### Myeloid cells
+
+there are not DEG
+
+#### Fibroblasts
+
+there are not DEG
+
+#### Malignant cells
+
+```{r fig.height=3, fig.width=6}
+dittoHeatmap(seu, genes = top_genes %>% 
+               dplyr::filter(CellType == 'Malignant cells') %>% .$Gene, cells.use = seu$annotation == 'Malignant cells', 
+             annot.by = c('age', 'annotation'), 
+             annot.colors = c("#6495EDFF", "#FF69B4FF", "#BA55D3FF", "#9ACD32FF", 
+                              "#4682B4FF",  "#DDA0DDFF", "#FFA07AFF", "#8FBC8BFF"), 
+             cluster_cols = F, breaks = seq(-2, 2, 0.08)) 
+```
+
+## Human
+
+### sc
+
+```{r}
+
+# Calculate module score
+sc <- AddModuleScore(
+  object = sc,
+  features = list(hallmark_angio),
+  name = "angiogenesis_score"
+)
+
+sn <- AddModuleScore(
+  object = sn,
+  features = list(hallmark_angio),
+  name = "angiogenesis_score"
+)
+
+dittoBoxPlot(sc, "angiogenesis_score1", group.by = "less18M", split.by = 'ANNOTATION_FINAL', color.panel = c("#6495EDFF", "#FF69B4FF"), 
+             # jitter.size = NA, 
+             boxplot.width = 0.4, split.nrow = 1, boxplot.lineweight = 0.5) +
+  ggtitle('Angiogenesis score - single cell')
+```
+
+
+### sn
+
+```{r}
+sn$less18M <- as.character(sn$less18M)
+dittoBoxPlot(sn, "angiogenesis_score1", group.by = "less18M", split.by = 'ANNOTATION_FINAL', color.panel = c("#6495EDFF", "#FF69B4FF"), 
+             # jitter.size = NA, 
+             boxplot.width = 0.4, split.nrow = 1, boxplot.lineweight = 0.5) +
+  ggtitle('Angiogenesis score - single nuclei')
+```
+
+
+
+

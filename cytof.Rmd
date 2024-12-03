@@ -1,0 +1,176 @@
+---
+title: "Cytof"
+author: "Kate Petrenko"
+date: "2024-10-25"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+	echo = FALSE,
+	message = FALSE,
+	warning = FALSE
+)
+library(data.table)
+library(Seurat)
+library(scDblFinder)
+library(DoubletFinder)
+library(dplyr)
+library(remotes)
+# remotes::install_github("carmonalab/STACAS")
+library(STACAS)
+library(SingleR)
+# install.packages("scGate")
+library(scGate)
+library(ggplot2)
+library(BiocParallel)
+library(harmony)
+library(RColorBrewer)
+library(stringr)
+library(cowplot)
+library(scuttle)
+# install.packages("devtools")
+# BiocManager::install("Homo.sapiens")
+# BiocManager::install("jpmam1/scalop") #forked copy of a really good guy 
+# devtools::install_github("jlaffy/infercna")
+library(infercna)
+# library(infercnv)
+library(parallel)
+library(future)
+library(clustree)
+library(dittoSeq)
+# install.packages("ggh4x")
+library(ggh4x)
+#BiocManager::install('EnhancedVolcano')
+library(EnhancedVolcano)
+library(clusterProfiler)
+# BiocManager::install('org.Mm.eg.db')
+library("org.Mm.eg.db")
+library(ReactomePA)
+library(msigdbr)
+# install.packages('qs')
+library(qs)
+# devtools::install_github("ncborcherding/escape")
+# devtools::install_github("rcastelo/GSVA")
+library(escape)
+# install.packages('gprofiler2')
+library(gprofiler2)
+# remotes::install_github("carmonalab/ProjecTILs")
+library(ProjecTILs)
+library(gridExtra)
+# BiocManager::install("flowCore")
+library(flowCore)
+# BiocManager::install("ggcyto")
+library(ggcyto)
+library(tidyverse)
+library(knitr)
+# BiocManager::install("flowViz")
+library(flowViz)
+# BiocManager::install("openCyto")
+library(openCyto)
+# install.packages("kableExtra")
+# BiocManager::install("flowAI")
+library(flowAI)
+# BiocManager::install("CytoML")
+library(CytoML)
+
+#optional package to explore further
+# CytoExploreR 
+# devtools::install_github("DillonHammill/CytoExploreR")
+# devtools::install_github("DillonHammill/CytoExploreRData")
+library(flowWorkspace)
+library(CytoExploreR)
+library(CytoExploreRData)
+library(knitr)
+library(kableExtra)
+library(dplyr)
+# BiocManager::install("flowClean")
+# BiocManager::install("flowCut")
+library(flowClean)
+library(flowCut)
+# BiocManager::install("gosianow/cytofWorkflow", dependencies = TRUE)
+library(cytofWorkflow)
+```
+
+```{r global variables, include=FALSE}
+set.seed(100)
+DATADIR = '~/neuroblastoma/data/'
+WORKDIR = '~/neuroblastoma/'
+PREPRDATADIR = '~/neuroblastoma/preprocessing_data/'
+
+my_colors <- c("#9ACD32FF", "#4682B4FF",  "#DDA0DDFF", "#FFA07AFF", "#8FBC8BFF",
+               "#40E0D0FF",  "#F0E68CFF", "#5F9EA0FF", "#D2B48CFF",  
+               "#6495EDFF", "#FF69B4FF", "#BA55D3FF",  "#F08080FF", "#32CD32FF",  
+               "#FFDAB9FF",  "#87CEEBFF")
+```
+
+# Read Data
+
+```{r}
+fs1 <- read.flowSet(path = paste0(DATADIR, "cytof_data"), pattern = "LIC.fcs",alter.names = T)
+fs2 <- read.flowSet(path = paste0(DATADIR, "cytof_data"), pattern = "cells.fcs",alter.names = T)
+```
+
+```{r}
+markers <- read_table('cytof_markers.tsv') %>% as.data.frame()
+markers$Name <- sapply(markers$Metal, function(x) {
+  # Extract the number and element
+  num <- gsub("[A-Za-z]", "", x)  # Extract numbers
+  element <- gsub("[0-9]", "", x)  # Extract letters
+  
+  # Format it like fs1's column names (ElementNumDi)
+  paste0(tools::toTitleCase(tolower(element)), num, "Di")
+})
+# Create a named vector for mapping using the markers dataframe
+name_mapping <- setNames(markers$Marker, markers$Name)
+name_mapping <- name_mapping[!is.na(name_mapping)]
+
+# Replace column names in fs1 
+colnames(fs1) <- ifelse(colnames(fs1) %in% names(name_mapping),
+                       name_mapping[colnames(fs1)],
+                       colnames(fs1))
+
+
+```
+
+```{r}
+# Replace column names in fs2 
+colnames(fs2) <- ifelse(colnames(fs2) %in% names(name_mapping),
+                       name_mapping[colnames(fs2)],
+                       colnames(fs2))
+
+
+```
+
+```{r}
+# Extract information from file names and add to phenotypic data
+pData(fs1)$condition <- ifelse(grepl("NTB", pData(fs1)$name), "Non-tumor", "Tumor")
+pData(fs1)$age <- ifelse(grepl("_P_", pData(fs1)$name), "Pups", "Adult")
+pData(fs1)$tissue <- case_when(
+  grepl("_B_", pData(fs1)$name) ~ "Bone marrow",
+  grepl("_BM_", pData(fs1)$name) ~ "Bone marrow",
+  grepl("_T_", pData(fs1)$name) ~ "Tumor",
+  grepl("_S_", pData(fs1)$name) ~ "Spleen"
+)
+
+pData(fs1)
+```
+
+```{r}
+pData(fs2)$age <- case_when(
+  grepl("ABM|AS", pData(fs2)$name) ~ "Adult",
+  grepl("PBM|PS", pData(fs2)$name) ~ "Pups"
+)
+
+pData(fs2)$tissue <- case_when(
+  grepl("ABM|PBM", pData(fs2)$name) ~ "Bone marrow",
+  grepl("AS|PS", pData(fs2)$name) ~ "Spleen"
+)
+
+pData(fs2)
+```
+
+```{r}
+flow_auto_qc(fs1)
+```
+
