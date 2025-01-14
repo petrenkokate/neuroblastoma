@@ -1,0 +1,1066 @@
+---
+title: "bulk_health_adrenal_gland"
+author: "Kate Petrenko"
+date: "2024-12-26"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+	echo = FALSE,
+	message = FALSE,
+	warning = FALSE
+)
+library(DESeq2)
+library(ggplot2)
+library(pheatmap)
+library(EnhancedVolcano)
+library(org.Mm.eg.db)
+library(dplyr)
+library(tidyr)
+library(clusterProfiler)
+library(enrichplot)
+library(tibble)
+library(magrittr)
+library(cowplot)
+library(pathview)
+```
+
+```{r global variables, include=FALSE}
+set.seed(100)
+DATADIR = '~/neuroblastoma/data/'
+WORKDIR = '~/neuroblastoma/'
+PREPRDATADIR = '~/neuroblastoma/preprocessing_data/'
+PVAL = 0.01
+my_colors <- c("#9ACD32FF", "#4682B4FF",  "#DDA0DDFF", "#FFA07AFF", "#8FBC8BFF",
+               "#40E0D0FF",  "#F0E68CFF", "#5F9EA0FF", "#D2B48CFF",  
+               "#6495EDFF", "#FF69B4FF", "#BA55D3FF",  "#F08080FF", "#32CD32FF",  
+               "#FFDAB9FF",  "#87CEEBFF")
+```
+
+# Read data
+
+```{r}
+read_star_counts <- function(file_path) {
+    # Check if file exists
+    if (!file.exists(file_path)) {
+        stop(paste("File not found:", file_path))
+    }
+    
+    # Read the file
+    counts <- read.table(file_path, skip=4)
+    
+    # Check if file has expected structure
+    if (ncol(counts) != 4) {
+        stop("Unexpected number of columns in count file")
+    }
+    
+    # Return column 4 for reverse stranded protocol
+    return(counts$V4)
+}
+
+# Read all count files
+files <- list.files(path = paste0(DATADIR, "bulk_adrenal_gland/star_aligned"), 
+                    pattern = "*ReadsPerGene.out.tab$", 
+                    full.names = TRUE)
+
+# Get sample names
+sample_names <- gsub("_S\\d+_L001", "", basename(files))
+sample_names <- gsub("_M_F", "", sample_names)
+sample_names <- gsub("_ReadsPerGene.out.tab", "", sample_names)
+```
+
+```{r}
+# Create count matrix
+counts <- sapply(files, read_star_counts)
+colnames(counts) <- sample_names
+
+# Read gene names (from one of the files)
+genes <- read.table(files[1], skip=4)$V1
+
+# Add gene names to count matrix
+rownames(counts) <- genes
+```
+
+# Metadata 
+
+```{r}
+# Modify this according to your experimental design
+condition <- factor(c(rep("Adult", 4), rep("Young", 4)))
+metadata <- data.frame(row.names = sample_names,
+                      condition = condition)
+```
+
+```{r eval=FALSE, include=FALSE}
+summary(counts)
+
+hist(counts, freq = T, breaks = 200000,xlim = c(0,100), xlab = "Gene counts")
+```
+
+# DESeq2
+
+```{r include=FALSE}
+dds <- DESeqDataSetFromMatrix(countData = counts,
+                             colData = metadata,
+                             design = ~ condition)
+
+# Pre-filtering: remove genes with low counts
+dds = dds[ rowSums(edgeR::cpm(counts(dds)) > 1)>=2, ]
+nrow(dds)
+```
+
+```{r include=FALSE}
+dds <- DESeq(dds)
+
+# Get results
+res <- results(dds, contrast = c("condition", "Young", "Adult"))
+res <- res[order(res$padj),]
+```
+
+```{r include=FALSE}
+# for visualization
+resLFC <- lfcShrink(dds, coef="condition_Young_vs_Adult", type="apeglm")
+```
+
+# Plots
+
+blue if p val is less then 0.01
+
+```{r fig.height=6, fig.width=6}
+plotMA(resLFC, ylim = c(-5, 5))
+```
+
+## PCA
+
+```{r}
+vsd <- vst(dds, blind = FALSE)
+
+getPCs = function(dds){
+  
+  df = assay(dds)
+  pca = prcomp(t(df), retx = TRUE)
+  
+  percentVar = (pca$sdev)^2 / sum(pca$sdev^2)
+  percentVar = round(100 * percentVar)
+  pcs = as.data.frame(pca$x)
+  pcs = cbind(pcs,colData(dds))
+  pcs = as.data.frame(pcs)
+  pcs = list(pcs, percentVar)
+  
+  names(pcs) = c("pcs","percentVar")
+  return(pcs)
+}
+pcadata_vst = getPCs(vsd)
+pcadata_vst$pcs$sample <- rownames(pcadata_vst$pcs)
+
+
+ggplot(pcadata_vst$pcs, aes(PC1, PC2, color=condition, label=sample)) +   
+  geom_point(size=3) +
+  geom_text(vjust=1.5, size=3) +
+   xlab(paste0("PC1: ",pcadata_vst$percentVar[1],"% variance")) +
+   ylab(paste0("PC2: ",pcadata_vst$percentVar[2],"% variance")) + theme_bw()
+```
+
+```{r include=FALSE}
+getLoadings = function(dds){
+  
+  df = assay(dds)
+  pca = prcomp(t(df), retx = TRUE)
+  
+  return(pca$rotation)
+}
+
+loadings_vsd = getLoadings(vsd) %>% as.data.frame()
+# Annotating gene names
+rownames(loadings_vsd) <- sub("\\.[0-9]+$", "", rownames(loadings_vsd))
+
+loadings_vsd$symbol = mapIds(org.Mm.eg.db,
+               keys=row.names(loadings_vsd),
+               column="SYMBOL",
+               keytype="ENSEMBL",
+               multiVals="first")
+```
+
+```{r include=FALSE}
+# show the top 10 genes from PC1
+loadings_vsd %>% 
+  # select only the PCs we are interested in
+  dplyr::select(symbol, PC1) %>%
+  # convert to "long" format
+  pivot_longer(cols = "PC1", names_to = "PC1", values_to = "loadings") %>% 
+  # for PC1
+  group_by(PC1) %>% 
+  # arrange by descending order
+  arrange(desc(abs(loadings))) %>% 
+  # take the 10 top rows
+  slice(1:10) %>%
+  pull(symbol)
+```
+
+```{r eval=FALSE, include=FALSE}
+plotDispEsts(dds)
+```
+
+## DEG
+
+```{r fig.height=8, fig.width=5}
+# First ensure all plots use gene symbols instead of ENSEMBL IDs
+rownames_fixed <- sub("\\.[0-9]+$", "", rownames(resLFC))
+
+# Now map to symbols
+resLFC$symbol <- mapIds(org.Mm.eg.db,
+                   keys=rownames_fixed,
+                   column="SYMBOL",
+                   keytype="ENSEMBL",
+                   multiVals="first")
+
+# Keep ENSEMBL IDs where no symbol was found
+resLFC$symbol[is.na(resLFC$symbol)] <- rownames_fixed[is.na(resLFC$symbol)]
+
+# Volcano plot with symbols
+EnhancedVolcano(resLFC,
+    lab = resLFC$symbol,
+    x = 'log2FoldChange',
+    y = 'padj',
+    title = 'Young vs Adult',
+    pCutoff = 0.05,
+    FCcutoff = 1,
+    col = c("grey30","#8FBC8BFF", "#6495EDFF", "#BA55D3FF"),
+    labSize = 3)
+```
+
+```{r fig.height=10, fig.width=8}
+# Heatmap with symbols
+vsd_mat <- assay(vsd)
+
+rownames_ensembl <- sub("\\.[0-9]+$", "", rownames(dds))
+gene_symbols <- mapIds(org.Mm.eg.db,
+                      keys=rownames_ensembl,
+                      column="SYMBOL",
+                      keytype="ENSEMBL",
+                      multiVals="first")
+
+# Replace NAs with original ENSEMBL IDs
+gene_symbols[is.na(gene_symbols)] <- rownames_ensembl[is.na(gene_symbols)]
+
+rownames(vsd_mat) <- gene_symbols
+top_genes <- head(order(res$padj), 50)
+mat <- vsd_mat[top_genes,]
+
+pheatmap(mat,
+         scale = "row",
+         annotation_col = metadata,
+         fontsize_row = 8)
+```
+
+# Distance plot
+
+```{r}
+plotDists = function (vsd.obj) {
+  sampleDists <- dist(t(assay(vsd.obj)))
+  sampleDistMatrix <- as.matrix( sampleDists )
+  colors <- colorRampPalette( rev(RColorBrewer::brewer.pal(9, "Blues")) )(255)
+  pheatmap::pheatmap(sampleDistMatrix,
+           clustering_distance_rows = sampleDists,
+           clustering_distance_cols = sampleDists,
+           col = colors)
+}
+plotDists(vsd)
+```
+
+I decided to drop sample Young_1 because it differs from everything. It looks weird. Let's do all analysis again.
+
+# Filtering
+
+# DESeq2
+
+```{r include=FALSE}
+dds <- DESeqDataSetFromMatrix(countData = counts[, colnames(counts) != "Young_1"],
+                             colData = metadata %>% dplyr::filter(rownames(.) != 'Young_1'),
+                             design = ~ condition)
+
+# Pre-filtering: remove genes with low counts
+dds = dds[ rowSums(edgeR::cpm(counts(dds)) > 1)>=2, ]
+nrow(dds)
+```
+
+```{r include=FALSE}
+dds <- DESeq(dds)
+
+# Get results
+res <- results(dds, contrast = c("condition", "Young", "Adult"))
+res <- res[order(res$padj),]
+```
+
+```{r include=FALSE}
+# for visualization
+resLFC <- lfcShrink(dds, coef="condition_Young_vs_Adult", type="apeglm")
+```
+
+# Plots
+
+blue if p val is less then 0.01
+
+```{r fig.height=6, fig.width=6}
+plotMA(resLFC, ylim = c(-5, 5))
+```
+
+## PCA
+
+```{r}
+vsd <- vst(dds, blind = FALSE)
+
+getPCs = function(dds){
+  
+  df = assay(dds)
+  pca = prcomp(t(df), retx = TRUE)
+  
+  percentVar = (pca$sdev)^2 / sum(pca$sdev^2)
+  percentVar = round(100 * percentVar)
+  pcs = as.data.frame(pca$x)
+  pcs = cbind(pcs,colData(dds))
+  pcs = as.data.frame(pcs)
+  pcs = list(pcs, percentVar)
+  
+  names(pcs) = c("pcs","percentVar")
+  return(pcs)
+}
+pcadata_vst = getPCs(vsd)
+pcadata_vst$pcs$sample <- rownames(pcadata_vst$pcs)
+
+
+ggplot(pcadata_vst$pcs, aes(PC1, PC2, color=condition, label=sample)) +   
+  geom_point(size=3) +
+  geom_text(vjust=1.5, size=3) +
+   xlab(paste0("PC1: ",pcadata_vst$percentVar[1],"% variance")) +
+   ylab(paste0("PC2: ",pcadata_vst$percentVar[2],"% variance")) + theme_bw()
+```
+
+```{r include=FALSE}
+getLoadings = function(dds){
+  
+  df = assay(dds)
+  pca = prcomp(t(df), retx = TRUE)
+  
+  return(pca$rotation)
+}
+
+loadings_vsd = getLoadings(vsd) %>% as.data.frame()
+# Annotating gene names
+rownames(loadings_vsd) <- sub("\\.[0-9]+$", "", rownames(loadings_vsd))
+
+loadings_vsd$symbol = mapIds(org.Mm.eg.db,
+               keys=row.names(loadings_vsd),
+               column="SYMBOL",
+               keytype="ENSEMBL",
+               multiVals="first")
+```
+
+Here, I plot top 20 genes that are include in PC1
+
+```{r echo=FALSE}
+# show the top 10 genes from PC1
+loadings_vsd %>% 
+  # select only the PCs we are interested in
+  dplyr::select(symbol, PC1) %>%
+  # convert to "long" format
+  pivot_longer(cols = "PC1", names_to = "PC1", values_to = "loadings") %>% 
+  # for PC1
+  group_by(PC1) %>% 
+  # arrange by descending order
+  arrange(desc(abs(loadings))) %>% 
+  # take the 10 top rows
+  slice(1:20) %>%
+  pull(symbol)
+```
+
+```{r eval=FALSE, include=FALSE}
+plotDispEsts(dds)
+```
+
+## DEG
+
+```{r fig.height=8, fig.width=5}
+# First ensure all plots use gene symbols instead of ENSEMBL IDs
+rownames_fixed <- sub("\\.[0-9]+$", "", rownames(resLFC))
+
+# Now map to symbols
+resLFC$symbol <- mapIds(org.Mm.eg.db,
+                   keys=rownames_fixed,
+                   column="SYMBOL",
+                   keytype="ENSEMBL",
+                   multiVals="first")
+
+# Keep ENSEMBL IDs where no symbol was found
+resLFC$symbol[is.na(resLFC$symbol)] <- rownames_fixed[is.na(resLFC$symbol)]
+
+# Volcano plot with symbols
+EnhancedVolcano(resLFC,
+    lab = resLFC$symbol,
+    x = 'log2FoldChange',
+    y = 'padj',
+    title = 'Young vs Adult',
+    pCutoff = PVAL,
+    FCcutoff = 1,
+    col = c("grey30","#8FBC8BFF", "#6495EDFF", "#BA55D3FF"),
+    labSize = 3)
+```
+
+```{r fig.height=10, fig.width=8}
+# Heatmap with symbols
+vsd_mat <- assay(vsd)
+
+rownames_ensembl <- sub("\\.[0-9]+$", "", rownames(vsd_mat))
+gene_symbols <- mapIds(org.Mm.eg.db,
+                      keys=rownames_ensembl,
+                      column="SYMBOL",
+                      keytype="ENSEMBL",
+                      multiVals="first")
+
+# Replace NAs with original ENSEMBL IDs
+gene_symbols[is.na(gene_symbols)] <- rownames_ensembl[is.na(gene_symbols)]
+
+rownames(vsd_mat) <- gene_symbols %>% unname()
+top_genes <- resLFC %>% 
+  as.data.frame() %>% 
+  top_n(n = 50, wt = -padj)
+
+mat <- vsd_mat[top_genes$symbol,]
+
+pheatmap(mat,
+         scale = "row",
+         annotation_col = metadata,
+         fontsize_row = 8)
+```
+
+# Distance plot
+
+```{r}
+plotDists = function (vsd.obj) {
+  sampleDists <- dist(t(assay(vsd.obj)))
+  sampleDistMatrix <- as.matrix( sampleDists )
+  colors <- colorRampPalette( rev(RColorBrewer::brewer.pal(9, "Blues")) )(255)
+  pheatmap::pheatmap(sampleDistMatrix,
+           clustering_distance_rows = sampleDists,
+           clustering_distance_cols = sampleDists,
+           col = colors)
+}
+plotDists(vsd)
+```
+
+# Enrichment analysis
+
+## GO
+
+```{r fig.height=8, fig.width=7}
+# Get significant genes
+sig_genes <- resLFC %>% 
+  as.data.frame() %>% 
+  dplyr::filter(padj < PVAL & abs(log2FoldChange) > 1)
+
+# Run GO enrichment
+ego <- enrichGO(gene = rownames(sig_genes) %>% stringr::str_extract('(.*)\\.[0-9]+', group = 1),
+                OrgDb = org.Mm.eg.db,
+                keyType = "ENSEMBL",
+                ont = "BP")
+
+# Plot top GO terms
+dotplot(ego, showCategory=20)
+```
+
+## KEGG
+
+```{r fig.height=10, fig.width=7}
+entrez_ids <- mapIds(org.Mm.eg.db,
+                    keys=rownames(sig_genes) %>% stringr::str_extract('(.*)\\.[0-9]+', group = 1),
+                    column="ENTREZID",
+                    keytype="ENSEMBL",
+                    multiVals="first")
+
+# Run KEGG analysis
+ekegg <- enrichKEGG(gene = entrez_ids,
+                    organism = 'mmu',
+                    pvalueCutoff = PVAL)
+
+dotplot(ekegg, showCategory=20)
+```
+
+## GSEA
+
+```{r fig.height=8, fig.width=7}
+# ranks <- sort(res$pvalue, decreasing = TRUE)
+ranks <- resLFC %>% 
+  as.data.frame %>%
+  dplyr::mutate(ENSEMBL = row.names(.) %>% stringr::str_extract('(.*)\\.[0-9]+', group = 1),
+                rank = -log10(padj)) %>%
+  dplyr::arrange(desc(rank)) %>%
+  dplyr::select(ENSEMBL, rank) %>%
+  drop_na() %>% 
+  dplyr::filter(rank != Inf) %>% 
+  tibble::deframe() 
+
+# names(ranks) <- rownames_fixed
+
+# Run GSEA
+gsea_results <- gseGO(geneList = ranks,
+                     OrgDb = org.Mm.eg.db,
+                     keyType = "ENSEMBL",
+                     ont = "BP", 
+                     scoreType = 'pos')
+gseaplot2(gsea_results, geneSetID = 1:8)
+```
+
+
+### Cell cycle
+
+Cells in young samples are more proliferative.
+
+```{r fig.height=11, fig.width=8}
+plot_go_term_heatmap <- function(go_id, ego_obj) {
+    # Input validation
+    if (!go_id %in% ego_obj@result$ID) {
+        stop("GO ID not found in enrichment results")
+    }
+    
+    # Get term description
+    term_desc <- ego_obj@result$Description[ego_obj@result$ID == go_id]
+    
+    # Get genes for the term
+    genes <- ego_obj@result$geneID[ego_obj@result$ID == go_id]
+    genes_vector <- unlist(strsplit(genes, "/")) %>% 
+        mapIds(org.Mm.eg.db,
+               keys = .,
+               column = "SYMBOL",
+               keytype = "ENSEMBL",
+               multiVals = "first")
+    
+    # Create expression matrix
+    mat <- vsd_mat[genes_vector,]
+    
+    # Create significance annotation
+    sig_status <- resLFC %>%
+        as.data.frame() %>%
+        mutate(ensembl_id = rownames(.)) %>%  # Keep original ENSEMBL IDs
+        filter(symbol %in% genes_vector) %>%
+        mutate(significance = case_when(
+            padj < 0.001 ~ "***",
+            padj < 0.01 ~ "**",
+            padj < 0.05 ~ "*",
+            TRUE ~ "ns"
+        )) %>%
+        dplyr::select(symbol, significance) %>%
+        set_rownames(NULL) %>% 
+        distinct(symbol, .keep_all = TRUE) %>%  # Keep only unique symbols
+        column_to_rownames("symbol")
+    
+    # Create annotation data frame
+    annotation_row <- data.frame(
+        significance = sig_status$significance,
+        row.names = rownames(sig_status)
+    )
+    
+    # Define annotation colors
+    ann_colors <- list(
+        condition = c('Adult' = "#6495EDFF", 
+                      'Young' = "#FF69B4FF"),
+        significance = c(
+            "***" = "#1a9850",  # Strong significance
+            "**" = "#91cf60",   # Moderate significance
+            "*" = "#d9ef8b",    # Weak significance
+            "ns" = "grey80"     # Not significant
+        )
+    )
+    
+    # Create and return the heatmap
+    pheatmap(mat,
+             scale = "row",
+             annotation_col = metadata,
+             annotation_row = annotation_row,
+             annotation_colors = ann_colors,
+             fontsize_row = 8,
+             main = paste0("Genes from ", go_id, " - ", term_desc),
+             show_rownames = TRUE)
+}
+
+plot_go_term_heatmap('GO:0007059', ego)
+```
+
+### ECM
+
+```{r fig.height=11, fig.width=8}
+plot_go_term_heatmap('GO:0030198', ego)
+```
+
+### T cell activation
+
+```{r fig.height=11, fig.width=8}
+plot_go_term_heatmap('GO:0050870', ego)
+```
+
+## HALLMARKS
+
+```{r}
+# Get up and down regulated genes separately
+up_genes <- resLFC %>% 
+  as.data.frame() %>% 
+  dplyr::filter(padj < PVAL & log2FoldChange > 1)
+
+down_genes <- resLFC %>% 
+  as.data.frame() %>% 
+  dplyr::filter(padj < PVAL & log2FoldChange < -1)
+
+# Convert gene IDs for different analyses
+up_entrez <- mapIds(org.Mm.eg.db,
+                   keys=rownames(up_genes) %>% stringr::str_extract('(.*)\\.[0-9]+', group = 1),
+                   column="ENTREZID",
+                   keytype="ENSEMBL",
+                   multiVals="first")
+
+down_entrez <- mapIds(org.Mm.eg.db,
+                     keys=rownames(down_genes) %>% stringr::str_extract('(.*)\\.[0-9]+', group = 1),
+                     column="ENTREZID",
+                     keytype="ENSEMBL",
+                     multiVals="first")
+```
+
+```{r fig.height=4, fig.width=14}
+## HALLMARK Analysis
+# Load MSigDB hallmark gene sets
+library(msigdbr)
+hallmark_sets <- msigdbr(species = "Mus musculus", category = "H")
+
+# Perform enrichment for up-regulated genes
+hallmark_up <- enricher(gene = up_entrez,
+                       TERM2GENE = dplyr::select(hallmark_sets, gs_name, entrez_gene),
+                       pvalueCutoff = PVAL)
+
+# Perform enrichment for down-regulated genes
+hallmark_down <- enricher(gene = down_entrez,
+                         TERM2GENE = dplyr::select(hallmark_sets, gs_name, entrez_gene),
+                         pvalueCutoff = PVAL)
+
+# Plot results
+plot_grid(dotplot(hallmark_up, title="Up-regulated Hallmark Pathways \n(Young specific)", showCategory=15),
+dotplot(hallmark_down, title="Down-regulated Hallmark Pathways\n(Adult specific)", showCategory=15))
+```
+
+
+```{r fig.height=4, fig.width=7}
+hallmark_sets <- msigdbr(species = "Mus musculus", subcategory = "CP")
+
+# Perform enrichment for up-regulated genes
+hallmark_up2 <- enricher(gene = up_entrez,
+                       TERM2GENE = dplyr::select(hallmark_sets, gs_name, entrez_gene),
+                       pvalueCutoff = PVAL)
+
+# Perform enrichment for down-regulated genes
+hallmark_down2 <- enricher(gene = down_entrez,
+                         TERM2GENE = dplyr::select(hallmark_sets, gs_name, entrez_gene),
+                         pvalueCutoff = PVAL)
+
+# Plot results
+plot_grid(dotplot(hallmark_up2, title="Up-regulated Hallmark Pathways \n(Young specific)", showCategory=15))
+```
+
+## WikiPathways
+
+```{r fig.height=4, fig.width=14}
+# WikiPathways Analysis
+# Up-regulated genes
+wp_up <- enrichWP(gene = up_entrez,
+                  organism = "Mus musculus",
+                  pvalueCutoff = PVAL)
+
+# Down-regulated genes
+wp_down <- enrichWP(gene = down_entrez,
+                    organism = "Mus musculus",
+                    pvalueCutoff = PVAL)
+
+# Plot results
+plot_grid(dotplot(wp_up, title="Up-regulated WikiPathways\n(Young specific)", showCategory=15),
+dotplot(wp_down, title="Down-regulated WikiPathways\n(Adult specific)", showCategory=15))
+```
+
+## Reactome
+
+```{r fig.height=8.5, fig.width=14}
+library(ReactomePA)
+## Reactome Analysis
+# Up-regulated genes
+reactome_up <- enrichPathway(gene = up_entrez,
+                            organism = "mouse",
+                            pvalueCutoff = PVAL)
+
+# Down-regulated genes
+reactome_down <- enrichPathway(gene = down_entrez,
+                              organism = "mouse",
+                              pvalueCutoff = PVAL)
+
+# Plot results
+plot_grid(dotplot(reactome_up, title="Up-regulated Reactome Pathways\n(Young specific)", showCategory=15),
+dotplot(reactome_down, title="Down-regulated Reactome Pathways\n(Adult specific)", showCategory=15))
+```
+
+### Innate immune response
+
+```{r fig.height=10, fig.width=8}
+plot_go_term_heatmap('GO:0045088', ego)
+```
+
+# Neutrophils
+
+```{r fig.height=8, fig.width=16}
+neutrophil_terms <- ego %>%
+  as.data.frame() %>%
+  filter(grepl("neutrophil|immune|inflammatory|leukocyte", Description, ignore.case = TRUE))
+
+go_data <- neutrophil_terms %>%
+  # Convert p.adjust to -log10
+  dplyr::filter(p.adjust < PVAL) %>% 
+  mutate(log10_padj = -log10(p.adjust),
+         # Shorten the descriptions for better visualization
+         Description = gsub("regulation of ", "reg. ", Description),
+         Description = gsub("positive regulation of ", "pos. reg. ", Description),
+         Description = gsub("negative regulation of ", "neg. reg. ", Description),
+         Description = gsub(" response", " resp.", Description),
+         Description = gsub(" superfamily domains", "", Description),
+         # Take only top 25 most significant terms
+         ) %>%
+  arrange(p.adjust) %>%
+  head(25)
+
+# Create the plot
+ggplot(go_data, 
+       aes(x = log10_padj, 
+           y = reorder(Description, log10_padj), 
+           size = Count, 
+           color = log10_padj)) +
+  geom_point() +
+  scale_color_gradient(low = "blue", high = "red") +
+  scale_size_continuous(range = c(3, 10)) +
+  labs(x = "-log10(adjusted p-value)",
+       y = "GO Term",
+       color = "-log10(p.adj)",
+       size = "Gene Count",
+       title = "Top 25 Enriched GO Terms",
+       subtitle = "Related to Neutrophil and Immune Response") +
+  theme_minimal() +
+  theme(
+    axis.text.y = element_text(size = 10),
+    plot.title = element_text(size = 14, face = "bold"),
+    plot.subtitle = element_text(size = 12),
+    legend.position = "right",
+    plot.margin = margin(1, 1, 1, 1, "cm")
+  )
+```
+
+```{r fig.height=4, fig.width=10}
+neutrophil_terms2 <- ego %>%
+  as.data.frame() %>%
+  filter(grepl("neutrophil", Description, ignore.case = TRUE))
+
+go_data <- neutrophil_terms2 %>%
+  dplyr::filter(p.adjust < PVAL) %>% 
+  # Convert p.adjust to -log10
+  mutate(log10_padj = -log10(p.adjust),
+         # Shorten the descriptions for better visualization
+         Description = gsub("regulation of ", "reg. ", Description),
+         Description = gsub("positive regulation of ", "pos. reg. ", Description),
+         Description = gsub("negative regulation of ", "neg. reg. ", Description),
+         Description = gsub(" response", " resp.", Description),
+         Description = gsub(" superfamily domains", "", Description),
+         # Take only top 25 most significant terms
+         ) %>%
+  arrange(p.adjust) %>%
+  head(25)
+
+# Create the plot
+ggplot(go_data, 
+       aes(x = log10_padj, 
+           y = reorder(Description, log10_padj), 
+           size = Count, 
+           color = log10_padj)) +
+  geom_point() +
+  scale_color_gradient(low = "blue", high = "red") +
+  scale_size_continuous(range = c(3, 10)) +
+  labs(x = "-log10(adjusted p-value)",
+       y = "GO Term",
+       color = "-log10(p.adj)",
+       size = "Gene Count",
+       title = "Enriched GO Terms",
+       subtitle = "Related to NEUTROPHIL Response") +
+  theme_minimal() +
+  theme(
+    axis.text.y = element_text(size = 10),
+    plot.title = element_text(size = 14, face = "bold"),
+    plot.subtitle = element_text(size = 12),
+    legend.position = "right",
+    plot.margin = margin(1, 1, 1, 1, "cm")
+  )
+```
+
+### Humoral immune response
+
+```{r fig.height=11, fig.width=8}
+plot_go_term_heatmap('GO:0006959', ego)
+```
+
+### Neutrophil chemotaxis
+
+```{r fig.height=5, fig.width=8}
+plot_go_term_heatmap('GO:0030593', ego)
+```
+
+### Neutrophil mediated immunity
+
+```{r fig.height=4, fig.width=8}
+plot_go_term_heatmap('GO:0002446', ego)
+```
+
+
+```{r eval=FALSE, include=FALSE}
+neutro_data %>% dplyr::filter(padj < 0.05 & abs(log2FoldChange) > 1)
+
+res_save <- res %>% 
+  as.data.frame() %>% 
+  dplyr::filter(padj < PVAL & abs(log2FoldChange) > 1) %>% 
+  mutate(symbol = mapIds(org.Mm.eg.db,
+               keys=row.names(.) %>% stringr::str_extract('(.*)\\.[0-9]+', group = 1),
+               column="SYMBOL",
+               keytype="ENSEMBL",
+               multiVals="first")) %>% 
+  mutate(symbol = ifelse(is.na(symbol), row.names(.), symbol))
+
+library(openxlsx)
+
+# for writing a data.frame or list of data.frames to an xlsx file
+write.xlsx(res_save, paste0(PREPRDATADIR, 'bulk_mouse_adrenal_gland_pval01.xlsx'))
+
+```
+
+# Gene
+
+```{r include=FALSE}
+plot_gene_expression_points <- function(gene, vsd_mat, metadata, resLFC, y_lab = "Normalized Expression") {
+  if (!gene %in% rownames(vsd_mat)) {
+    stop(paste("Gene", gene, "not found in the expression matrix"))
+  }
+  
+  # Extract and prepare data
+  expr_data <- data.frame(
+    sample = colnames(vsd_mat),
+    expression = vsd_mat[gene,]
+  ) %>%
+    left_join(metadata %>% rownames_to_column("sample"), by = "sample")
+  
+  # Calculate means and standard errors for each condition
+  summary_stats <- expr_data %>%
+    group_by(condition) %>%
+    summarise(
+      mean_expr = mean(expression),
+      se = sd(expression) / sqrt(n()),
+      .groups = 'drop'
+    )
+  
+  # Get DESeq2 results for this gene
+  gene_stats <- as.data.frame(resLFC)[as.data.frame(resLFC)$symbol == gene, ]
+  padj <- gene_stats$padj
+  pval <- gene_stats$pvalue
+  # Get significance stars based on adjusted p-value
+  sig_stars <- if(padj < 0.001) {
+    "***"
+  } else if(padj < 0.01) {
+    "**"
+  } else if(padj < 0.05) {
+    "*"
+  } else {
+    "ns"
+  }
+  
+  # Get y position for significance bar
+  y_max <- max(expr_data$expression)
+  y_pos <- y_max + 0.1 * (max(expr_data$expression) - min(expr_data$expression))
+  
+  # Create the plot
+  ggplot(expr_data, aes(x = condition, y = expression, color = condition)) +
+    # Individual points
+    geom_jitter(width = 0.2, size = 3, alpha = 0.6) +
+    # Mean and error bars
+    geom_errorbar(
+      data = summary_stats,
+      aes(y = mean_expr, ymin = mean_expr - se, ymax = mean_expr + se),
+      width = 0.2,
+      size = 1
+    ) +
+    # Mean points
+    geom_point(
+      data = summary_stats,
+      aes(y = mean_expr),
+      size = 4,
+      shape = 18
+    ) +
+    # Add significance bar and annotation
+    geom_segment(aes(x = 1, xend = 2, y = y_pos, yend = y_pos), 
+                color = "black", size = 0.5) +
+    annotate("text", x = 1.5, y = y_pos + 0.05 * (max(expr_data$expression) - min(expr_data$expression)), 
+             label = sig_stars, size = 5) +
+    # Add adjusted p-value
+    annotate("text", x = 1.5, y = y_pos - 0.1 * (max(expr_data$expression) - min(expr_data$expression)), 
+             label = sprintf("padj = %.3g", padj), size = 3) +
+    theme_minimal() +
+    theme(
+      axis.text.x = element_text(angle = 45, hjust = 1),
+      plot.title = element_text(hjust = 0.5, face = "bold"),
+      legend.position = "right"
+    ) +
+    labs(
+      title = paste("Expression of", gene),
+      subtitle = paste("Log2FC =", round(gene_stats$log2FoldChange, 2), 
+                      ", pval =", format(pval, digits = 3)),
+      x = "Condition",
+      y = y_lab,
+      color = "Condition"
+    ) +
+    scale_color_manual(
+      values = c('Adult' = "#6495EDFF", 'Young' = "#FF69B4FF")
+    )
+}
+```
+
+```{r}
+resLFC %>% 
+  as.data.frame() %>% 
+  filter(symbol %in% c('S100a8', 'S100a9'))
+```
+
+# CCL pathway
+
+```{r eval=FALSE, include=FALSE}
+
+
+# Convert your DESeq2 results to a named vector of fold changes
+# First get ENTREZ IDs for your genes
+gene_list <- resLFC$log2FoldChange
+names(gene_list) <- mapIds(org.Mm.eg.db, 
+                          keys = rownames(resLFC) %>% stringr::str_extract('(.*)\\.[0-9]+', group = 1),
+                          keytype = "ENSEMBL",
+                          column = "ENTREZID")
+
+# Remove any NA values
+gene_list <- gene_list[!is.na(names(gene_list))]
+setwd('~/neuroblastoma/')
+# Plot the pathway
+pathview(gene.data = gene_list,
+         pathway.id = "04927",
+         species = "mmu",
+         # limit = list(gene = c(min(gene_list), max(gene_list))),
+         limit = list(gene = c(-2, 2)),
+         low = list(gene = "blue"),
+         mid = list(gene = "white"),
+         high = list(gene = "red"),
+         node.sum = "mean")
+```
+
+# S100a8/9
+
+```{r echo=FALSE}
+plot_grid(plot_gene_expression_points("S100a8", vsd_mat, metadata, resLFC), plot_gene_expression_points("S100a9", vsd_mat, metadata, resLFC))
+```
+
+## Il17 pathway
+
+![Il17](mmu04657.pathview.png)
+
+```{r eval=FALSE, include=FALSE}
+gene_list <- resLFC$log2FoldChange
+names(gene_list) <- mapIds(org.Mm.eg.db, 
+                          keys = rownames(resLFC) %>% stringr::str_extract('(.*)\\.[0-9]+', group = 1),
+                          keytype = "ENSEMBL",
+                          column = "ENTREZID")
+
+# Remove any NA values
+gene_list <- gene_list[!is.na(names(gene_list))]
+# Plot the pathway
+pathview(gene.data = gene_list,
+         pathway.id = "04657",
+         species = "mmu",
+         # limit = list(gene = c(min(gene_list), max(gene_list))),
+         limit = list(gene = c(-1, 1)),
+         low = list(gene = "blue"),
+         mid = list(gene = "white"),
+         high = list(gene = "red"),
+         node.sum = "mean")
+```
+
+## Check targets
+
+![Figure](S100a8_9_pathway.jpg)
+
+Toll-like receptor 4 (TLR4) and receptor for advanced glycation end-products (RAGE) are the major receptors that activate downstream signaling after interaction with S100A8/A9 [62,63]. Among downstream pathways, MAPK, NF-κB, and PI3K-Akt are activated via MyD88, which widely participates in physiological activities such as cell proliferation and the cell cycle 
+
+### TLR pathway
+
+![TLR](mmu04620.pathview.png)
+
+```{r eval=FALSE, include=FALSE}
+ 
+
+pathview(gene.data = gene_list,
+         pathway.id = "04620",
+         species = "mmu",
+         # limit = list(gene = c(min(gene_list), max(gene_list))),
+         limit = list(gene = c(-2, 2)),
+         low = list(gene = "blue"),
+         mid = list(gene = "white"),
+         high = list(gene = "red"),
+         node.sum = "mean")
+
+```
+
+### RAGE in Neutrophils
+
+![RAGE](mmu04613.pathview.png)
+
+```{r eval=FALSE, include=FALSE}
+ 
+
+pathview(gene.data = gene_list,
+         pathway.id = "04613",
+         species = "mmu",
+         # limit = list(gene = c(min(gene_list), max(gene_list))),
+         limit = list(gene = c(-2, 2)),
+         low = list(gene = "blue"),
+         mid = list(gene = "white"),
+         high = list(gene = "red"),
+         node.sum = "mean")
+
+```
+
+Ager is a gene for RAGE receptor
+
+```{r}
+plot_gene_expression_points("Ager", vsd_mat, metadata, resLFC)
+```
+
+```{r}
+plot_gene_expression_points("Nptn", vsd_mat, metadata, resLFC)
+```
+
+## STRING DB
+
+![STRING_DB](mmu04613.pathview.png)
+
+```{r fig.height=8, fig.width=14}
+plot_grid(plot_gene_expression_points("S100a8", vsd_mat, metadata, resLFC),
+          plot_gene_expression_points("S100a9", vsd_mat, metadata, resLFC),
+          # plot_gene_expression_points("Gm5849", vsd_mat, metadata, resLFC),
+          plot_gene_expression_points("Ptpn11", vsd_mat, metadata, resLFC),
+          plot_gene_expression_points("Tjp1", vsd_mat, metadata, resLFC),
+          plot_gene_expression_points("Cdh1", vsd_mat, metadata, resLFC),
+          plot_gene_expression_points("Met", vsd_mat, metadata, resLFC),
+          plot_gene_expression_points("Cd44", vsd_mat, metadata, resLFC),
+          plot_gene_expression_points("Grb2", vsd_mat, metadata, resLFC),
+          plot_gene_expression_points("Tlr4", vsd_mat, metadata, resLFC),
+          plot_gene_expression_points("Trp53bp2", vsd_mat, metadata, resLFC), ncol = 5)
+```
+

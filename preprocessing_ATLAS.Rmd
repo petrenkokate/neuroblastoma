@@ -1,0 +1,2000 @@
+---
+title: "preprocessing_v2"
+author: "Kate Petrenko"
+date: "2024-09-27"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+library(data.table)
+library(Seurat)
+library(scDblFinder)
+library(DoubletFinder)
+library(dplyr)
+library(remotes)
+# remotes::install_github("carmonalab/STACAS")
+library(STACAS)
+library(SingleR)
+# install.packages("scGate")
+library(scGate)
+library(ggplot2)
+library(BiocParallel)
+library(harmony)
+library(RColorBrewer)
+library(stringr)
+library(cowplot)
+library(scuttle)
+# install.packages("devtools")
+# BiocManager::install("Homo.sapiens")
+# BiocManager::install("jpmam1/scalop") #forked copy of a really good guy 
+# devtools::install_github("jlaffy/infercna")
+library(infercna)
+library(infercnv)
+library(parallel)
+library(future)
+library(clustree)
+library(dittoSeq)
+# install.packages("ggh4x")
+library(ggh4x)
+#BiocManager::install('EnhancedVolcano')
+library(EnhancedVolcano)
+library(clusterProfiler)
+library("org.Hs.eg.db")
+library(ReactomePA)
+library(msigdbr)
+# install.packages('qs')
+library(qs)
+library(DESeq2)
+library(magrittr)
+library(tibble)
+library(tidyr)
+library(pheatmap)
+# BiocManager::install('apeglm')
+# install.packages('ashr')
+
+library(reticulate)
+# install.packages('anndata')
+library(anndata)
+# devtools::install_github("cellgeni/sceasy")
+# BiocManager::install(c("LoomExperiment"))
+library(sceasy)
+library(SeuratData)
+```
+
+```{r global variables, include=FALSE}
+set.seed(100)
+DATADIR = '~/neuroblastoma/data/'
+WORKDIR = '~/neuroblastoma/'
+PREPRDATADIR = '~/neuroblastoma/preprocessing_data/'
+
+my_colors <- c("#9ACD32FF", "#4682B4FF",  "#DDA0DDFF", "#FFA07AFF", "#8FBC8BFF",
+               "#40E0D0FF",  "#F0E68CFF", "#5F9EA0FF", "#D2B48CFF",  
+               "#6495EDFF", "#FF69B4FF", "#BA55D3FF",  "#F08080FF", "#32CD32FF",  
+               "#FFDAB9FF",  "#87CEEBFF")
+```
+
+```{r download references, message=FALSE, warning=FALSE, include=FALSE}
+bped <- celldex::BlueprintEncodeData()
+hum_atlas_data <- celldex::HumanPrimaryCellAtlasData()
+s.genes <- cc.genes$s.genes
+g2m.genes <- cc.genes$g2m.genes 
+data(EnsemblGeneTable.Hs)
+scGate_models_DB <- get_scGateDB()
+```
+
+# Download data
+
+```{r read data, eval=FALSE, include=FALSE}
+#Dong2020
+group1_dong <- ReadMtx(paste0(DATADIR, 'Dong2020/Group1/Exp_data_UMIcounts1.mtx'),
+                       paste0(DATADIR,'Dong2020/Group1/Cells1.csv'), 
+                       paste0(DATADIR,'Dong2020/Group1/Genes1.txt'), 
+                       feature.column=1, skip.cell=1, cell.sep =',')
+group1_meta <- fread(paste0(DATADIR, 'Dong2020/Group1/Cells1.csv'), sep = ',')
+
+group2_dong <- ReadMtx(paste0(DATADIR, 'Dong2020/Group2/Exp_data_UMIcounts2.mtx'),
+                       paste0(DATADIR,'Dong2020/Group2/Cells2.csv'), 
+                       paste0(DATADIR,'Dong2020/Group2/Genes2.txt'), 
+                       feature.column=1, skip.cell=1, cell.sep =',')
+group2_meta <- fread(paste0(DATADIR, 'Dong2020/Group2/Cells2.csv'), sep = ',')
+
+create_matrices_from_mtx<- function(meta_data, data_matrix, variable_name) {
+  sample_names <- unique(meta_data$sample)
+  invisible(lapply(sample_names, function(sample_name) {
+    sample_cells <- meta_data[sample == sample_name, cell_name]
+    sample_matrix <- data_matrix[, sample_cells, drop = FALSE]
+    assign(paste0(sample_name, variable_name), sample_matrix, envir = .GlobalEnv)
+  }))
+}
+
+create_matrices_from_mtx(group1_meta, group1_dong, '_dong')
+create_matrices_from_mtx(group2_meta, group2_dong, '_dong')
+rm(group1_meta, group2_meta, group1_dong, group2_dong)
+
+#Jansky2021
+matrix_jansky <- ReadMtx(paste0(DATADIR, 'Jansky2021/Exp_data_UMIcounts.mtx'),
+                       paste0(DATADIR,'Jansky2021/Cells.csv'), 
+                       paste0(DATADIR,'Jansky2021/Genes.txt'), 
+                       feature.column=1, skip.cell=1, cell.sep =',')
+jansky_meta <- fread(paste0(DATADIR, 'Jansky2021/Cells.csv'), sep = ',')
+
+create_matrices_from_mtx(jansky_meta, matrix_jansky, '_jansky')
+rm(jansky_meta, matrix_jansky)
+
+#Verhoeven2022
+load_matrices <- function(directory, pattern_files, sep, pattern_find, pattern_name) {
+  file_names <- list.files(path = directory, pattern = pattern_files, full.names = TRUE)
+  matrices <- lapply(file_names, function(file) {
+    mat <- as.matrix(fread(file, sep = sep), rownames = 1)
+    assign(gsub(pattern_find, pattern_name, basename(file)), mat, envir = .GlobalEnv)
+  })
+}
+
+load_matrices(paste0(DATADIR, 'Verhoeven_GSE147766/'), "\\.csv$", sep=',', ".*_(NB\\d+).count.csv$", "\\1_verhoeven")
+```
+
+```{r}
+# grossman only because other were downloaded and preprocessed before in script preprocessing.Rmd and wienke in preprocessing_v2.Rmd
+
+# Get all HTA directories
+dirs <- list.files(path = paste0(DATADIR, 'Grossman'), 
+                  pattern = "^HTA", 
+                  full.names = TRUE,
+                  include.dirs = TRUE)
+
+# Read the mapping table
+sample_map <- read.csv(paste0(DATADIR, "Grossman/Grossman_str2.csv"))
+
+# Function to create Seurat object for one directory
+grossmann_read <- function(dir_path) {
+    # Extract directory name as biospecimen_id
+    biospecimen_id <- basename(dir_path)
+    
+    # Read the data
+    counts <- Read10X(data.dir = dir_path,
+                     gene.column = 1)
+    #change name of genes to Symbol
+    rownames(counts) <- stringr::str_remove(rownames(counts), "\\.[0-9]+$")
+    rownames(counts) <- mapIds(org.Hs.eg.db,
+                     keys = rownames(counts),
+                     column = "SYMBOL",
+                     keytype = "ENSEMBL")
+    counts <- counts[!is.na(rownames(counts)), ]
+    rownames(counts) <- make.unique(rownames(counts))
+    # Add SampleID to metadata using biospecimen_id mapping
+    SampleID <- paste0(
+        sample_map$Patient_No[match(biospecimen_id, sample_map$HTAN_biospecimen_id)],
+        "_grossmann"
+    )
+    invisible(assign(SampleID, counts, envir = .GlobalEnv))
+}
+
+lapply(dirs, grossmann_read)
+```
+
+```{r}
+# wienke data
+load_wienke_matrices <- function(directory, pattern_find="scR_CEL-Seq2(_\\d+)?", pattern_name="wienke") {
+  # Read data and metadata
+  data <- readRDS(paste0(directory, 'neuroblastoma_nectin2_tigit/objects/geneTxpTable.RDS'))
+  meta <- read.table(paste0(directory, 'neuroblastoma_nectin2_tigit/objects/metadataTable.txt'),
+                    header=TRUE, sep=" ", quote="\"", stringsAsFactors=FALSE)
+  
+  # Create mapping
+  plate_mapping <- meta$file_id_GEO
+  names(plate_mapping) <- rownames(meta)
+  
+  # Clean sample IDs
+  sample_ids <- gsub(pattern_find, pattern_name, plate_mapping)
+  sample_ids <- gsub("scR-CEL-Seq2(_\\d+)?", pattern_name, sample_ids)
+  
+  # Clean gene names
+  rownames(data) <- make.unique(gsub(".*--", "", rownames(data)))
+  
+  # Split data by sample
+  unique_samples <- unique(sample_ids)
+  invisible(lapply(unique_samples, function(sample) {
+    cells <- names(sample_ids)[sample_ids == sample]
+    mat <- data[, cells, drop=FALSE]
+    assign(sample, mat, envir=.GlobalEnv)
+  }))
+  
+}
+
+load_wienke_matrices(paste0(DATADIR, 'Wienke_data/'))
+```
+
+```{r}
+# olsen dataset
+load_olsen_matrices <- function(directory) {
+  # Define file pattern and mapping
+  file_pattern <- "GSM.*_NB\\d+\\.count\\.csv\\.gz$"
+  sample_mapping <- c(
+    "NB01" = "NB_01_olsen",
+    "NB02" = "NB_02_olsen",
+    "NB12" = "NB_12_olsen", 
+    "NB16" = "NB_16_olsen",
+    "NB17" = "NB_17_olsen",
+    "NB19" = "NB_19_olsen",
+    "NB21" = "NB_21_olsen",
+    "NB26" = "NB_26_olsen"
+  )
+  
+  # Get file paths
+  files <- list.files(path=directory, pattern=file_pattern, full.names=TRUE)
+  
+  # Read and process each file
+  invisible(lapply(files, function(file) {
+    # Extract NB number from filename
+    nb_id <- stringr::str_extract(basename(file), "NB\\d+")
+    # Read gzipped CSV
+    mat <- as.matrix(fread(file, sep=","), rownames=1)
+    # Assign to global environment with mapped name
+    assign(sample_mapping[nb_id], mat, envir=.GlobalEnv)
+  }))
+}
+
+# Usage
+load_olsen_matrices(paste0(DATADIR, "olsen2024_GSE147766/"))
+```
+
+```{r}
+# bonine dataset
+load_bonine_matrices <- function(directory) {
+  sample_mapping <- c(
+    "Bonine2023_cell_KDP02" = "NB_001_bonine",
+    "Bonine2023_cell_KDP06" = "NB_002_bonine",
+    "Bonine2023_CITE_CS202" = "NB_003_bonine_sc",
+    "Bonine2023_nucleus_CS210" = "NB_003_bonine_sn",
+    "Bonine2023_nucleus_NBO001" = "NB_004_bonine_1",
+    "Bonine2023_nucleus_NBO004" = "NB_004_bonine_2",
+    "Bonine2023_nucleus_NBO006" = "NB_006_bonine"
+  )
+
+  lapply(names(sample_mapping), function(sample_id) {
+    barcode_file <- list.files(directory, pattern=paste0(sample_id, "_barcodes.tsv.gz$"), full.names=TRUE)
+    features_file <- list.files(directory, pattern=paste0(sample_id, "_features.tsv.gz$"), full.names=TRUE)
+    matrix_file <- list.files(directory, pattern=paste0(sample_id, "_matrix.mtx.gz$"), full.names=TRUE)
+    
+    if(length(barcode_file) > 0 && length(features_file) > 0 && length(matrix_file) > 0) {
+      # Create temporary directory
+      temp_dir <- tempdir()
+      sample_dir <- file.path(temp_dir, sample_id)
+      dir.create(sample_dir, showWarnings=FALSE)
+      
+      # Copy files with standard 10x names
+      file.copy(barcode_file, file.path(sample_dir, "barcodes.tsv.gz"))
+      file.copy(features_file, file.path(sample_dir, "features.tsv.gz"))
+      file.copy(matrix_file, file.path(sample_dir, "matrix.mtx.gz"))
+      
+      mat <- Read10X(data.dir=sample_dir, gene.column=2)
+      invisible(assign(sample_mapping[sample_id], mat, envir=.GlobalEnv))
+      
+      # Cleanup
+      unlink(sample_dir, recursive=TRUE)
+    }
+    return(NULL)
+  })
+}
+
+load_bonine_matrices(paste0(DATADIR, "Bonine_GSE253865/"))
+
+```
+
+```{r}
+# patel dataset
+load_patel_matrices <- function(directory) {
+  # Get all sample directories
+  sample_dirs <- list.dirs(directory, full.names=TRUE, recursive=FALSE)
+  sample_dirs <- sample_dirs[!grepl("\\.(sh|txt)$", sample_dirs)]  # Exclude script files
+  
+  # Create sample name mapping
+  create_sample_name <- function(dir_name) {
+    htapp_num <- stringr::str_extract(basename(dir_name), "HTAPP-\\d+")
+    htapp_num <- gsub("-", "_", htapp_num)
+    return(paste0(htapp_num, "_patel"))
+  }
+  
+  # Function to read data using temporary directory
+  read_10x_with_temp <- function(data_dir, pattern_prefix) {
+    # Find the files
+    barcodes_file <- list.files(data_dir, pattern=paste0(pattern_prefix, ".*barcodes\\.tsv\\.gz$"), full.names=TRUE)[1]
+    features_file <- list.files(data_dir, pattern=paste0(pattern_prefix, ".*features\\.tsv\\.gz$"), full.names=TRUE)[1]
+    matrix_file <- list.files(data_dir, pattern=paste0(pattern_prefix, ".*matrix\\.mtx\\.gz$"), full.names=TRUE)[1]
+    
+    if(all(file.exists(barcodes_file, features_file, matrix_file))) {
+      # Create temporary directory
+      temp_dir <- file.path(tempdir(), basename(data_dir))
+      dir.create(temp_dir, showWarnings=FALSE, recursive=TRUE)
+      
+      # Copy files with standard names
+      file.copy(barcodes_file, file.path(temp_dir, "barcodes.tsv.gz"))
+      file.copy(features_file, file.path(temp_dir, "features.tsv.gz"))
+      file.copy(matrix_file, file.path(temp_dir, "matrix.mtx.gz"))
+      
+      # Read data
+      mat <- Read10X(data.dir=temp_dir, gene.column=2)
+      
+      # Clean up
+      unlink(temp_dir, recursive=TRUE)
+      
+      return(mat)
+    }
+    return(NULL)
+  }
+  
+  
+  for(sample_dir in sample_dirs) {
+    base_name <- create_sample_name(sample_dir)
+    sample_basename <- basename(sample_dir)
+    
+    # Check if channel2 exists to determine if we need rep suffixes
+    has_channel2 <- dir.exists(file.path(sample_dir, "channel2"))
+    
+    # Process channel1 (always exists)
+    channel1_dir <- file.path(sample_dir, "channel1")
+    mat1 <- read_10x_with_temp(channel1_dir, paste0(sample_basename, "_channel1"))
+    
+    if(!is.null(mat1)) {
+      if(has_channel2) {
+        # If there's a channel2, add rep1 suffix
+        sample_name <- paste0(base_name, "_rep1")
+      } else {
+        # If only channel1 exists, use base name
+        sample_name <- base_name
+      }
+      invisible(assign(sample_name, mat1, envir=.GlobalEnv))
+    }
+    
+    # Process channel2 if it exists
+    if(has_channel2) {
+      channel2_dir <- file.path(sample_dir, "channel2")
+      mat2 <- read_10x_with_temp(channel2_dir, paste0(sample_basename, "_channel2"))
+      
+      if(!is.null(mat2)) {
+        sample_name <- paste0(base_name, "_rep2")
+        invisible(assign(sample_name, mat2, envir=.GlobalEnv))
+      }
+    }
+  }
+
+}
+
+
+load_patel_matrices(paste0(DATADIR, "patel2024/"))
+```
+
+```{r create seurat list, eval=FALSE, include=FALSE}
+#create list of all samples
+all_samples <- ls()[!ls() %in% c("load_matrices", "create_matrices_from_mtx", "load_h5",
+                                 "load_wienke_matrices", "dirs", "grossmann_read", 
+                                 "my_colors", "sample_map", "load_olsen_matrices",
+                                 "load_bonine_matrices", "NB_003_bonine_sc", "load_patel_matrices",
+                               "DATADIR", "WORKDIR", "PREPRDATADIR", 'bped', 'g2m.genes',
+                               'EnsemblGeneTable.Hs', "s.genes", "sample_metadata",
+                               "scGate_models_DB", 'hum_atlas_data')]
+samples_list <- mget(all_samples)
+rm(list = ls()[!ls() %in% c("my_colors","DATADIR", "WORKDIR", "PREPRDATADIR", 'bped', 'g2m.genes',
+                     'EnsemblGeneTable.Hs', "s.genes", "sample_metadata",
+                     "scGate_models_DB", 'hum_atlas_data', 'samples_list')])
+gc()
+seu_list <- lapply(names(samples_list), function(sample_name) {
+  sample <- samples_list[[sample_name]]
+  print(sample_name)
+  seu <- CreateSeuratObject(counts = sample, min.cells = 3, min.features = 200)
+  seu$SampleID <- sample_name
+  return(seu)
+})
+
+names(seu_list) <- names(samples_list)
+```
+
+```{r}
+sample_metadata <- read.csv(paste0(DATADIR, 'samples_metadata_v5.csv'))
+sample_metadata[sample_metadata==""] <- NA
+
+rownames(sample_metadata) <- sample_metadata$Sample_dataset
+```
+
+# Preprocessing data
+
+```{r data review, echo=FALSE, message=TRUE, warning=TRUE}
+
+seu_list <- lapply(seu_list, function(seu){
+  print(unique(seu$SampleID))
+  
+  seu$percent_mito <- PercentageFeatureSet(seu, pattern = "^MT-")
+  seu$percent_ribo <- PercentageFeatureSet(seu, pattern = "^RP[SL]")
+  seu[["complexity"]] <- log10(seu$nFeature_RNA) / log10(seu$nCount_RNA)
+  message('Normalization is going on...')
+  seu <- seu %>% 
+    NormalizeData(verbose=F) %>% 
+    FindVariableFeatures(verbose=F) %>% 
+    ScaleData(vars.to.regress=c('nCount_RNA'), verbose=F) %>% 
+    RunPCA(verbose=F) %>% 
+    RunUMAP(dims = 1:20, verbose=F)
+  # identify doublets
+  # scDblFinder
+  message('scDblFinder is going on...')
+  sce <- as.SingleCellExperiment(seu)
+  sce <- scDblFinder(sce, dbr.sd=1, verbose=F)
+  seu[['scDblFinder.class']] <- sce$scDblFinder.class
+  # DoubletFinder
+  message('doubletFinder is going on...')
+  sweep.list <- paramSweep(seu, PCs = 1:10, sct = FALSE)
+  sweep.stats <- summarizeSweep(sweep.list, GT = FALSE)
+  bcmvn <- find.pK(sweep.stats)
+  pK <- bcmvn |>
+    arrange(desc(BCmetric))
+  pK <- pK[1, 'pK']
+  pK <- as.numeric(levels(pK[[1]]))[pK[[1]]]
+  nExp <- round(ncol(seu) * 0.03)
+  seu <- doubletFinder(seu, pN = 0.25, pK = pK, nExp = nExp, PCs = 1:10)
+  seu[['DoubletFinder.class']] <- seu@meta.data[, colnames(seu@meta.data)[grepl("DF.classification", colnames(seu@meta.data))]]
+  seu[[colnames(seu@meta.data)[grepl("DF.classification", colnames(seu@meta.data))]]] <- NULL
+  seu[[colnames(seu@meta.data)[grepl("pANN", colnames(seu@meta.data))]]] <- NULL
+  seu[['singlet']] <- ifelse(seu$scDblFinder.class=='doublet' & seu$DoubletFinder.class=='Doublet', 'no', 'yes')
+  
+  print(table(seu$singlet))
+  print(VlnPlot(seu, features = c("nFeature_RNA", "nCount_RNA", "percent_mito", "percent_ribo", "complexity"), ncol = 5) +
+          ggtitle(unique(seu$SampleID)))
+  
+  return(seu)
+})
+```
+
+```{r processing seurat list, eval=FALSE, include=FALSE}
+seu_list <- lapply(seu_list, function(seu) {
+  print(unique(seu$SampleID))
+  if(grepl("_rep", unique(seu$SampleID))) {
+    current_sample <- strsplit(unique(seu$SampleID), "_rep")[[1]][1]  # Handle replicate cases
+  }
+  else if(grepl("_bonine_", unique(seu$SampleID))) {
+    current_sample <- sub("_[^_]+$", "", unique(seu$SampleID))  # Handle bonine cases
+  }
+  else {current_sample = unique(seu$SampleID)}
+  # filter low-quality cells and doublets
+  method <- sample_metadata$Method[sample_metadata$Sample_dataset == current_sample]
+
+  # Apply filtering based on method
+  seu <- if(method == "sc") {
+    subset(seu, subset = nFeature_RNA > 200 & nFeature_RNA < 6000 & singlet == 'yes' & complexity > 0.8 & percent_mito < 25)
+  } else if(method == "sn") {
+    subset(seu, subset = nFeature_RNA > 200 & nFeature_RNA < 4000 & singlet == 'yes' & complexity > 0.8 & percent_mito < 10)
+  }
+  seu <- StandardizeGeneSymbols(seu, slot = 'counts', EnsemblGeneTable=EnsemblGeneTable.Hs)
+  seu <- seu%>%
+    NormalizeData() |>
+    FindVariableFeatures() |> 
+    CellCycleScoring(s.features = s.genes, g2m.features = g2m.genes)
+  seu$CC.Difference <- seu$S.Score - seu$G2M.Score
+  # Preliminary annotation
+  message('SingleR is going...')
+  pred_bped_main <- SingleR(test = as.SingleCellExperiment(seu), ref = hum_atlas_data, labels = hum_atlas_data$label.main, BPPARAM=MulticoreParam(30))
+  seu[['celltype_humatlas_main']] <- pred_bped_main$pruned.labels
+  pred_bped_fine <- SingleR(test = as.SingleCellExperiment(seu), ref = hum_atlas_data, labels = hum_atlas_data$label.fine, BPPARAM=MulticoreParam(30))
+  seu[['celltype_humatlas_fine']] <- pred_bped_fine$pruned.labels
+  # scGate
+  message('scGate is going...')
+  seu <- scGate(seu, model = scGate_models_DB$human$TME_HiRes, ncores = 30)
+})
+```
+
+# Merging
+
+```{r merge samples, eval=FALSE, include=FALSE}
+seu <- merge(x=seu_list[[1]], y=seu_list[2:length(seu_list)], add.cell.ids = names(seu_list))
+rm(seu_list)
+seu$scGate_multi[is.na(seu$scGate_multi)] <- 'unknown'
+seu$celltype_humatlas_main[is.na(seu$celltype_humatlas_main)] <- 'unknown'
+seu$celltype_humatlas_fine[is.na(seu$celltype_humatlas_fine)] <- 'unknown'
+```
+
+```{r metadata load, include=FALSE}
+seu$sex <- sample_metadata[seu$SampleID,]$Sex
+seu$less18M <- sample_metadata[seu$SampleID,]$less18M
+seu$Survival.Death <- sample_metadata[seu$SampleID,]$Survival.Death
+seu$Site <- sample_metadata[seu$SampleID,]$Site
+seu$INSS_stage <- sample_metadata[seu$SampleID,]$INSS_stage
+seu$Treatment <- sample_metadata[seu$SampleID,]$Treatment
+seu$Method <- sample_metadata[seu$SampleID,]$Method
+
+seu$Study <- sapply(str_split(seu$SampleID, "_"), function(x) {
+  if (length(x) == 2) {
+    return(x[2])
+  } else if (length(x) == 3) {
+    return(x[3])
+  } else {
+    return(NA)
+  }
+})
+```
+
+
+```{r eval=FALSE, include=FALSE}
+cells_names <- table(seu$celltype_humatlas_main) %>% 
+  as.data.frame %>% 
+  filter(Freq > 50) 
+
+seu$celltype_humatlas_main_filt <- ifelse(seu$celltype_humatlas_main %in% cells_names[,1],
+                                          seu$celltype_humatlas_main, "unknown")
+
+qsave(seu, paste0(PREPRDATADIR, 'seu_list_preproc_ATLAS_v1.rds'))
+```
+
+# Annotation
+
+```{r}
+annotate_neuroblastoma <- function(sample) {
+  print(paste('RUN', sample, 'RUN'))
+  # Label mapping dictionary between SingleR and final annotations
+  singler_to_final <- c(
+    "DC" = "myeloid_cells",
+    "Smooth_muscle_cells" = "stromal_cells",
+    "Epithelial_cells" = "stromal_cells",
+    "B_cell" = "b_cells",
+    "Neutrophils" = "myeloid_cells",
+    "T_cells" = "t_cells",
+    "Monocyte" = "myeloid_cells",
+    "Erythroblast" = "other",
+    "BM & Prog." = "other",
+    "Endothelial_cells" = "endothelial_cells",
+    "Gametocytes" = "other",
+    "Neurons" = "malignant_cells",
+    "Keratinocytes" = "other",
+    "HSC_-G-CSF" = "myeloid_cells",
+    "Macrophage" = "myeloid_cells",
+    "NK_cell" = "t_cells",
+    "Embryonic_stem_cells" = "other",
+    "Tissue_stem_cells" = "stromal_cells",
+    "Chondrocytes" = "other",
+    "Osteoblasts" = "other",
+    "BM" = "other",
+    "Platelets" = "other",
+    "Fibroblasts" = "stromal_cells",
+    "iPS_cells" = "other",
+    "Hepatocytes" = "malignant_cells",
+    "MSC" = "stromal_cells",
+    "Neuroepithelial_cell" = "malignant_cells",
+    "Astrocyte" = "malignant_cells",
+    "HSC_CD34+" = "other",
+    "CMP" = "myeloid_cells",
+    "GMP" = "myeloid_cells",
+    "MEP" = "other",
+    "Myelocyte" = "myeloid_cells",
+    "Pre-B_cell_CD34-" = "b_cells",
+    "Pro-B_cell_CD34+" = "b_cells",
+    "Pro-Myelocyte" = "myeloid_cells"
+  )
+  print(paste('PREPROCESSING', sample, 'PREPROCESSING'))
+  # Pre-processing
+  seu <- subset(seu, subset = SampleID == sample) %>% 
+    NormalizeData() %>%
+    FindVariableFeatures() %>%
+    ScaleData() %>%
+    RunPCA() %>% 
+    RunUMAP(dims = 1:20) %>%
+    FindNeighbors(dims = 1:20) %>%
+    FindClusters(resolution = 1.5)
+  print(paste('SINGLER', sample, 'SINGLER'))
+  # SingleR annotation
+  sce <- as.SingleCellExperiment(seu)
+  colLabels(sce) <- seu$RNA_snn_res.1.5
+  
+  pred_singler <- SingleR(
+    test = sce, 
+    ref = hum_atlas_data, 
+    clusters = colLabels(sce),
+    labels = hum_atlas_data$label.main, 
+    BPPARAM = MulticoreParam(10)
+  )
+  
+  # Store SingleR labels
+  
+  # Store both raw and harmonized labels in metadata
+  seu$singler_labels_raw <- plyr::mapvalues(
+                            seu$RNA_snn_res.1.5,
+                            from = rownames(pred_singler),
+                            to = pred_singler$labels)
+  seu$singler_labels_raw[is.na(seu$singler_labels_raw)] <- "unknown"
+  singler_labels <- singler_to_final[as.character(seu$singler_labels_raw)]
+  names(singler_labels) <- colnames(seu)
+  seu$singler_labels <- singler_labels
+  seu$singler_labels[is.na(seu$singler_labels)] <- "unknown"
+  print(paste('SCGATE', sample, 'SCGATE'))
+  # Run scGate for major cell types
+  run_scgate <- function(seu, model_name) {
+    seu <- scGate(seu, model = model_name)
+    return(seu$is.pure == "Pure")
+  }
+  
+  # Score major cell types
+  seu$immune_cells <- run_scgate(seu, scGate_models_DB$human$TME_broad$Immune)
+  seu$stromal_cells <- run_scgate(seu, scGate_models_DB$human$generic$Stromal)
+  seu$endothelial_cells <- run_scgate(seu, scGate_models_DB$human$generic$Endothelial)
+  
+  # Score immune subtypes
+  seu$t_cells <- run_scgate(seu, scGate_models_DB$human$generic$Tcell) | 
+                 run_scgate(seu, scGate_models_DB$human$generic$NK)
+  seu$b_cells <- run_scgate(seu, scGate_models_DB$human$generic$Bcell) | 
+                 run_scgate(seu, scGate_models_DB$human$generic$PlasmaCell)
+  seu$myeloid_cells <- run_scgate(seu, scGate_models_DB$human$generic$Myeloid) | 
+                       run_scgate(seu, scGate_models_DB$human$generic$Monocyte)
+  
+  # Score malignant cells
+  malignant_model <- gating_model(
+    name = "Malignant",
+    signature = c("MYCN", "MLLT11", "SLC6A2", "PHOX2B", "NXPH1", "SYT1")
+  )
+  seu$malignant_cells <- run_scgate(seu, malignant_model)
+  print(paste('INTEGRATION', sample, 'INTEGRATION'))
+  # Integrate annotations
+  integrate_annotations <- function(seu) {
+    seu$final_annotation <- "unknown"
+    
+    for (cluster in unique(seu$RNA_snn_res.1.5)) {
+      cells_in_cluster <- WhichCells(seu, idents = cluster)
+      cluster_data <- seu[, cells_in_cluster]
+      
+      # Get SingleR annotation
+      singler_annot <- names(which.max(table(cluster_data$singler_labels)))
+      
+      # Calculate scGate scores for the cluster
+      scgate_scores <- list(
+        stromal_cells = mean(cluster_data$stromal_cells),
+        endothelial_cells = mean(cluster_data$endothelial_cells),
+        malignant_cells = mean(cluster_data$malignant_cells),
+        t_cells = mean(cluster_data$t_cells),
+        b_cells = mean(cluster_data$b_cells),
+        myeloid_cells = mean(cluster_data$myeloid_cells)
+      )
+      
+      # Set confidence thresholds
+      high_conf <- 0.7
+      med_conf <- 0.5
+      
+      # Get top scGate scores
+      sorted_scores <- sort(unlist(scgate_scores), decreasing = TRUE)
+      top_score <- sorted_scores[1]
+      top_label <- names(sorted_scores)[1]
+      
+      # Determine final annotation
+      if (top_score >= high_conf) {
+        final_label <- top_label
+      } else if (top_score >= med_conf && singler_annot == top_label) {
+        final_label <- top_label
+      } else if (singler_annot %in% names(scgate_scores) && scgate_scores[[singler_annot]] >= 0.3) {
+        final_label <- singler_annot
+      } else if (singler_annot == "malignant_cells" && scgate_scores$malignant_cells >= 0.3) {
+        final_label <- "malignant_cells"
+      } else {
+        final_label <- "unknown"
+      }
+      
+      seu$final_annotation[cells_in_cluster] <- final_label
+    }
+    
+    return(seu)
+  }
+  
+  # Run final annotation
+  seu <- integrate_annotations(seu)
+  print(paste('CONFIDENCE', sample, 'CONFIDENCE'))
+  # Store metadata
+  
+  # Set final annotation as active identity
+  Idents(seu) <- "final_annotation"
+  
+  return(seu)
+}
+```
+
+```{r}
+seu <- qread(paste0(PREPRDATADIR, 'seu_list_preproc_ATLAS_v1.rds'))
+annotated_samples <- lapply(seu$SampleID %>% unique,
+                              annotate_neuroblastoma)
+
+names(annotated_samples) <- seu$SampleID %>% unique
+qsave(annotated_samples, paste0(PREPRDATADIR, 'seu_list_mypipelineannot_ATLAS.qs'))
+```
+
+```{r}
+annotated_samples <- qread(paste0(PREPRDATADIR, 'seu_list_mypipelineannot_ATLAS.qs'))
+lapply(annotated_samples, function(x) {
+  DimPlot(x, group.by='final_annotation') +
+  ggtitle(x$SampleID %>% unique())
+  # DimPlot(x, group.by='immune_labels') +
+  #   ggtitle(x$SampleID %>% unique())
+  # DimPlot(x, group.by='malignant_labels') +
+  #   ggtitle(x$SampleID %>% unique())
+})
+```
+
+## Fine-tuning of annotation
+
+```{r}
+sample_metadata <- read.csv(paste0(DATADIR, 'samples_metadata_v5.csv'))
+sample_metadata[sample_metadata==""] <- NA
+
+rownames(sample_metadata) <- sample_metadata$Sample_dataset
+```
+
+```{r}
+# Function to merge samples by study
+merge_by_study <- function(sample_list) {
+  # Extract study names from sample names
+  get_study <- function(sample_name) {
+    # Special patterns for each study
+    if (grepl("^CH_", sample_name)) {
+        return("grossmann")
+    } else if (grepl("^HTAPP_", sample_name)) {
+        return("patel")
+    } else if (grepl("^M.*_wienke", sample_name)) {
+        return("wienke")
+    } else if (grepl("_dong$", sample_name)) {
+        return("dong")
+    } else if (grepl("_jansky$", sample_name)) {
+        return("jansky")
+    } else if (grepl("_verhoeven$", sample_name)) {
+        return("verhoeven")
+    } else if (grepl("_olsen$", sample_name)) {
+        return("olsen")
+    } else if (grepl("_bonine", sample_name)) {
+        return("bonine")
+    } else {
+        warning("Unknown study pattern for sample: ", sample_name)
+        return("unknown")
+    }
+}
+  
+  # Create mapping of studies to sample names
+  study_map <- split(names(sample_list), sapply(names(sample_list), get_study))
+  
+  # Initialize list to store merged objects
+  merged_objects <- list()
+  
+  # Merge samples for each study
+  for (study in names(study_map)) {
+    message("Processing study: ", study)
+    
+    # Get samples for this study
+    study_samples <- study_map[[study]]
+    
+    # Merge all samples for this study
+    if (length(study_samples) > 1) {
+      # Add study name to cell identifiers to avoid duplicates
+      sample_objects <- lapply(study_samples, function(sample_name) {
+        seu <- sample_list[[sample_name]]
+        new_names <- paste0(sample_name, "_", colnames(seu))
+        colnames(seu) <- new_names
+        seu$Study <- study
+        return(seu)
+      })
+      
+      # Merge all samples
+      merged <- merge(sample_objects[[1]], 
+                     y = sample_objects[-1], 
+                     add.cell.ids = NULL,  # We already added unique identifiers
+                     project = paste0("NB_", study))
+      merged <- merged %>% 
+        NormalizeData() %>% 
+        FindVariableFeatures() %>% 
+        ScaleData() %>% 
+        RunPCA(verbose=FALSE) %>% 
+        RunHarmony(., 'SampleID',
+             lambda = 1, verbose = FALSE) %>% 
+        RunUMAP(reduction = "harmony", dims = 1:20, verbose=F) 
+      
+    } else {
+      # If only one sample, just add to list
+      merged <- sample_list[[study_samples]]
+    }
+    
+    # Store merged object
+    merged_objects[[study]] <- merged
+  }
+  
+  return(merged_objects)
+}
+
+# Use the function
+merged_studies <- merge_by_study(annotated_samples)
+
+# Check results
+sapply(merged_studies, function(x) ncol(x))
+merged_studies$olsen <- NULL
+merged_studies$patel$SampleID_2 <-  gsub("_rep[0-9]$", "", merged_studies$patel$SampleID)
+sc_samples <- sample_metadata %>% dplyr::filter(Method == 'sc') %>% rownames()
+sn_samples <- sample_metadata %>% dplyr::filter(Method == 'sn') %>% rownames()
+
+merged_studies$patel_sc <- subset(merged_studies$patel, SampleID_2 %in% sc_samples)
+merged_studies$patel_sn <- subset(merged_studies$patel, SampleID_2 %in% sn_samples)
+merged_studies$patel <- NULL
+merged_studies$patel_sc$SampleID_2 <- NULL
+merged_studies$patel_sn$SampleID_2 <- NULL
+
+merged_studies$bonine$SampleID_2 <- gsub("_sn$|_[0-9]+$", "", merged_studies$bonine$SampleID)
+merged_studies$bonine_sc <- subset(merged_studies$bonine, SampleID_2 %in% sc_samples)
+merged_studies$bonine_sn <- subset(merged_studies$bonine, SampleID_2 %in% sn_samples)
+merged_studies$bonine <- NULL
+merged_studies$bonine_sc$SampleID_2 <- NULL
+merged_studies$bonine_sn$SampleID_2 <- NULL
+```
+
+dong grossmann    jansky verhoeven    wienke  patel_sc  patel_sn bonine_sc bonine_sn 
+53927    218955     63899     85323      8703     12861    139522     13928     32430 
+
+    
+```{r}
+need_update <- c('patel_sc',  'patel_sn', 'bonine_sc', 'bonine_sn' )
+merged_studies <- lapply(names(merged_studies), function(name) {
+  if(name %in% need_update) {
+    merged_studies[[name]] <- merged_studies[[name]] %>% 
+      NormalizeData() %>% 
+      FindVariableFeatures() %>% 
+      ScaleData() %>% 
+      RunPCA(verbose=FALSE) %>% 
+      RunHarmony(., 'SampleID',
+           lambda = 1, verbose = FALSE) %>% 
+      RunUMAP(reduction = "harmony", dims = 1:20, verbose=F)
+    return(merged_studies[[name]])
+  } else {
+    return(merged_studies[[name]])
+  }
+})
+names(merged_studies) <- c('dong', 'grossmann', 'jansky', 'verhoeven', 'wienke',
+                           'patel_sc', 'patel_sn', 'bonine_sc', 'bonine_sn' )
+```
+
+```{r}
+lapply(names(merged_studies), function(x) {
+  DimPlot(merged_studies[[x]], group.by='final_annotation') +
+    ggtitle(x)
+})
+
+qsave(merged_studies, paste0(PREPRDATADIR, 'ATLAS_list_studies.qs'))
+```
+
+```{r fig.height=4, fig.width=12}
+sc <- list(merged_studies$dong, merged_studies$verhoeven, merged_studies$wienke,
+           merged_studies$patel_sc, merged_studies$bonine_sc)
+sc <- merge(sc[[1]], y = sc[-1], 
+            add.cell.ids = NULL, 
+            project = 'sc')
+
+sc <- sc %>% 
+  NormalizeData() %>% 
+  FindVariableFeatures() %>% 
+  ScaleData() %>% 
+  RunPCA(verbose=FALSE) %>% 
+  RunHarmony(., 'SampleID',
+       lambda = 1, verbose = FALSE) %>% 
+  RunUMAP(reduction = "harmony", dims = 1:20, verbose=F, return.model=TRUE)
+
+plot_grid(DimPlot(sc, group.by='final_annotation'),  DimPlot(sc, group.by='Study'))
+```
+
+```{r}
+sc <- sc %>% 
+  FindNeighbors(reduction = 'harmony') %>% 
+  FindClusters(resolution = 0.1)
+
+DimPlot(sc, group.by='RNA_snn_res.0.1')
+```
+
+```{r}
+DimPlot(sc, group.by='t_cells')
+```
+
+```{r fig.height=5, fig.width=14}
+Idents(sc) <- 'RNA_snn_res.0.1'
+markers <- FindAllMarkers(sc, only.pos = T)
+top5 <- markers %>%
+  dplyr::filter(!grepl("^Gm[0-9]", rownames(.))) %>% 
+  dplyr::filter(!grepl("Rik$", rownames(.))) %>% 
+  dplyr::filter(p_val_adj < 0.05) %>% 
+  group_by(cluster) %>%
+  top_n(n = 7, wt = avg_log2FC)
+
+DotPlot(sc, top5$gene, cols = c('lightgrey', "#BA55D3FF")) +
+  RotatedAxis()
+```
+
+```{r fig.height=6, fig.width=10}
+FeaturePlot(sc,  c("MYCN", "MLLT11", "SLC6A2", "PHOX2B", "NXPH1", "SYT1", "VIM", "SYP", "NCAM1"))
+```
+
+```{r fig.height=6, fig.width=10}
+FeaturePlot(sc,  c("VIM", "COL1A1", "COL1A2", "CDH19"))
+```
+
+```{r}
+new.cluster.ids <- c('0'='Neuroendocrine',
+                     '1'='T_cells',
+                     '2'='Neuroendocrine',
+                     '3'='Myeloid_cells',
+                     '4'='Neuroendocrine',
+                     '5'='Stromal_cells',
+                     '6'='B_cells',
+                     '7'= 'Endothelial_cells',
+                     '8'='T_cells'
+)
+
+sc <- RenameIdents(sc, new.cluster.ids)
+sc$Annotation <- Idents(sc)
+```
+
+```{r fig.height=4, fig.width=12}
+plot_grid(DimPlot(sc, group.by='Annotation', cols = my_colors),  DimPlot(sc, group.by='Study', cols = my_colors))
+```
+
+```{r}
+DimPlot(sc, group.by = 'celltype_humatlas_main')
+```
+
+```{r fig.height=5, fig.width=12}
+sc_str <- subset(sc, Annotation == 'Stromal_cells') %>% 
+  NormalizeData() %>% 
+  FindVariableFeatures() %>% 
+  ScaleData() %>% 
+  RunPCA(verbose=FALSE) %>% 
+  RunHarmony(., 'SampleID',
+       lambda = 1, verbose = FALSE) %>% 
+  RunUMAP(reduction = "harmony", dims = 1:20, verbose=F, return.model=TRUE)
+
+sc_str <- sc_str %>% 
+  FindNeighbors(reduction = 'harmony') %>% 
+  FindClusters(resolution = c(0.1, 0.2, 0.3, 0.4))
+plot_grid(DimPlot(sc_str, group.by='celltype_humatlas_main'),  DimPlot(sc_str, group.by='RNA_snn_res.0.1'), rel_widths = c(2, 1))
+```
+
+```{r fig.height=5, fig.width=16}
+Idents(sc_str) <- 'RNA_snn_res.0.1'
+markers <- FindAllMarkers(sc_str, only.pos = T)
+top5 <- markers %>%
+  dplyr::filter(pct.1 > 0.25) %>% 
+  dplyr::filter(!grepl("^Gm[0-9]", rownames(.))) %>% 
+  dplyr::filter(!grepl("Rik$", rownames(.))) %>% 
+  dplyr::filter(p_val_adj < 0.05) %>% 
+  group_by(cluster) %>%
+  top_n(n = 7, wt = avg_log2FC)
+
+DotPlot(sc_str, top5$gene %>% unique, cols = c('lightgrey', "#BA55D3FF")) +
+  RotatedAxis()
+
+DotPlot(sc_str, c('PHOX2B', 'PHOX2A', 'DBH', 'ALK', 'TH', 'ISL1', 'MPZ', 'PLP1', 'CDH19', 
+                     'CD2', 'CD3D', 'CD247', 'CD22', 'CD79A', 'PAX5',  'BANK1', 'GZMB', 'CD14',
+                     'CD68', 'MRC1', 'CD163', 'C7', 'COL1A1', 'LAMA2', 'COL3A1', 'VWF', 'CALCRL',
+                     'FLT1', 'ALB', 'CYP11A1'), cols = c('lightgrey', "#BA55D3FF")) +
+  RotatedAxis()
+```
+
+
+```{r fig.height=5, fig.width=12}
+new.cluster.ids <- c('0'='Stromal_cells',
+                     '1'='Stromal_cells',
+                     '2'='Schwann_cells',
+                     '3'='Stromal_cells',
+                     '4'='Stromal_cells',
+                     '5'='Stromal_cells',
+                     '6'='Stromal_cells',
+                     '7'='Stromal_cells',
+                     '8'='Stromal_cells'
+)
+
+sc_str <- RenameIdents(sc_str, new.cluster.ids)
+sc_str$Annotation <- Idents(sc_str)
+
+plot_grid(DimPlot(sc_str, group.by='final_annotation'),  DimPlot(sc_str, group.by='Annotation'))
+```
+
+```{r}
+sc$Annotation <- as.character(sc$Annotation)
+sc_str$Annotation <- as.character(sc_str$Annotation)
+sc$Annotation[colnames(sc_str)] <- sc_str$Annotation
+
+DimPlot(sc, group.by='Annotation')
+```
+
+
+```{r fig.height=5, fig.width=16}
+keep_cells <- (
+  # Neuroendocrine cells predicted as malignant
+  (sc$Annotation == "Neuroendocrine" & sc$singler_labels == "malignant_cells") |
+  (sc$Annotation == "Schwann_cells" & sc$singler_labels == "malignant_cells") |
+  # Endothelial cells match
+  (sc$Annotation == "Endothelial_cells" & sc$singler_labels == "endothelial_cells") |
+  # Stromal cells match
+  (sc$Annotation == "Stromal_cells" & sc$singler_labels == "stromal_cells") |
+  # T cells match
+  (sc$Annotation == "T_cells" & sc$singler_labels == "t_cells") |
+  # B cells match
+  (sc$Annotation == "B_cells" & sc$singler_labels == "b_cells") |
+  # Myeloid cells match
+  (sc$Annotation == "Myeloid_cells" & sc$singler_labels == "myeloid_cells") 
+)
+
+# Create filtered Seurat object
+sc_filtered <- sc[, keep_cells]
+
+plot_grid(DimPlot(sc_filtered, group.by='celltype_humatlas_main_filt'),  DimPlot(sc_filtered, group.by='Annotation'), rel_widths = c(1.5, 1))
+```
+
+```{r}
+sc <- sc_filtered
+qsave(sc, paste0(PREPRDATADIR, 'ATLAS_sc.qs'))
+sc <- qread(paste0(PREPRDATADIR, 'ATLAS_sc.qs'))
+```
+
+## sn
+
+```{r fig.height=4, fig.width=10}
+sn <- list(merged_studies$grossmann, merged_studies$jansky, 
+           merged_studies$patel_sn, merged_studies$bonine_sn)
+sn <- merge(sn[[1]], y = sn[-1], 
+            add.cell.ids = NULL, 
+            project = 'sn')
+
+sn <- sn %>% 
+  NormalizeData() %>% 
+  FindVariableFeatures() %>% 
+  ScaleData() %>% 
+  RunPCA(verbose=FALSE) %>% 
+  RunHarmony(., 'SampleID',
+       lambda = 1, verbose = FALSE) %>% 
+  RunUMAP(reduction = "harmony", dims = 1:20, verbose=F, return.model=TRUE)
+
+plot_grid(DimPlot(sn, group.by='final_annotation'),  DimPlot(sn, group.by='Study'))
+
+# qsave(sn, paste0(PREPRDATADIR, 'ATLAS_sn.qs'))
+```
+
+```{r}
+sn <- qread(paste0(PREPRDATADIR, 'ATLAS_sn.qs'))
+```
+
+```{r}
+sn <- sn %>% 
+  FindNeighbors(reduction = 'harmony') %>% 
+  FindClusters(resolution = c(0.1, 0.2, 0.3))
+
+DimPlot(sn, group.by='RNA_snn_res.0.1')
+```
+
+```{r fig.height=4, fig.width=12}
+plot_grid(DimPlot(sn, group.by='final_annotation'),  DimPlot(sn, group.by='Study'))
+```
+
+```{r}
+DimPlot(sn, group.by='t_cells')
+```
+
+```{r fig.height=5, fig.width=14}
+Idents(sn) <- 'RNA_snn_res.0.1'
+markers <- FindAllMarkers(sn, only.pos = T)
+top5 <- markers %>%
+  dplyr::filter(!grepl("^Gm[0-9]", rownames(.))) %>% 
+  dplyr::filter(!grepl("Rik$", rownames(.))) %>% 
+  dplyr::filter(p_val_adj < 0.05) %>% 
+  group_by(cluster) %>%
+  top_n(n = 7, wt = avg_log2FC)
+
+DotPlot(sn, top5$gene, cols = c('lightgrey', "#BA55D3FF")) +
+  RotatedAxis()
+```
+
+```{r fig.height=6, fig.width=10}
+FeaturePlot(sn,  c("MYCN", "MLLT11", "SLC6A2", "PHOX2B", "NXPH1", "SYT1", "VIM", "SYP", "NCAM1"))
+```
+
+```{r fig.height=6, fig.width=10}
+FeaturePlot(sn,  c("VIM", "COL1A1", "COL1A2", "CDH19"))
+```
+
+## by dataset
+
+### Bonine
+
+```{r fig.height=5, fig.width=12}
+bonine <- subset(sn, Study == 'bonine') %>% 
+  NormalizeData() %>% 
+  FindVariableFeatures() %>% 
+  ScaleData() %>% 
+  RunPCA(verbose=FALSE) %>% 
+  RunHarmony(., 'SampleID',
+       lambda = 1, verbose = FALSE) %>% 
+  RunUMAP(reduction = "harmony", dims = 1:20, verbose=F, return.model=TRUE)
+
+plot_grid(DimPlot(bonine, group.by='final_annotation'),  DimPlot(bonine, group.by='SampleID'))
+```
+
+```{r fig.height=5, fig.width=8}
+DimPlot(bonine, group.by='celltype_humatlas_main')
+```
+
+```{r fig.height=5, fig.width=12}
+bonine <- bonine %>% 
+  FindNeighbors(reduction = 'harmony') %>% 
+  FindClusters(resolution = c(0.1, 0.2, 0.3, 0.4, 0.5))
+
+plot_grid(DimPlot(bonine, group.by='final_annotation'),  DimPlot(bonine, group.by='RNA_snn_res.0.1'))
+```
+
+```{r fig.height=5, fig.width=16}
+Idents(bonine) <- 'RNA_snn_res.0.1'
+markers <- FindAllMarkers(bonine, only.pos = T)
+top5 <- markers %>%
+  dplyr::filter(pct.1 > 0.25) %>% 
+  dplyr::filter(!grepl("^Gm[0-9]", rownames(.))) %>% 
+  dplyr::filter(!grepl("Rik$", rownames(.))) %>% 
+  dplyr::filter(p_val_adj < 0.05) %>% 
+  group_by(cluster) %>%
+  top_n(n = 7, wt = avg_log2FC)
+
+DotPlot(bonine, top5$gene %>% unique, cols = c('lightgrey', "#BA55D3FF")) +
+  RotatedAxis()
+
+DotPlot(bonine, c('PHOX2B', 'PHOX2A', 'DBH', 'ALK', 'TH', 'ISL1', 'MPZ', 'PLP1', 'CDH19', 
+                     'CD2', 'CD3D', 'CD247', 'CD22', 'CD79A', 'PAX5',  'BANK1', 'GZMB', 'CD14',
+                     'CD68', 'MRC1', 'CD163', 'C7', 'COL1A1', 'LAMA2', 'COL3A1', 'VWF', 'CALCRL',
+                     'FLT1', 'ALB', 'CYP11A1'), cols = c('lightgrey', "#BA55D3FF")) +
+  RotatedAxis()
+```
+
+```{r fig.height=5, fig.width=12}
+new.cluster.ids <- c('0'='Neuroendocrine',
+                     '1'='Neuroendocrine',
+                     '2'='Endothelial_cells',
+                     '3'='Stromal_cells',
+                     '4'='Adrenal_cortex',
+                     '5'='T_cells',
+                     '6'='B_cells',
+                     '7'='Myeloid_cells',
+                     '8'='unknown'
+)
+
+bonine <- RenameIdents(bonine, new.cluster.ids)
+bonine$Annotation <- Idents(bonine)
+
+plot_grid(DimPlot(bonine, group.by='final_annotation'),  DimPlot(bonine, group.by='Annotation'))
+```
+
+```{r fig.height=5, fig.width=12}
+keep_cells <- (
+  # Neuroendocrine cells predicted as malignant
+  (bonine$Annotation == "Neuroendocrine" & bonine$singler_labels == "malignant_cells") |
+  # Endothelial cells match
+  (bonine$Annotation == "Endothelial_cells" & bonine$singler_labels == "endothelial_cells") |
+  # Stromal cells match
+  (bonine$Annotation == "Stromal_cells" & bonine$singler_labels == "stromal_cells") |
+  # T cells match
+  (bonine$Annotation == "T_cells" & bonine$singler_labels == "t_cells") |
+  # B cells match
+  (bonine$Annotation == "B_cells" & bonine$singler_labels == "b_cells") |
+  # Myeloid cells match
+  (bonine$Annotation == "Myeloid_cells" & bonine$singler_labels == "myeloid_cells")
+)
+
+# Create filtered Seurat object
+bonine_filtered <- bonine[, keep_cells]
+
+plot_grid(DimPlot(bonine_filtered, group.by='celltype_humatlas_main'),  DimPlot(bonine_filtered, group.by='Annotation'), rel_widths = c(1.5, 1))
+```
+```{r}
+bonine <- bonine_filtered
+```
+
+
+### Jansky
+
+```{r fig.height=5, fig.width=12}
+samples <- sample_metadata %>% 
+           dplyr::filter(Treatment == 'naive') %>% 
+           dplyr::filter(Dataset == 'Jansky2021') %>% 
+           .$Sample_dataset
+jansky <- subset(sn, Study == 'jansky') %>% 
+  subset(SampleID %in% samples) %>% 
+  NormalizeData() %>% 
+  FindVariableFeatures() %>% 
+  ScaleData() %>% 
+  RunPCA(verbose=FALSE) %>% 
+  RunHarmony(., 'SampleID',
+       lambda = 1, verbose = FALSE) %>% 
+  RunUMAP(reduction = "harmony", dims = 1:20, verbose=F, return.model=TRUE)
+
+plot_grid(DimPlot(jansky, group.by='final_annotation'),  DimPlot(jansky, group.by='SampleID'))
+```
+
+```{r fig.height=5, fig.width=8}
+DimPlot(jansky, group.by='celltype_humatlas_main')
+```
+
+```{r fig.height=5, fig.width=12}
+jansky <- jansky %>% 
+  FindNeighbors(reduction = 'harmony') %>% 
+  FindClusters(resolution = c(0.1, 0.2, 0.3, 0.4, 0.5))
+
+plot_grid(DimPlot(jansky, group.by='final_annotation'),  DimPlot(jansky, group.by='RNA_snn_res.0.1'))
+```
+
+```{r fig.height=5, fig.width=16}
+Idents(jansky) <- 'RNA_snn_res.0.1'
+markers <- FindAllMarkers(jansky, only.pos = T)
+top5 <- markers %>%
+  dplyr::filter(pct.1 > 0.25) %>% 
+  dplyr::filter(!grepl("^Gm[0-9]", rownames(.))) %>% 
+  dplyr::filter(!grepl("Rik$", rownames(.))) %>% 
+  dplyr::filter(p_val_adj < 0.05) %>% 
+  group_by(cluster) %>%
+  top_n(n = 7, wt = avg_log2FC)
+
+DotPlot(jansky, top5$gene %>% unique, cols = c('lightgrey', "#BA55D3FF")) +
+  RotatedAxis()
+
+DotPlot(jansky, c('PHOX2B', 'PHOX2A', 'DBH', 'ALK', 'TH', 'ISL1', 'MPZ', 'PLP1', 'CDH19', 
+                     'CD2', 'CD3D', 'CD247', 'CD22', 'CD79A', 'PAX5',  'BANK1', 'GZMB', 'CD14',
+                     'CD68', 'MRC1', 'CD163', 'C7', 'COL1A1', 'LAMA2', 'COL3A1', 'VWF', 'CALCRL',
+                     'FLT1', 'ALB', 'CYP11A1'), cols = c('lightgrey', "#BA55D3FF")) +
+  RotatedAxis()
+```
+
+```{r fig.height=5, fig.width=12}
+new.cluster.ids <- c('0'='Neuroendocrine',
+                     '1'='Neuroendocrine',
+                     '2'='Neuroendocrine',
+                     '3'='Immune_cells',
+                     '4'='Immune_cells'
+)
+
+jansky <- RenameIdents(jansky, new.cluster.ids)
+jansky$Annotation <- Idents(jansky)
+
+plot_grid(DimPlot(jansky, group.by='final_annotation'),  DimPlot(jansky, group.by='Annotation'))
+```
+
+
+```{r fig.height=5, fig.width=12}
+jansky_imm <- subset(jansky, Annotation == 'Immune_cells') %>% 
+  NormalizeData() %>% 
+  FindVariableFeatures() %>% 
+  ScaleData() %>% 
+  RunPCA(verbose=FALSE) %>% 
+  RunHarmony(., 'SampleID',
+       lambda = 1, verbose = FALSE) %>% 
+  RunUMAP(reduction = "harmony", dims = 1:30, verbose=F, return.model=TRUE)
+
+jansky_imm <- jansky_imm %>% 
+  FindNeighbors(reduction = 'harmony') %>%
+  FindClusters(resolution = c(0.4, 0.5, 0.6, 0.7))
+plot_grid(DimPlot(jansky_imm, group.by='celltype_humatlas_main'),  DimPlot(jansky_imm, group.by='RNA_snn_res.0.4'), rel_widths = c(2, 1))
+```
+
+```{r fig.height=5, fig.width=16}
+Idents(jansky_imm) <- 'RNA_snn_res.0.4'
+markers <- FindAllMarkers(jansky_imm, only.pos = T)
+top5 <- markers %>%
+  dplyr::filter(pct.1 > 0.25) %>% 
+  dplyr::filter(!grepl("^Gm[0-9]", rownames(.))) %>% 
+  dplyr::filter(!grepl("Rik$", rownames(.))) %>% 
+  dplyr::filter(p_val_adj < 0.05) %>% 
+  group_by(cluster) %>%
+  top_n(n = 7, wt = avg_log2FC)
+
+DotPlot(jansky_imm, top5$gene %>% unique, cols = c('lightgrey', "#BA55D3FF")) +
+  RotatedAxis()
+```
+
+
+```{r fig.height=5, fig.width=12}
+new.cluster.ids <- c('0'='T_cells',
+                     '1'='Myeloid_cells',
+                     '2'='Neuroendocrine',
+                     '3'='Neuroendocrine',
+                     '4'='Neuroendocrine',
+                     '5'='unknown',
+                     '6'='Endothelial_cells'
+)
+
+jansky_imm <- RenameIdents(jansky_imm, new.cluster.ids)
+jansky_imm$Annotation <- Idents(jansky_imm)
+
+plot_grid(DimPlot(jansky_imm, group.by='final_annotation'),  DimPlot(jansky_imm, group.by='Annotation'))
+```
+
+```{r}
+jansky$Annotation <- as.character(jansky$Annotation)
+jansky_imm$Annotation <- as.character(jansky_imm$Annotation)
+jansky$Annotation[colnames(jansky_imm)] <- jansky_imm$Annotation
+
+DimPlot(jansky, group.by='Annotation')
+DimPlot(jansky, group.by='RNA_snn_res.0.1')
+```
+
+```{r fig.height=5, fig.width=12}
+keep_cells <- (
+  # Neuroendocrine cells predicted as malignant
+  (jansky$Annotation == "Neuroendocrine" & jansky$singler_labels == "malignant_cells") |
+  # Endothelial cells match
+  (jansky$Annotation == "Endothelial_cells" & jansky$singler_labels == "endothelial_cells") |
+  # Stromal cells match
+  (jansky$Annotation == "Stromal_cells" & jansky$singler_labels == "stromal_cells") |
+  # T cells match
+  (jansky$Annotation == "T_cells" & jansky$singler_labels == "t_cells") |
+  # B cells match
+  (jansky$Annotation == "B_cells" & jansky$singler_labels == "b_cells") |
+  # Myeloid cells match
+  (jansky$Annotation == "Myeloid_cells" & jansky$singler_labels == "myeloid_cells") |
+  (jansky$RNA_snn_res.0.1 == 3 & jansky$Annotation != "Neuroendocrine")
+)
+
+# Create filtered Seurat object
+jansky_filtered <- jansky[, keep_cells]
+
+plot_grid(DimPlot(jansky_filtered, group.by='celltype_humatlas_main'),  DimPlot(jansky_filtered, group.by='Annotation'), rel_widths = c(1.5, 1))
+```
+
+```{r}
+jansky <- jansky_filtered %>% 
+  subset(Annotation != 'unknown')
+```
+
+
+### Patel
+
+```{r fig.height=5, fig.width=12}
+samples <- sample_metadata %>% 
+           dplyr::filter(Treatment == 'naive') %>% 
+           dplyr::filter(Dataset == 'Patel2024') %>% 
+           .$Sample_dataset
+patel <- subset(sn, Study == 'patel') %>% 
+  NormalizeData() %>% 
+  FindVariableFeatures() %>% 
+  ScaleData() %>% 
+  RunPCA(verbose=FALSE) %>% 
+  RunHarmony(., 'SampleID',
+       lambda = 1, verbose = FALSE) %>% 
+  RunUMAP(reduction = "harmony", dims = 1:20, verbose=F, return.model=TRUE)
+
+patel <- patel %>% 
+  FindNeighbors(reduction = 'harmony') %>% 
+  FindClusters(resolution = c(0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7))
+plot_grid(DimPlot(patel, group.by='final_annotation'),  DimPlot(patel, group.by='RNA_snn_res.0.2'))
+```
+
+```{r}
+DimPlot(patel, group.by = 'celltype_humatlas_main_filt')
+```
+
+```{r fig.height=5, fig.width=16}
+Idents(patel) <- 'RNA_snn_res.0.2'
+markers <- FindAllMarkers(patel, only.pos = T)
+top5 <- markers %>%
+  dplyr::filter(pct.1 > 0.25) %>% 
+  dplyr::filter(!grepl("^Gm[0-9]", rownames(.))) %>% 
+  dplyr::filter(!grepl("Rik$", rownames(.))) %>% 
+  dplyr::filter(p_val_adj < 0.05) %>% 
+  group_by(cluster) %>%
+  top_n(n = 7, wt = avg_log2FC)
+
+DotPlot(patel, top5$gene %>% unique, cols = c('lightgrey', "#BA55D3FF")) +
+  RotatedAxis()
+
+DotPlot(patel, c('PHOX2B', 'PHOX2A', 'DBH', 'ALK', 'TH', 'ISL1', 'MPZ', 'PLP1', 'CDH19', 
+                     'CD2', 'CD3D', 'CD247', 'CD22', 'CD79A', 'PAX5',  'BANK1', 'GZMB', 'CD14',
+                     'CD68', 'MRC1', 'CD163', 'C7', 'COL1A1', 'LAMA2', 'COL3A1', 'VWF', 'CALCRL',
+                     'FLT1', 'ALB', 'CYP11A1'), cols = c('lightgrey', "#BA55D3FF")) +
+  RotatedAxis()
+```
+
+```{r fig.height=18, fig.width=14}
+FeaturePlot(patel, c('PHOX2B', 'PHOX2A', 'DBH', 'ALK', 'TH', 'ISL1', 'MPZ', 'PLP1', 'CDH19', 
+                     'CD2', 'CD3D', 'CD247', 'CD22', 'CD79A', 'PAX5',  'BANK1', 'GZMB', 'CD14',
+                     'CD68', 'MRC1', 'CD163', 'C7', 'COL1A1', 'LAMA2', 'COL3A1', 'VWF', 'CALCRL',
+                     'FLT1', 'ALB', 'CYP11A1'))
+```
+
+```{r fig.height=5, fig.width=12}
+new.cluster.ids <- c('0'='Neuroendocrine',
+                     '1'='Neuroendocrine',
+                     '2'='Neuroendocrine',
+                     '3'='Myeloid_cells',
+                     '4'='Neuroendocrine',
+                     '5'='Endothelial_cells',
+                     '6'='T_cells',
+                     '7'='Schwann_cells',
+                     '8'='Stromal_cells',
+                     '9'='B_cells',
+                     '10'='Endothelial_cells',
+                     '11'='unknown'
+)
+
+patel <- RenameIdents(patel, new.cluster.ids)
+patel$Annotation <- Idents(patel)
+
+plot_grid(DimPlot(patel, group.by='final_annotation'),  DimPlot(patel, group.by='Annotation'))
+```
+
+```{r fig.height=5, fig.width=12}
+keep_cells <- (
+  # Neuroendocrine cells predicted as malignant
+  (patel$Annotation == "Neuroendocrine" & patel$singler_labels == "malignant_cells") |
+  (patel$Annotation == "Schwann_cells" & patel$singler_labels == "malignant_cells") |
+  # Endothelial cells match
+  (patel$Annotation == "Endothelial_cells" & patel$singler_labels == "endothelial_cells") |
+  # Stromal cells match
+  (patel$Annotation == "Stromal_cells" & patel$singler_labels == "stromal_cells") |
+  # T cells match
+  (patel$Annotation == "T_cells" & patel$singler_labels == "t_cells") |
+  # B cells match
+  (patel$Annotation == "B_cells" & patel$singler_labels == "b_cells") |
+  # Myeloid cells match
+  (patel$Annotation == "Myeloid_cells" & patel$singler_labels == "myeloid_cells") 
+)
+
+# Create filtered Seurat object
+patel_filtered <- patel[, keep_cells]
+
+plot_grid(DimPlot(patel_filtered, group.by='celltype_humatlas_main_filt'),  DimPlot(patel_filtered, group.by='Annotation'), rel_widths = c(1.5, 1))
+```
+
+```{r}
+patel <- patel_filtered %>% 
+  subset(Annotation != 'unknown')
+```
+
+### Grossmann
+
+```{r fig.height=5, fig.width=12}
+# grossmann <- subset(sn, Study == 'grossmann') %>% 
+grossmann <- grossmann %>% 
+  subset(SampleID %in% c('CH_01_grossmann', 'CH_02_grossmann', 'CH_03_grossmann',
+                         'CH_04_grossmann', 'CH_05_grossmann', 'CH_06_grossmann',
+                         'CH_08_grossmann', 'CH_09_grossmann', 'CH_10_grossmann',
+                         'CH_12_grossmann', 'CH_14_grossmann', 'CH_16_grossmann',
+                         'CH_17_grossmann', 'CH_18_grossmann', 'CH_19_grossmann', 
+                         'CH_20_grossmann')) %>% 
+  NormalizeData() %>% 
+  FindVariableFeatures() %>% 
+  ScaleData() %>% 
+  RunPCA(verbose=FALSE) %>% 
+  RunHarmony(., 'SampleID',
+       lambda = 1, verbose = FALSE) %>% 
+  RunUMAP(reduction = "harmony", dims = 1:30, verbose=F, return.model=TRUE)
+
+grossmann <- grossmann %>% 
+  FindNeighbors(reduction = 'harmony') %>% 
+  FindClusters(resolution = 0.4)
+plot_grid(DimPlot(grossmann, group.by='final_annotation'),  DimPlot(grossmann, group.by='RNA_snn_res.0.4'))
+```
+
+```{r}
+DimPlot(grossmann, group.by = 'SampleID')
+```
+
+```{r fig.height=5, fig.width=16}
+Idents(grossmann) <- 'RNA_snn_res.0.4'
+markers <- FindAllMarkers(grossmann, only.pos = T)
+top5 <- markers %>%
+  dplyr::filter(pct.1 > 0.25) %>% 
+  dplyr::filter(!grepl("^Gm[0-9]", rownames(.))) %>% 
+  dplyr::filter(!grepl("Rik$", rownames(.))) %>% 
+  dplyr::filter(p_val_adj < 0.05) %>% 
+  group_by(cluster) %>%
+  top_n(n = 7, wt = avg_log2FC)
+
+DotPlot(grossmann, top5$gene %>% unique, cols = c('lightgrey', "#BA55D3FF")) +
+  RotatedAxis()
+
+DotPlot(grossmann, c('PHOX2B', 'PHOX2A', 'DBH', 'ALK', 'TH', 'ISL1', 'MPZ', 'PLP1', 'CDH19', 
+                     'CD2', 'CD3D', 'CD247', 'CD22', 'CD79A', 'PAX5',  'BANK1', 'GZMB', 'CD14',
+                     'CD68', 'MRC1', 'CD163', 'C7', 'COL1A1', 'LAMA2', 'COL3A1', 'VWF', 'CALCRL',
+                     'FLT1', 'ALB', 'CYP11A1'), cols = c('lightgrey', "#BA55D3FF")) +
+  RotatedAxis()
+```
+
+```{r fig.height=18, fig.width=14}
+FeaturePlot(grossmann, c('PHOX2B', 'PHOX2A', 'DBH', 'ALK', 'TH', 'ISL1', 'MPZ', 'PLP1', 'CDH19', 
+                     'CD2', 'CD3D', 'CD247', 'CD22', 'CD79A', 'PAX5',  'BANK1', 'GZMB', 'CD14',
+                     'CD68', 'MRC1', 'CD163', 'C7', 'COL1A1', 'LAMA2', 'COL3A1', 'VWF', 'CALCRL',
+                     'FLT1', 'ALB', 'CYP11A1'))
+```
+
+```{r fig.height=5, fig.width=12}
+new.cluster.ids <- c('0'='Neuroendocrine',
+                     '1'='Neuroendocrine',
+                     '2'='Immune_cells',
+                     '3'='Stromal_cells',
+                     '4'='Immune_cells',
+                     '5'='Neuroendocrine',
+                     '6'='Endothelial_cells',
+                     '7'='Neuroendocrine',
+                     '8'='Immune_cells',
+                     '9' ='Neuroendocrine',
+                     '10' ='Immune_cells'
+)
+
+grossmann <- RenameIdents(grossmann, new.cluster.ids)
+grossmann$Annotation <- Idents(grossmann)
+
+plot_grid(DimPlot(grossmann, group.by='final_annotation'),  DimPlot(grossmann, group.by='Annotation'))
+```
+
+```{r fig.height=5, fig.width=12}
+grossmann_imm <- subset(grossmann, Annotation == 'Immune_cells') %>% 
+  NormalizeData() %>% 
+  FindVariableFeatures() %>% 
+  ScaleData() %>% 
+  RunPCA(verbose=FALSE) %>% 
+  RunHarmony(., 'SampleID',
+       lambda = 1, verbose = FALSE) %>% 
+  RunUMAP(reduction = "harmony", dims = 1:30, verbose=F, return.model=TRUE)
+
+grossmann_imm <- grossmann_imm %>% 
+  FindNeighbors(reduction = 'harmony') %>% 
+  FindClusters(resolution = c(0.1, 0.2, 0.3, 0.4))
+plot_grid(DimPlot(grossmann_imm, group.by='celltype_humatlas_main'),  DimPlot(grossmann_imm, group.by='RNA_snn_res.0.3'), rel_widths = c(2, 1))
+```
+
+```{r fig.height=5, fig.width=16}
+Idents(grossmann_imm) <- 'RNA_snn_res.0.3'
+markers <- FindAllMarkers(grossmann_imm, only.pos = T)
+top5 <- markers %>%
+  dplyr::filter(pct.1 > 0.25) %>% 
+  dplyr::filter(!grepl("^Gm[0-9]", rownames(.))) %>% 
+  dplyr::filter(!grepl("Rik$", rownames(.))) %>% 
+  dplyr::filter(p_val_adj < 0.05) %>% 
+  group_by(cluster) %>%
+  top_n(n = 7, wt = avg_log2FC)
+
+DotPlot(grossmann_imm, top5$gene %>% unique, cols = c('lightgrey', "#BA55D3FF")) +
+  RotatedAxis()
+```
+
+
+```{r fig.height=5, fig.width=12}
+new.cluster.ids <- c('0'='T_cells',
+                     '1'='Neuroendocrine',
+                     '2'='T_cells',
+                     '3'='Myeloid_cells',
+                     '4'='B_cells',
+                     '5'='Myeloid_cells',
+                     '6'='Neuroendocrine',
+                     '7'='Neuroendocrine',
+                     '8'='unknown'
+)
+
+grossmann_imm <- RenameIdents(grossmann_imm, new.cluster.ids)
+grossmann_imm$Annotation <- Idents(grossmann_imm)
+
+plot_grid(DimPlot(grossmann_imm, group.by='final_annotation'),  DimPlot(grossmann_imm, group.by='Annotation'))
+```
+
+```{r}
+grossmann$Annotation <- as.character(grossmann$Annotation)
+grossmann_imm$Annotation <- as.character(grossmann_imm$Annotation)
+grossmann$Annotation[colnames(grossmann_imm)] <- grossmann_imm$Annotation
+
+DimPlot(grossmann, group.by='Annotation')
+DimPlot(grossmann, group.by='RNA_snn_res.0.3')
+```
+
+```{r}
+dt <-
+  table(grossmann$Annotation, grossmann$RNA_snn_res.0.3) %>% 
+  as.data.table %>% 
+  setNames(c('cell', 'cluster', 'N'))
+
+dt_dict <-
+  dt %>%
+    dplyr::group_by(cluster) %>%
+    dplyr::summarise(cell = cell[N == max(N)])
+
+deleted_cells = lapply(1:nrow(dt_dict), function(i){
+  
+  cluster = dt_dict[i,]$cluster
+  cell = dt_dict[i,]$cell
+  if (cluster != '2') {
+    mask1 = grossmann$RNA_snn_res.0.3 == cluster
+    mask2 = grossmann$Annotation != cell
+    cellname = names(grossmann$RNA_snn_res.0.3)  
+    return(cellname[mask1 & mask2])
+  }
+  else {
+    mask1 = grossmann$RNA_snn_res.0.3 == cluster
+    mask2 = !grossmann$Annotation %in% c('B_cells', 'T_cells')
+    cellname = names(grossmann$RNA_snn_res.0.3)  
+    return(cellname[mask1 & mask2])
+  }
+  
+}
+) %>% unlist
+
+grossmann_filtered <- grossmann[, !colnames(grossmann) %in% deleted_cells]
+grossmann_filtered <- subset(grossmann_filtered, RNA_snn_res.0.3 != '8')
+grossmann <- grossmann_filtered
+```
+
+```{r fig.height=5, fig.width=12}
+plot_grid(DimPlot(grossmann, group.by='RNA_snn_res.0.3'),  DimPlot(grossmann, group.by='Annotation'))
+```
+
+#### Asian
+
+```{r fig.height=5, fig.width=12}
+grossmann_ch11 <- subset(sn, SampleID %in% c('CH_11_grossmann')) %>% 
+  NormalizeData() %>% 
+  FindVariableFeatures() %>% 
+  ScaleData() %>% 
+  RunPCA(verbose=FALSE) %>% 
+  RunUMAP(dims = 1:30, verbose=F, return.model=TRUE)
+
+grossmann_ch11 <- grossmann_ch11 %>% 
+  FindNeighbors() %>% 
+  FindClusters(resolution = 0.4)
+plot_grid(DimPlot(grossmann_ch11, group.by='final_annotation'),  DimPlot(grossmann_ch11, group.by='RNA_snn_res.0.4'))
+
+grossmann_ch11 <- subset(grossmann_ch11, RNA_snn_res.0.4 %in% c(0, 1, 2, 3, 4))
+
+grossmann_ch11$Annotation <- 'Neuroendocrine'
+```
+
+
+```{r fig.height=5, fig.width=12}
+grossmann_ch13 <- subset(sn, SampleID %in% c('CH_13_grossmann')) %>% 
+  NormalizeData() %>% 
+  FindVariableFeatures() %>% 
+  ScaleData() %>% 
+  RunPCA(verbose=FALSE) %>% 
+  RunUMAP(dims = 1:30, verbose=F, return.model=TRUE)
+
+grossmann_ch13 <- grossmann_ch13 %>% 
+  FindNeighbors() %>% 
+  FindClusters(resolution = c(0.1, 0.2, 0.3, 0.4))
+plot_grid(DimPlot(grossmann_ch13, group.by='final_annotation'),  DimPlot(grossmann_ch13, group.by='RNA_snn_res.0.1'))
+
+grossmann_ch13 <- subset(grossmann_ch13, RNA_snn_res.0.1 %in% c(0, 1))
+
+grossmann_ch13$Annotation <- 'Neuroendocrine'
+```
+
+```{r}
+# grossmann <- merge(x = grossmann, y = c(grossmann_ch11, grossmann_ch13))
+qsave(grossmann, paste0(PREPRDATADIR, 'grossmann_ATLAS_minus11_13.qs'))
+```
+
+## sn integration
+
+```{r fig.height=5, fig.width=12}
+sn <- merge(x = grossmann,
+            y = c(bonine, jansky, patel))
+
+sn <- sn %>% 
+  NormalizeData() %>% 
+  FindVariableFeatures() %>% 
+  ScaleData() %>% 
+  RunPCA(verbose=FALSE) %>% 
+  RunHarmony(., 'SampleID',
+       lambda = 1, verbose = FALSE) %>% 
+  RunUMAP(reduction = "harmony", dims = 1:20, verbose=F, return.model=TRUE)
+
+plot_grid(DimPlot(sn, group.by='Annotation'),  DimPlot(sn, group.by='Study'))
+```
+
+```{r fig.height=5, fig.width=12}
+sn <- sn %>% 
+  FindNeighbors(reduction = 'harmony') %>% 
+  FindClusters(resolution = 0.5)
+plot_grid(DimPlot(sn, group.by='Annotation'),  DimPlot(sn, group.by='RNA_snn_res.0.2'))
+```
+
+```{r fig.height=5, fig.width=12}
+dt <-
+  table(sn$Annotation, sn$RNA_snn_res.0.2) %>% 
+  as.data.table %>% 
+  setNames(c('cell', 'cluster', 'N'))
+
+dt_dict <-
+  dt %>%
+    dplyr::group_by(cluster) %>%
+    dplyr::summarise(cell = cell[N == max(N)])
+
+deleted_cells = lapply(1:nrow(dt_dict), function(i){
+  
+  cluster = dt_dict[i,]$cluster
+  cell = dt_dict[i,]$cell
+  if (cluster != '3') {
+    mask1 = sn$RNA_snn_res.0.2 == cluster
+    mask2 = sn$Annotation != cell
+    cellname = names(sn$RNA_snn_res.0.3)  
+    return(cellname[mask1 & mask2])
+  }
+  else {
+    mask1 = sn$RNA_snn_res.0.2 == cluster
+    mask2 = !sn$Annotation %in% c('B_cells', 'Myeloid_cells')
+    cellname = names(sn$RNA_snn_res.0.2)  
+    return(cellname[mask1 & mask2])
+  }
+  
+}
+) %>% unlist
+
+sn_filtered <- sn[, !colnames(sn) %in% deleted_cells]
+plot_grid(DimPlot(sn_filtered, group.by='Annotation'),  DimPlot(sn_filtered, group.by='RNA_snn_res.0.2'))
+# sn <- sn_filtered
+```
+
+```{r}
+qsave(sn, paste0(PREPRDATADIR, 'sn_ATLAS.qs'))
+sn <- qread(paste0(PREPRDATADIR, 'sn_ATLAS.qs'))
+```
+
+# Integration
+
+```{r}
+atlas <- merge(sc, sn)
+
+atlas <- atlas %>% 
+  NormalizeData() %>% 
+  FindVariableFeatures() %>% 
+  ScaleData() %>% 
+  RunPCA(verbose=FALSE) %>% 
+  RunHarmony(., 'SampleID',
+       lambda = 1, verbose = FALSE) %>% 
+  RunUMAP(reduction = "harmony", dims = 1:30, verbose=F, return.model=TRUE)
+```
+
+```{r fig.height=4, fig.width=12}
+plot_grid(DimPlot(atlas, group.by='Annotation', cols = my_colors),  DimPlot(atlas, group.by='Study', cols = my_colors))
+```
+
+```{r}
+qsave(atlas, paste0(PREPRDATADIR, 'ATLAS_object.qs'))
+atlas <- qread(paste0(PREPRDATADIR, 'ATLAS_object.qs'))
+```
+
+# Metadata
+
+```{r metadata, include=FALSE}
+sc$sex <- sample_metadata[sc$SampleID,]$Sex
+sc$less18M <- sample_metadata[sc$SampleID,]$less18M
+
+sn$SampleID_2 <- gsub("_rep[0-9]+", "", sn$SampleID)
+sn$SampleID_2 <- gsub("(_sn|_[0-9]+)$", "", sn$SampleID_2)
+sn$sex <- sample_metadata[sn$SampleID_2,]$Sex
+sn$less18M <- sample_metadata[sn$SampleID_2,]$less18M
+```
+
+# Gene expression
+
+```{r}
+plot_gene_forest <- function(sc_obj, sn_obj, gene) {
+  # Function to process one Seurat object
+  process_seurat <- function(seu_obj, data_type) {
+    # Check if gene exists in the dataset
+    if (!gene %in% rownames(seu_obj)) {
+      stop(sprintf("Gene %s not found in the %s dataset", gene, data_type))
+    }
+    
+    # Get gene expression for all cells
+    expr_values <- GetAssayData(seu_obj, slot = "data")[gene,]
+    
+    # Create data frame with cell-level expression and metadata
+    expr_df <- data.frame(
+      Expression = expr_values,
+      SampleID = seu_obj$SampleID,
+      less18M = seu_obj$less18M,
+      Study = seu_obj$Study
+    )
+    
+    # Calculate mean and standard error per sample
+    expr_summary <- expr_df %>%
+      group_by(SampleID, less18M, Study) %>%
+      summarize(
+        mean_expr = mean(Expression),
+        se = sd(Expression) / sqrt(n()),
+        n_cells = n(),
+        .groups = 'drop'
+      )
+    
+    # Create forest plot
+    p <- ggplot(expr_summary, aes(x = reorder(SampleID, mean_expr), 
+                                 y = mean_expr, 
+                                 color = less18M)) +
+      geom_point(size = 3) +
+      geom_errorbar(aes(ymin = mean_expr - se, ymax = mean_expr + se), width = 0.2) +
+      scale_color_manual(values = c("#6495EDFF", "#FF69B4FF")) +
+      facet_wrap(~Study, scales = "free", ncol=1) +  # Changed to facet_wrap with free scales
+      theme_bw() +
+      theme(
+        axis.text.y = element_text(size = 8),
+        axis.text.x = element_text(angle = 45, hjust = 1),
+        plot.title = element_text(hjust = 0.5),
+        strip.text = element_text(size = 10, face = "bold"),
+        strip.background = element_rect(fill = "white"),
+        panel.spacing = unit(1, "lines")
+      ) +
+      labs(
+        title = sprintf("%s Expression (%s)", gene, data_type),
+        subtitle = sprintf("Range: %d-%d", min(expr_summary$n_cells), max(expr_summary$n_cells)),
+        y = "Average Expression",
+        x = "Sample ID",
+        color = "Less than 18M reads"
+      ) +
+      coord_flip()
+    
+    return(p)
+  }
+  
+  # Generate plots for both datasets
+  sc_plot <- process_seurat(sc_obj, "Single Cell")
+  sn_plot <- process_seurat(sn_obj, "Single Nucleus")
+  
+  # Combine plots
+  combined_plot <- plot_grid(
+    sc_plot, sn_plot,
+    ncol = 2,
+    rel_widths = c(1, 1),
+    align = "h",
+    labels = c("A", "B")
+  )
+  
+  return(list(combined_plot, sc_plot))
+}
+```
+
+```{r fig.height=15, fig.width=12}
+result <- plot_gene_forest(subset(sc, Annotation == 'Myeloid_cells'), sn, "S100A9")
+result2 <- plot_gene_forest(subset(sc, Annotation == 'Myeloid_cells'), sn, "S100A8")
+plot_grid(result2[[2]], result[[2]])
+```
+
+# InferCNV
+
+```{r}
+process_malignant_status <- function(sample_id) {
+  # Load the inferCNV object
+  infercnv_path <- paste0(PREPRDATADIR, 'infercnv_ATLAS/objects/infercnv_results_', sample_id, '.qs')
+  
+  if (!file.exists(infercnv_path)) {
+    print(paste("No results file found for sample:", sample_id))
+    return(NULL)
+  }
+  
+  infercnv_obj <- qread(infercnv_path)
+  
+  # Calculate CNV scores from expression data
+  expr_data <- infercnv_obj@expr.data
+  cnv_scores <- colMeans(abs(expr_data - 1))
+  
+  # Calculate threshold using mean + 2*SD
+  score_threshold <- mean(cnv_scores) + 2 * sd(cnv_scores)
+  
+  # Determine malignant status
+  is_malignant <- cnv_scores > score_threshold
+  
+  # Create results data frame
+  results <- data.frame(
+    cell = colnames(expr_data),
+    cnv_score = cnv_scores,
+    is_malignant = is_malignant
+  )
+  
+  return(results)
+}
+```
+
+```{r}
+# Process all samples
+print("Processing samples...")
+sample_files <- list.files(paste0(PREPRDATADIR, 'infercnv_ATLAS/objects/'), 
+                          pattern = "infercnv_results_.*\\.qs$")
+sample_ids <- gsub("infercnv_results_|\\.qs$", "", sample_files)
+
+# Initialize vectors for all cells
+all_scores <- c()
+all_malignant <- c()
+
+# Process each sample
+for(sample_id in sample_ids) {
+  print(paste("Processing sample:", sample_id))
+  results <- process_malignant_status(sample_id)
+  
+  if(!is.null(results)) {
+    # Add results to vectors
+    all_scores[results$cell] <- results$cnv_score
+    all_malignant[results$cell] <- results$is_malignant
+  }
+}
+```
+
+```{r}
+# First, let's create a mapping between cell names and sample IDs from atlas
+atlas_cell_to_sample <- setNames(atlas$SampleID, colnames(atlas))
+
+# Standardize cell names using the sample mapping
+process_cells <- function(cell_names, is_atlas = FALSE) {
+  if(is_atlas) {
+    # For atlas cells, use the actual SampleID
+    sample_id <- atlas_cell_to_sample[cell_names]
+    barcode <- cell_names %>% str_extract("^.*_([ACTG]+)[\\.-]1", group = 1)
+    barcode = ifelse(is.na(barcode),
+                     cell_names %>% str_extract('^.*_([A-Z][0-9]+)', group = 1), # wienke
+                     barcode)
+    barcode = ifelse(is.na(barcode),
+                     cell_names %>% str_extract('^.*_([ATGC]+)_[0-9]+', group = 1), # jansky 
+                     barcode)
+  } else {
+    # For inferCNV cells
+    sample_id <- cell_names %>% str_extract('^(.*)_[ACTG]+[\\.-]1', group = 1)
+    #barcode <- gsub("^.*_", "", cell_names) %>%
+     #          gsub("[\\.-][0-9]$", "", .)
+    barcode <- cell_names %>% str_extract("^.*_([ACTG]+)[\\.-]1", group = 1)
+  }
+  
+  return(data.frame(
+    original_name = cell_names,
+    sample_id = sample_id,
+    barcode = barcode,
+    stringsAsFactors = FALSE
+  ))
+}
+
+# Create cell name dictionaries
+print("Creating cell name dictionaries...")
+infercnv_dict <- process_cells(names(all_scores), is_atlas = FALSE)
+atlas_dict <- process_cells(colnames(atlas), is_atlas = TRUE)
+
+# Print sample of dictionaries to verify
+print("\nSample of inferCNV dictionary:")
+print(head(infercnv_dict))
+print("\nSample of atlas dictionary:")
+print(head(atlas_dict))
+
+# Find matching cells
+matches <- left_join(
+  atlas_dict,
+  infercnv_dict,
+  by = c("sample_id", "barcode")
+) %>%
+  setNames(colnames(.) %>% gsub('\\.y', '_infercnv', .) %>% gsub('\\.x', '_atlas', .))
+
+# Initialize with NA
+atlas$infercnv_score <- NA
+atlas$infercnv_malignant <- NA
+
+# Add scores using the matches
+atlas$infercnv_score[matches$original_name_atlas] <- all_scores[matches$original_name_infercnv]
+atlas$infercnv_malignant[matches$original_name_atlas] <- all_malignant[matches$original_name_infercnv]
+
+
+sum(!is.na(matches$original_name_infercnv))
+sum(!is.na(atlas$infercnv_score))
+
+atlas_dict %>% 
+  dplyr::filter(is.na(sample_id)) %>%
+  .$original_name %>%
+  tail
+
+atlas_dict$sample_id %>% unique
+infercnv_dict$sample_id %>% unique
+
+mask1 = atlas_dict$sample_id %in% infercnv_dict$sample_id
+mask2 = paste0(atlas_dict$sample_id, '_', atlas_dict$barcode) %in% paste0(infercnv_dict$sample_id, '_', infercnv_dict$barcode)
+
+mask1 %>% sum
+mask2 %>% sum
+
+dt = atlas_dict[mask1 & !mask2,]
+dt[dt$sample_id == 'Tumor_162_dong',]
+
+table(dt$sample_id)
+
+dt[dt$sample_id == 'Tumor_92_dong',]
+infercnv_dict[infercnv_dict$sample_id == 'Tumor_92_dong',]
+```
+
+```{r fig.height=4, fig.width=12}
+plot_grid(DimPlot(atlas, group.by='Annotation', cols = my_colors),  FeaturePlot(atlas, 'infercnv_score'))
+```
+

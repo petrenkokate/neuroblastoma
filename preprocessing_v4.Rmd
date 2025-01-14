@@ -1,0 +1,1130 @@
+---
+title: "preprocessing_v2"
+author: "Kate Petrenko"
+date: "2024-09-27"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+library(data.table)
+library(Seurat)
+library(scDblFinder)
+library(DoubletFinder)
+library(dplyr)
+library(remotes)
+# remotes::install_github("carmonalab/STACAS")
+library(STACAS)
+library(SingleR)
+# install.packages("scGate")
+library(scGate)
+library(ggplot2)
+library(BiocParallel)
+library(harmony)
+library(RColorBrewer)
+library(stringr)
+library(cowplot)
+library(scuttle)
+# install.packages("devtools")
+# BiocManager::install("Homo.sapiens")
+# BiocManager::install("jpmam1/scalop") #forked copy of a really good guy 
+# devtools::install_github("jlaffy/infercna")
+library(infercna)
+library(infercnv)
+library(parallel)
+library(future)
+library(clustree)
+library(dittoSeq)
+# install.packages("ggh4x")
+library(ggh4x)
+#BiocManager::install('EnhancedVolcano')
+library(EnhancedVolcano)
+library(clusterProfiler)
+library("org.Hs.eg.db")
+library(ReactomePA)
+library(msigdbr)
+# install.packages('qs')
+library(qs)
+library(DESeq2)
+library(magrittr)
+library(tibble)
+library(tidyr)
+library(pheatmap)
+# BiocManager::install('apeglm')
+# install.packages('ashr')
+
+library(reticulate)
+# install.packages('anndata')
+library(anndata)
+# devtools::install_github("cellgeni/sceasy")
+# BiocManager::install(c("LoomExperiment"))
+library(sceasy)
+library(SeuratData)
+```
+
+```{r global variables, include=FALSE}
+set.seed(100)
+DATADIR = '~/neuroblastoma/data/'
+WORKDIR = '~/neuroblastoma/'
+PREPRDATADIR = '~/neuroblastoma/preprocessing_data/'
+
+my_colors <- c("#9ACD32FF", "#4682B4FF",  "#DDA0DDFF", "#FFA07AFF", "#8FBC8BFF",
+               "#40E0D0FF",  "#F0E68CFF", "#5F9EA0FF", "#D2B48CFF",  
+               "#6495EDFF", "#FF69B4FF", "#BA55D3FF",  "#F08080FF", "#32CD32FF",  
+               "#FFDAB9FF",  "#87CEEBFF")
+```
+
+```{r download references, message=FALSE, warning=FALSE, include=FALSE}
+bped <- celldex::BlueprintEncodeData()
+hum_atlas_data <- celldex::HumanPrimaryCellAtlasData()
+s.genes <- cc.genes$s.genes
+g2m.genes <- cc.genes$g2m.genes 
+data(EnsemblGeneTable.Hs)
+scGate_models_DB <- get_scGateDB()
+```
+
+# Download data
+
+```{r read data, eval=FALSE, include=FALSE}
+#Dong2020
+group1_dong <- ReadMtx(paste0(DATADIR, 'Dong2020/Group1/Exp_data_UMIcounts1.mtx'),
+                       paste0(DATADIR,'Dong2020/Group1/Cells1.csv'), 
+                       paste0(DATADIR,'Dong2020/Group1/Genes1.txt'), 
+                       feature.column=1, skip.cell=1, cell.sep =',')
+group1_meta <- fread(paste0(DATADIR, 'Dong2020/Group1/Cells1.csv'), sep = ',')
+
+group2_dong <- ReadMtx(paste0(DATADIR, 'Dong2020/Group2/Exp_data_UMIcounts2.mtx'),
+                       paste0(DATADIR,'Dong2020/Group2/Cells2.csv'), 
+                       paste0(DATADIR,'Dong2020/Group2/Genes2.txt'), 
+                       feature.column=1, skip.cell=1, cell.sep =',')
+group2_meta <- fread(paste0(DATADIR, 'Dong2020/Group2/Cells2.csv'), sep = ',')
+
+create_matrices_from_mtx<- function(meta_data, data_matrix, variable_name) {
+  sample_names <- unique(meta_data$sample)
+  invisible(lapply(sample_names, function(sample_name) {
+    sample_cells <- meta_data[sample == sample_name, cell_name]
+    sample_matrix <- data_matrix[, sample_cells, drop = FALSE]
+    assign(paste0(sample_name, variable_name), sample_matrix, envir = .GlobalEnv)
+  }))
+}
+
+create_matrices_from_mtx(group1_meta, group1_dong, '_dong')
+create_matrices_from_mtx(group2_meta, group2_dong, '_dong')
+rm(group1_meta, group2_meta, group1_dong, group2_dong)
+
+#Jansky2021
+matrix_jansky <- ReadMtx(paste0(DATADIR, 'Jansky2021/Exp_data_UMIcounts.mtx'),
+                       paste0(DATADIR,'Jansky2021/Cells.csv'), 
+                       paste0(DATADIR,'Jansky2021/Genes.txt'), 
+                       feature.column=1, skip.cell=1, cell.sep =',')
+jansky_meta <- fread(paste0(DATADIR, 'Jansky2021/Cells.csv'), sep = ',')
+
+create_matrices_from_mtx(jansky_meta, matrix_jansky, '_jansky')
+rm(jansky_meta, matrix_jansky)
+
+#Verhoeven2022
+load_matrices <- function(directory, pattern_files, sep, pattern_find, pattern_name) {
+  file_names <- list.files(path = directory, pattern = pattern_files, full.names = TRUE)
+  matrices <- lapply(file_names, function(file) {
+    mat <- as.matrix(fread(file, sep = sep), rownames = 1)
+    assign(gsub(pattern_find, pattern_name, basename(file)), mat, envir = .GlobalEnv)
+  })
+}
+
+load_matrices(paste0(DATADIR, 'Verhoeven_GSE147766/'), "\\.csv$", sep=',', ".*_(NB\\d+).count.csv$", "\\1_verhoeven")
+```
+
+```{r}
+# grossman only because other were downloaded and preprocessed before in script preprocessing.Rmd and wienke in preprocessing_v2.Rmd
+
+# Get all HTA directories
+dirs <- list.files(path = paste0(DATADIR, 'Grossman'), 
+                  pattern = "^HTA", 
+                  full.names = TRUE,
+                  include.dirs = TRUE)
+
+# Read the mapping table
+sample_map <- read.csv(paste0(DATADIR, "Grossman/Grossman_str2.csv"))
+
+# Function to create Seurat object for one directory
+grossmann_read <- function(dir_path) {
+    # Extract directory name as biospecimen_id
+    biospecimen_id <- basename(dir_path)
+    
+    # Read the data
+    counts <- Read10X(data.dir = dir_path,
+                     gene.column = 1)
+    #change name of genes to Symbol
+    rownames(counts) <- stringr::str_remove(rownames(counts), "\\.[0-9]+$")
+    rownames(counts) <- mapIds(org.Hs.eg.db,
+                     keys = rownames(counts),
+                     column = "SYMBOL",
+                     keytype = "ENSEMBL")
+    counts <- counts[!is.na(rownames(counts)), ]
+    rownames(counts) <- make.unique(rownames(counts))
+    # Add SampleID to metadata using biospecimen_id mapping
+    SampleID <- paste0(
+        sample_map$Patient_No[match(biospecimen_id, sample_map$HTAN_biospecimen_id)],
+        "_grossmann"
+    )
+    invisible(assign(SampleID, counts, envir = .GlobalEnv))
+}
+
+lapply(dirs, grossmann_read)
+```
+
+```{r}
+# wienke data
+load_wienke_matrices <- function(directory, pattern_find="scR_CEL-Seq2(_\\d+)?", pattern_name="wienke") {
+  # Read data and metadata
+  data <- readRDS(paste0(directory, 'neuroblastoma_nectin2_tigit/objects/geneTxpTable.RDS'))
+  meta <- read.table(paste0(directory, 'neuroblastoma_nectin2_tigit/objects/metadataTable.txt'),
+                    header=TRUE, sep=" ", quote="\"", stringsAsFactors=FALSE)
+  
+  # Create mapping
+  plate_mapping <- meta$file_id_GEO
+  names(plate_mapping) <- rownames(meta)
+  
+  # Clean sample IDs
+  sample_ids <- gsub(pattern_find, pattern_name, plate_mapping)
+  sample_ids <- gsub("scR-CEL-Seq2(_\\d+)?", pattern_name, sample_ids)
+  
+  # Clean gene names
+  rownames(data) <- make.unique(gsub(".*--", "", rownames(data)))
+  
+  # Split data by sample
+  unique_samples <- unique(sample_ids)
+  invisible(lapply(unique_samples, function(sample) {
+    cells <- names(sample_ids)[sample_ids == sample]
+    mat <- data[, cells, drop=FALSE]
+    assign(sample, mat, envir=.GlobalEnv)
+  }))
+  
+}
+
+load_wienke_matrices(paste0(DATADIR, 'Wienke_data/'))
+```
+
+```{r}
+# olsen dataset
+load_olsen_matrices <- function(directory) {
+  # Define file pattern and mapping
+  file_pattern <- "GSM.*_NB\\d+\\.count\\.csv\\.gz$"
+  sample_mapping <- c(
+    "NB01" = "NB_01_olsen",
+    "NB02" = "NB_02_olsen",
+    "NB12" = "NB_12_olsen", 
+    "NB16" = "NB_16_olsen",
+    "NB17" = "NB_17_olsen",
+    "NB19" = "NB_19_olsen",
+    "NB21" = "NB_21_olsen",
+    "NB26" = "NB_26_olsen"
+  )
+  
+  # Get file paths
+  files <- list.files(path=directory, pattern=file_pattern, full.names=TRUE)
+  
+  # Read and process each file
+  invisible(lapply(files, function(file) {
+    # Extract NB number from filename
+    nb_id <- stringr::str_extract(basename(file), "NB\\d+")
+    # Read gzipped CSV
+    mat <- as.matrix(fread(file, sep=","), rownames=1)
+    # Assign to global environment with mapped name
+    assign(sample_mapping[nb_id], mat, envir=.GlobalEnv)
+  }))
+}
+
+# Usage
+load_olsen_matrices(paste0(DATADIR, "olsen2024_GSE147766/"))
+```
+
+```{r}
+# bonine dataset
+load_bonine_matrices <- function(directory) {
+  sample_mapping <- c(
+    "Bonine2023_cell_KDP02" = "NB_001_bonine",
+    "Bonine2023_cell_KDP06" = "NB_002_bonine",
+    "Bonine2023_CITE_CS202" = "NB_003_bonine_sc",
+    "Bonine2023_nucleus_CS210" = "NB_003_bonine_sn",
+    "Bonine2023_nucleus_NBO001" = "NB_004_bonine_1",
+    "Bonine2023_nucleus_NBO004" = "NB_004_bonine_2",
+    "Bonine2023_nucleus_NBO006" = "NB_006_bonine"
+  )
+
+  lapply(names(sample_mapping), function(sample_id) {
+    barcode_file <- list.files(directory, pattern=paste0(sample_id, "_barcodes.tsv.gz$"), full.names=TRUE)
+    features_file <- list.files(directory, pattern=paste0(sample_id, "_features.tsv.gz$"), full.names=TRUE)
+    matrix_file <- list.files(directory, pattern=paste0(sample_id, "_matrix.mtx.gz$"), full.names=TRUE)
+    
+    if(length(barcode_file) > 0 && length(features_file) > 0 && length(matrix_file) > 0) {
+      # Create temporary directory
+      temp_dir <- tempdir()
+      sample_dir <- file.path(temp_dir, sample_id)
+      dir.create(sample_dir, showWarnings=FALSE)
+      
+      # Copy files with standard 10x names
+      file.copy(barcode_file, file.path(sample_dir, "barcodes.tsv.gz"))
+      file.copy(features_file, file.path(sample_dir, "features.tsv.gz"))
+      file.copy(matrix_file, file.path(sample_dir, "matrix.mtx.gz"))
+      
+      mat <- Read10X(data.dir=sample_dir, gene.column=2)
+      invisible(assign(sample_mapping[sample_id], mat, envir=.GlobalEnv))
+      
+      # Cleanup
+      unlink(sample_dir, recursive=TRUE)
+    }
+    return(NULL)
+  })
+}
+
+load_bonine_matrices(paste0(DATADIR, "Bonine_GSE253865/"))
+
+```
+
+```{r}
+# patel dataset
+load_patel_matrices <- function(directory) {
+  # Get all sample directories
+  sample_dirs <- list.dirs(directory, full.names=TRUE, recursive=FALSE)
+  sample_dirs <- sample_dirs[!grepl("\\.(sh|txt)$", sample_dirs)]  # Exclude script files
+  
+  # Create sample name mapping
+  create_sample_name <- function(dir_name) {
+    htapp_num <- stringr::str_extract(basename(dir_name), "HTAPP-\\d+")
+    htapp_num <- gsub("-", "_", htapp_num)
+    return(paste0(htapp_num, "_patel"))
+  }
+  
+  # Function to read data using temporary directory
+  read_10x_with_temp <- function(data_dir, pattern_prefix) {
+    # Find the files
+    barcodes_file <- list.files(data_dir, pattern=paste0(pattern_prefix, ".*barcodes\\.tsv\\.gz$"), full.names=TRUE)[1]
+    features_file <- list.files(data_dir, pattern=paste0(pattern_prefix, ".*features\\.tsv\\.gz$"), full.names=TRUE)[1]
+    matrix_file <- list.files(data_dir, pattern=paste0(pattern_prefix, ".*matrix\\.mtx\\.gz$"), full.names=TRUE)[1]
+    
+    if(all(file.exists(barcodes_file, features_file, matrix_file))) {
+      # Create temporary directory
+      temp_dir <- file.path(tempdir(), basename(data_dir))
+      dir.create(temp_dir, showWarnings=FALSE, recursive=TRUE)
+      
+      # Copy files with standard names
+      file.copy(barcodes_file, file.path(temp_dir, "barcodes.tsv.gz"))
+      file.copy(features_file, file.path(temp_dir, "features.tsv.gz"))
+      file.copy(matrix_file, file.path(temp_dir, "matrix.mtx.gz"))
+      
+      # Read data
+      mat <- Read10X(data.dir=temp_dir, gene.column=2)
+      
+      # Clean up
+      unlink(temp_dir, recursive=TRUE)
+      
+      return(mat)
+    }
+    return(NULL)
+  }
+  
+  
+  for(sample_dir in sample_dirs) {
+    base_name <- create_sample_name(sample_dir)
+    sample_basename <- basename(sample_dir)
+    
+    # Check if channel2 exists to determine if we need rep suffixes
+    has_channel2 <- dir.exists(file.path(sample_dir, "channel2"))
+    
+    # Process channel1 (always exists)
+    channel1_dir <- file.path(sample_dir, "channel1")
+    mat1 <- read_10x_with_temp(channel1_dir, paste0(sample_basename, "_channel1"))
+    
+    if(!is.null(mat1)) {
+      if(has_channel2) {
+        # If there's a channel2, add rep1 suffix
+        sample_name <- paste0(base_name, "_rep1")
+      } else {
+        # If only channel1 exists, use base name
+        sample_name <- base_name
+      }
+      invisible(assign(sample_name, mat1, envir=.GlobalEnv))
+    }
+    
+    # Process channel2 if it exists
+    if(has_channel2) {
+      channel2_dir <- file.path(sample_dir, "channel2")
+      mat2 <- read_10x_with_temp(channel2_dir, paste0(sample_basename, "_channel2"))
+      
+      if(!is.null(mat2)) {
+        sample_name <- paste0(base_name, "_rep2")
+        invisible(assign(sample_name, mat2, envir=.GlobalEnv))
+      }
+    }
+  }
+
+}
+
+
+load_patel_matrices(paste0(DATADIR, "patel2024/"))
+```
+
+```{r create seurat list, eval=FALSE, include=FALSE}
+#create list of all samples
+all_samples <- ls()[!ls() %in% c("load_matrices", "create_matrices_from_mtx", "load_h5",
+                                 "load_wienke_matrices", "dirs", "grossmann_read", 
+                                 "my_colors", "sample_map", "load_olsen_matrices",
+                                 "load_bonine_matrices", "NB_003_bonine_sc", "load_patel_matrices",
+                               "DATADIR", "WORKDIR", "PREPRDATADIR", 'bped', 'g2m.genes',
+                               'EnsemblGeneTable.Hs', "s.genes", "sample_metadata",
+                               "scGate_models_DB", 'hum_atlas_data')]
+samples_list <- mget(all_samples)
+rm(list = ls()[!ls() %in% c("my_colors","DATADIR", "WORKDIR", "PREPRDATADIR", 'bped', 'g2m.genes',
+                     'EnsemblGeneTable.Hs', "s.genes", "sample_metadata",
+                     "scGate_models_DB", 'hum_atlas_data', 'samples_list')])
+gc()
+seu_list <- lapply(names(samples_list), function(sample_name) {
+  sample <- samples_list[[sample_name]]
+  print(sample_name)
+  seu <- CreateSeuratObject(counts = sample, min.cells = 3, min.features = 200)
+  seu$SampleID <- sample_name
+  return(seu)
+})
+
+names(seu_list) <- names(samples_list)
+```
+
+```{r}
+sample_metadata <- read.csv(paste0(DATADIR, 'samples_metadata_v5.csv'))
+sample_metadata[sample_metadata==""] <- NA
+
+rownames(sample_metadata) <- sample_metadata$Sample_dataset
+```
+
+# Preprocessing data
+
+```{r data review, echo=FALSE, message=TRUE, warning=TRUE}
+
+seu_list <- lapply(seu_list, function(seu){
+  print(unique(seu$SampleID))
+  
+  seu$percent_mito <- PercentageFeatureSet(seu, pattern = "^MT-")
+  seu$percent_ribo <- PercentageFeatureSet(seu, pattern = "^RP[SL]")
+  seu[["complexity"]] <- log10(seu$nFeature_RNA) / log10(seu$nCount_RNA)
+  message('Normalization is going on...')
+  seu <- seu %>% 
+    NormalizeData(verbose=F) %>% 
+    FindVariableFeatures(verbose=F) %>% 
+    ScaleData(vars.to.regress=c('nCount_RNA'), verbose=F) %>% 
+    RunPCA(verbose=F) %>% 
+    RunUMAP(dims = 1:20, verbose=F)
+  # identify doublets
+  # scDblFinder
+  message('scDblFinder is going on...')
+  sce <- as.SingleCellExperiment(seu)
+  sce <- scDblFinder(sce, dbr.sd=1, verbose=F)
+  seu[['scDblFinder.class']] <- sce$scDblFinder.class
+  # DoubletFinder
+  message('doubletFinder is going on...')
+  sweep.list <- paramSweep(seu, PCs = 1:10, sct = FALSE)
+  sweep.stats <- summarizeSweep(sweep.list, GT = FALSE)
+  bcmvn <- find.pK(sweep.stats)
+  pK <- bcmvn |>
+    arrange(desc(BCmetric))
+  pK <- pK[1, 'pK']
+  pK <- as.numeric(levels(pK[[1]]))[pK[[1]]]
+  nExp <- round(ncol(seu) * 0.03)
+  seu <- doubletFinder(seu, pN = 0.25, pK = pK, nExp = nExp, PCs = 1:10)
+  seu[['DoubletFinder.class']] <- seu@meta.data[, colnames(seu@meta.data)[grepl("DF.classification", colnames(seu@meta.data))]]
+  seu[[colnames(seu@meta.data)[grepl("DF.classification", colnames(seu@meta.data))]]] <- NULL
+  seu[[colnames(seu@meta.data)[grepl("pANN", colnames(seu@meta.data))]]] <- NULL
+  seu[['singlet']] <- ifelse(seu$scDblFinder.class=='doublet' & seu$DoubletFinder.class=='Doublet', 'no', 'yes')
+  
+  print(table(seu$singlet))
+  print(VlnPlot(seu, features = c("nFeature_RNA", "nCount_RNA", "percent_mito", "percent_ribo", "complexity"), ncol = 5) +
+          ggtitle(unique(seu$SampleID)))
+  
+  return(seu)
+})
+```
+
+```{r processing seurat list, eval=FALSE, include=FALSE}
+seu_list <- lapply(seu_list, function(seu) {
+  print(unique(seu$SampleID))
+  if(grepl("_rep", unique(seu$SampleID))) {
+    current_sample <- strsplit(unique(seu$SampleID), "_rep")[[1]][1]  # Handle replicate cases
+  }
+  else if(grepl("_bonine_", unique(seu$SampleID))) {
+    current_sample <- sub("_[^_]+$", "", unique(seu$SampleID))  # Handle bonine cases
+  }
+  else {current_sample = unique(seu$SampleID)}
+  # filter low-quality cells and doublets
+  method <- sample_metadata$Method[sample_metadata$Sample_dataset == current_sample]
+
+  # Apply filtering based on method
+  seu <- if(method == "sc") {
+    subset(seu, subset = nFeature_RNA > 200 & nFeature_RNA < 6000 & singlet == 'yes' & complexity > 0.8 & percent_mito < 25)
+  } else if(method == "sn") {
+    subset(seu, subset = nFeature_RNA > 200 & nFeature_RNA < 4000 & singlet == 'yes' & complexity > 0.8 & percent_mito < 10)
+  }
+  seu <- StandardizeGeneSymbols(seu, slot = 'counts', EnsemblGeneTable=EnsemblGeneTable.Hs)
+  seu <- seu%>%
+    NormalizeData() |>
+    FindVariableFeatures() |> 
+    CellCycleScoring(s.features = s.genes, g2m.features = g2m.genes)
+  seu$CC.Difference <- seu$S.Score - seu$G2M.Score
+  # Preliminary annotation
+  message('SingleR is going...')
+  pred_bped_main <- SingleR(test = as.SingleCellExperiment(seu), ref = hum_atlas_data, labels = hum_atlas_data$label.main, BPPARAM=MulticoreParam(30))
+  seu[['celltype_humatlas_main']] <- pred_bped_main$pruned.labels
+  pred_bped_fine <- SingleR(test = as.SingleCellExperiment(seu), ref = hum_atlas_data, labels = hum_atlas_data$label.fine, BPPARAM=MulticoreParam(30))
+  seu[['celltype_humatlas_fine']] <- pred_bped_fine$pruned.labels
+  # scGate
+  message('scGate is going...')
+  seu <- scGate(seu, model = scGate_models_DB$human$TME_HiRes, ncores = 30)
+})
+```
+
+# Merging
+
+```{r merge samples, eval=FALSE, include=FALSE}
+seu <- merge(x=seu_list[[1]], y=seu_list[2:length(seu_list)], add.cell.ids = names(seu_list))
+rm(seu_list)
+seu$scGate_multi[is.na(seu$scGate_multi)] <- 'unknown'
+seu$celltype_humatlas_main[is.na(seu$celltype_humatlas_main)] <- 'unknown'
+seu$celltype_humatlas_fine[is.na(seu$celltype_humatlas_fine)] <- 'unknown'
+```
+
+```{r metadata load, include=FALSE}
+seu$sex <- sample_metadata[seu$SampleID,]$Sex
+seu$less18M <- sample_metadata[seu$SampleID,]$less18M
+seu$Survival.Death <- sample_metadata[seu$SampleID,]$Survival.Death
+seu$Site <- sample_metadata[seu$SampleID,]$Site
+seu$INSS_stage <- sample_metadata[seu$SampleID,]$INSS_stage
+seu$Treatment <- sample_metadata[seu$SampleID,]$Treatment
+seu$Method <- sample_metadata[seu$SampleID,]$Method
+
+seu$Study <- sapply(str_split(seu$SampleID, "_"), function(x) {
+  if (length(x) == 2) {
+    return(x[2])
+  } else if (length(x) == 3) {
+    return(x[3])
+  } else {
+    return(NA)
+  }
+})
+```
+
+
+```{r eval=FALSE, include=FALSE}
+cells_names <- table(seu$celltype_humatlas_main) %>% 
+  as.data.frame %>% 
+  filter(Freq > 50) 
+
+seu$celltype_humatlas_main_filt <- ifelse(seu$celltype_humatlas_main %in% cells_names[,1],
+                                          seu$celltype_humatlas_main, "unknown")
+
+qsave(seu, paste0(PREPRDATADIR, 'seu_list_preproc_ATLAS_v1.rds'))
+```
+
+# inferCNV
+
+```{r CNV, include=FALSE}
+# When using infercnv::run(), set 'cutoff=0.1' with 10xGenomics data, instead of the default (1) we tend to use with smartSeq2 and less sparse data.
+options(scipen = 100)
+options(bitmapType="Xlib")
+options(bitmapType='cairo')
+plan("sequential")
+
+calculate_cnv <- function(sample) {
+  
+  seu_obj <- subset(seu, SampleID == sample)
+  print(paste(sample, 'is going on...'))
+  
+  # prepare annotation file
+  cell_annotations <- seu_obj$celltype_humatlas_main_filt
+  
+  # Create a data frame with cell names and their annotations
+  annotation_df <- data.frame(
+    CellName = names(cell_annotations),
+    CellType = cell_annotations,
+    stringsAsFactors = FALSE) %>% 
+    mutate(CellType = ifelse(CellType %in% c("Neurons", "Neuroepithelial_cell", "unknown"), 
+                             "malignant", CellType))
+    
+  malignant_count <- sum(annotation_df$CellType == "malignant")
+  
+  if (malignant_count < 2) {
+    print(paste(sample, 'SKIPPED'))
+    return(NULL)
+  }
+  
+  # Count the number of cells in each CellType
+  cell_type_counts <- annotation_df %>%
+    group_by(CellType) %>%
+    summarise(Count = n())
+  
+  # Find cell types with fewer than 2 cells
+  small_cell_types <- cell_type_counts %>%
+    filter(Count < 10) %>%
+    pull(CellType)
+  
+  # Update CellType to "unknown" for small cell types
+  annotation_df <- annotation_df %>%
+    mutate(CellType = ifelse(CellType %in% small_cell_types, "unknown", CellType))
+  
+  write.table(annotation_df, paste0(WORKDIR, "refs/", sample, "_annotation_file.txt"), 
+              sep = "\t", quote = FALSE, row.names = FALSE, col.names = FALSE)
+
+  cell_annotations <- annotation_df$CellType %>% unique() 
+  cell_annotations <- cell_annotations[!cell_annotations %in% c("malignant", "unknown")]
+  
+  # create the infercnv object
+  infercnv_obj = try(CreateInfercnvObject(raw_counts_matrix=seu_obj[["RNA"]]$counts %>% as.matrix(),
+                                      annotations_file=paste0(WORKDIR, "refs/", sample, "_annotation_file.txt"),
+                                      delim="\t",
+                                      gene_order_file=paste0(WORKDIR, 'refs/gencode_v19_gene_pos.txt'),
+                                      ref_group_names=cell_annotations))
+  
+  # perform infercnv operations to reveal cnv signal
+  infercnv_obj = try(infercnv::run(infercnv_obj,
+                               cutoff=0.1,  # use 1 for smart-seq, 0.1 for 10x-genomics
+                               out_dir=paste0(PREPRDATADIR, 'infercnv/', sample),  # dir is auto-created for storing outputs
+                               cluster_by_groups=F,   # cluster
+                               plot_steps = T,
+                               num_ref_groups = length(cell_annotations),
+                               analysis_mode='subclusters',
+                               denoise=T,
+                               HMM=T,
+                               num_threads = 40,
+                               png_res = 300,
+                               write_expr_matrix = T
+                               ) )
+  
+  return(infercnv_obj)
+  
+}
+
+infercnv_list <- lapply(seu$SampleID %>% unique, calculate_cnv)
+
+saveRDS(infercnv_list, paste0(PREPRDATADIR, 'infercnv_list_grossman.rds'))
+```
+
+```{r cnv score, eval=FALSE, include=FALSE}
+seu <- qread(paste0(PREPRDATADIR, 'seu_list_preproc_grossman.qs'))
+infercnv_list <- qread(paste0(PREPRDATADIR, 'infercnv_list_grossman.qs'))
+# Define the function to calculate CNV score
+calculate_cnv_score <- function(cell_data, reference_data) {
+  return(sum(abs(cell_data - reference_data)))
+}
+
+cnv_scores_allsamples <- function(sample) {
+  
+  obs_file <- paste0(PREPRDATADIR, 'infercnv/', sample, '/infercnv.observations.txt')
+  ref_file <- paste0(PREPRDATADIR, 'infercnv/', sample, '/infercnv.references.txt')
+  if (file.exists(obs_file) & file.exists(ref_file)) {
+    observations <- read.table(obs_file, header = TRUE) %>% as.matrix()
+    references <- read.table(ref_file, header = TRUE)  %>% as.matrix()
+
+    # Calculate CNV scores
+    reference_means <- rowMeans(references)
+    cnv_scores <- apply(observations, 2, calculate_cnv_score, reference_data = reference_means)
+
+    # Define a threshold for CNV score to identify malignant cells
+    threshold <- quantile(cnv_scores, 0.9)
+    malignant_cells <- names(cnv_scores[cnv_scores > threshold])
+    return(malignant_cells)
+  } 
+  else {
+    return(NULL)
+  }
+}
+
+cnv_scores_list <- mclapply(unique(seu$SampleID), cnv_scores_allsamples, mc.cores = 20)
+
+# Remove NULL entries and combine results
+cnv_scores_list <- cnv_scores_list[!sapply(cnv_scores_list, is.null)]
+all_malignant_cells <- unlist(cnv_scores_list)
+seu$infercnv_result <- "non-malignant"  # Set default as non-malignant
+all_malignant_cells <- gsub("\\.1$", "-1", all_malignant_cells)
+seu$infercnv_result[all_malignant_cells] <- 'malignant'
+# infercnv_list[[1]]@tumor_subclusters$subclusters
+```
+
+
+```{r infercnv plot, echo=FALSE}
+seu <- seu %>% 
+    NormalizeData(verbose=F) %>% 
+    FindVariableFeatures(verbose=F) %>% 
+    ScaleData(verbose=F) %>% 
+    RunPCA(verbose=F) 
+seu <- seu %>% 
+    RunUMAP(dims = 1:30, verbose=F)
+
+DimPlot(seu, group.by='infercnv_result') +
+  scale_color_manual(values = c('#FF69B4FF', 'grey')) +
+  ggtitle('inferCNV')
+```
+
+```{r}
+DimPlot(seu, group.by='celltype_humatlas_main_filt') +
+  ggtitle('inferCNV')
+```
+
+
+# Annotation
+
+```{r}
+
+annotate <- function(sample) {
+  
+  seu <- subset(seu, SampleID == sample) %>% 
+    NormalizeData() %>%
+    FindVariableFeatures()%>%
+    ScaleData() %>%
+    RunPCA() %>% 
+    RunUMAP(dims = 1:20) %>%
+    FindNeighbors(dims = 1:20) %>%
+    FindClusters(resolution = 1.5)
+  
+  sce <- as.SingleCellExperiment(seu)
+  colLabels(sce) <- seu$RNA_snn_res.1.5
+  Idents(seu) <- 'RNA_snn_res.1.5'
+  
+  # #cluster-wise annotation
+  pred_bped_main <- SingleR(test = sce, ref = hum_atlas_data, clusters=colLabels(sce),
+                            labels = hum_atlas_data$label.main, BPPARAM=MulticoreParam(30))
+  # # Create a named vector for RenameIdents
+  singleR_labels <- pred_bped_main$pruned.labels
+  names(singleR_labels) <- rownames(pred_bped_main)
+  
+  # Update cluster identities in Seurat object based on SingleR results
+  seu <- RenameIdents(seu, singleR_labels)
+  seu[['SingleR_labels']] <- Idents(seu)
+  
+  # define immune cells
+  seu <- scGate(seu, model = scGate_models_DB$human$TME_broad$Immune)
+  barcode_immune <- colnames(seu)[seu$is.pure == 'Pure']
+  
+  # define stromal cells
+  seu <- scGate(seu, model = scGate_models_DB$human$generic$Stromal)
+  barcode_stromal <- colnames(seu)[seu$is.pure == 'Pure']
+  seu <- scGate(seu, model = scGate_models_DB$human$generic$Endothelial)
+  barcode_endo <- colnames(seu)[seu$is.pure == 'Pure']
+  
+  # define malignant cells
+  # malignant_scGate_model <- gating_model(name = "Malignant", signature = c("CHGB","PHOX2B", "TH"))
+  malignant_scGate_model <- gating_model(name = "Malignant",
+                                         signature = c("MYCN","MLLT11", "SLC6A2"))
+  seu <- scGate(data = seu, model = malignant_scGate_model)
+  barcode_malignant <- unique(c(colnames(seu)[seu$is.pure == 'Pure'],
+                         colnames(seu)[seu$infercnv_result == 'malignant']))
+  
+  #define t-cells
+  seu <- scGate(seu, model = scGate_models_DB$human$generic$Tcell)
+  barcode_T <- colnames(seu)[seu$is.pure == 'Pure']
+  
+  seu <- scGate(seu, model = scGate_models_DB$human$generic$NK)
+  barcode_NK <- colnames(seu)[seu$is.pure == 'Pure']
+  
+  #define b-cells
+  seu <- scGate(seu, model = scGate_models_DB$human$generic$Bcell)
+  barcode_B <- colnames(seu)[seu$is.pure == 'Pure']
+  seu <- scGate(seu, model = scGate_models_DB$human$generic$PlasmaCell)
+  barcode_plasma <- colnames(seu)[seu$is.pure == 'Pure']
+  
+  #define myeloid cells
+  seu <- scGate(seu, model = scGate_models_DB$human$generic$Myeloid)
+  barcode_myeloid <- colnames(seu)[seu$is.pure == 'Pure']
+  
+  seu <- scGate(seu, model = scGate_models_DB$human$generic$Monocyte)
+  barcode_monocyte <- colnames(seu)[seu$is.pure == 'Pure']
+  
+  # Assign final labels
+  seu$final_labels <- "unknown"
+  seu$final_labels[colnames(seu) %in% barcode_T] <- "T_cells"
+  seu$final_labels[colnames(seu) %in% barcode_NK] <- "T_cells"
+  seu$final_labels[colnames(seu) %in% barcode_B] <- "B_cells"
+  seu$final_labels[colnames(seu) %in% barcode_plasma] <- "B_cells"
+  seu$final_labels[colnames(seu) %in% barcode_myeloid] <- "myeloid_cells"
+  seu$final_labels[colnames(seu) %in% barcode_monocyte] <- "myeloid_cells"
+  seu$final_labels[colnames(seu) %in% barcode_stromal] <- "stromal_cells"
+  seu$final_labels[colnames(seu) %in% barcode_endo] <- "endothelial_cells"
+  seu$final_labels[colnames(seu) %in% barcode_malignant] <- "malignant_cells"
+  
+  annot_comp <- c("DC" = 'myeloid_cells',
+                  "Smooth_muscle_cells" = "stromal_cells",
+                  "Epithelial_cells" = "stromal_cells",
+                  "B_cell" = "B_cells",
+                  "Neutrophils" = 'myeloid_cells',
+                  "T_cells" = "T_cells",
+                  "Monocyte" = 'myeloid_cells',
+                  "Erythroblast" = 'weird',
+                  "BM & Prog." = 'weird',
+                  "Endothelial_cells" = "endothelial_cells",
+                  "Gametocytes" = 'weird',
+                  "Neurons" = "malignant_cells",
+                  "Keratinocytes" = 'weird',
+                  "HSC_-G-CSF" = 'myeloid_cells',
+                  "Macrophage" = 'myeloid_cells',
+                  "NK_cell" = "T_cells",
+                  "Embryonic_stem_cells" = 'weird',
+                  "Tissue_stem_cells" = "stromal_cells", 
+                  "Chondrocytes" = 'weird',
+                  "Osteoblasts" = 'weird',
+                  "BM" = 'weird',
+                  "Platelets" = 'weird',
+                  "Fibroblasts" = "stromal_cells",
+                  "iPS_cells" = 'weird',
+                  "Hepatocytes" = 'weird',
+                  "MSC" = "stromal_cells",
+                  "Neuroepithelial_cell" = "malignant_cells",
+                  "Astrocyte" = "malignant_cells",
+                  "HSC_CD34+" = 'weird',
+                  "CMP" = 'myeloid_cells',
+                  "GMP" = 'myeloid_cells',
+                  "MEP" = 'weird',
+                  "Myelocyte" = 'myeloid_cells',
+                  "Pre-B_cell_CD34-" = "B_cells",
+                  "Pro-B_cell_CD34+" = "B_cells",
+                  "Pro-Myelocyte" = 'myeloid_cells',
+                  'unknown' = 'unknown')
+  
+  pred_bped_main$pruned.labels[is.na(pred_bped_main$pruned.labels)] <- 'unknown'
+  
+  pred_bped_main$pruned.labels <- annot_comp[as.character(pred_bped_main$pruned.labels)]
+  
+  final_annotation_df <- data.frame(cluster = rownames(pred_bped_main),
+                                    annotation = '-')
+  # Compare SingleR and scGate
+  for (i in rownames(pred_bped_main)) {
+    
+    if (table(seu$RNA_snn_res.1.5)[i] == 0) {
+      next
+    }
+    
+    cells_cluster <- seu[, colnames(seu) %in%  colnames(seu)[seu$RNA_snn_res.1.5 == i]]
+    SingleR_title <- pred_bped_main$pruned.labels[rownames(pred_bped_main) == i]
+    scGate_max <- names(which.max(table(cells_cluster$final_labels)))
+    scGate_max2 <- names(table(cells_cluster$final_labels) %>% sort(decreasing = T))[2]
+    scGate_max2 <- ifelse(is.na(scGate_max2), 'unknown', scGate_max2)
+    
+    if (scGate_max == SingleR_title & scGate_max != 'unknown') {
+      final_annotation_df$annotation[final_annotation_df$cluster == i] <- scGate_max
+    } else if (scGate_max2 == SingleR_title & scGate_max2 != 'unknown') {
+      final_annotation_df$annotation[final_annotation_df$cluster == i] <- scGate_max2
+    } else if (scGate_max == 'unknown' & SingleR_title != 'unknown') {
+      final_annotation_df$annotation[final_annotation_df$cluster == i] <- SingleR_title
+    } else if (scGate_max != 'unknown' & SingleR_title == 'unknown') {
+      final_annotation_df$annotation[final_annotation_df$cluster == i] <- scGate_max
+    } else if (scGate_max == 'stromal_cells' & SingleR_title == 'malignant_cells') {
+      final_annotation_df$annotation[final_annotation_df$cluster == i] <- SingleR_title
+    } else if (scGate_max == 'malignant_cells' & SingleR_title == 'stromal_cells') {
+      final_annotation_df$annotation[final_annotation_df$cluster == i] <- SingleR_title
+    } 
+    else {
+      final_annotation_df$annotation[final_annotation_df$cluster == i] <- 'unresolved'
+    }
+    
+  }
+  
+  final_annotation <- final_annotation_df$annotation
+  names(final_annotation) <- final_annotation_df$cluster
+  
+  Idents(seu) <- 'RNA_snn_res.1.5'
+  seu <- RenameIdents(seu, final_annotation)
+  seu[['ANNOTATION_FINAL']] <- Idents(seu)
+  
+  seu$immune_labels <- "unknown"
+  seu$immune_labels[colnames(seu) %in% barcode_immune] <- "immune"
+  
+  seu$malignant_labels <- "unknown"
+  seu$malignant_labels[colnames(seu) %in% barcode_malignant] <- "malignant"
+  return(seu)
+  
+}
+```
+
+```{r}
+annotated_samples <- mclapply(seu$SampleID %>% unique,
+                              annotate, mc.cores = 5)
+
+names(annotated_samples) <- seu$SampleID %>% unique
+
+qsave(annotated_samples, paste0(PREPRDATADIR, 'seu_list_mypipelineannot_grossman.qs'))
+```
+
+```{r}
+# annotated_samples <- qread(paste0(PREPRDATADIR, 'seu_list_mypipelineannot_grossman.qs'))
+lapply(annotated_samples, function(x) {
+  DimPlot(x, group.by='ANNOTATION_FINAL') +
+  ggtitle(x$SampleID %>% unique())
+  # DimPlot(x, group.by='immune_labels') +
+  #   ggtitle(x$SampleID %>% unique())
+  # DimPlot(x, group.by='malignant_labels') +
+  #   ggtitle(x$SampleID %>% unique())
+})
+
+annotated_samples$CH_18_grossman$ANNOTATION_FINAL <- 
+  gsub(pattern = 'stromal_cells',
+       replacement = 'malignant_cells',
+       x = annotated_samples$CH_18_grossman$ANNOTATION_FINAL)
+```
+
+```{r}
+lapply(annotated_samples, function(x) {
+  DimPlot(x, group.by='SingleR_labels') +
+  ggtitle(x$SampleID %>% unique())
+  # DimPlot(x, group.by='immune_labels') +
+  #   ggtitle(x$SampleID %>% unique())
+  # DimPlot(x, group.by='malignant_labels') +
+  #   ggtitle(x$SampleID %>% unique())
+})
+```
+
+```{r}
+lapply(annotated_samples, function(x) {
+  DimPlot(x, group.by='final_labels') +
+  ggtitle(x$SampleID %>% unique())
+  # DimPlot(x, group.by='immune_labels') +
+  #   ggtitle(x$SampleID %>% unique())
+  # DimPlot(x, group.by='malignant_labels') +
+  #   ggtitle(x$SampleID %>% unique())
+})
+```
+
+```{r}
+lapply(annotated_samples, function(x) {
+  table(x$ANNOTATION_FINAL)
+  # FeaturePlot(x, c("CHGB","PHOX2B", "TH"))
+  # DimPlot(x, group.by='immune_labels') +
+  #   ggtitle(x$SampleID %>% unique())
+  # DimPlot(x, group.by='malignant_labels') +
+  #   ggtitle(x$SampleID %>% unique())
+})
+```
+
+```{r}
+seu_new <- merge(annotated_samples[[1]], annotated_samples[-1])
+
+table(seu_new$ANNOTATION_FINAL)
+```
+
+```{r}
+table(seu$SampleID, seu$less18M)
+```
+
+# Create new seurat object with filtration by naive-treatment
+
+```{r}
+seu <- qread(paste0(PREPRDATADIR, 'seu_naivetreatment.qs'))
+sample_metadata <- read.csv(paste0(DATADIR, 'samples_metadata_v4.csv'))
+sample_metadata[sample_metadata==""] <- NA
+
+rownames(sample_metadata) <- sample_metadata$Sample_dataset
+naive_samples <- sample_metadata %>%
+                  dplyr::filter(Treatment == 'naive') %>%
+                  .$Sample_dataset
+
+seu <- subset(seu, subset = SampleID %in% naive_samples)
+seu <- merge(seu, seu_new)
+
+seu <- seu %>% 
+  NormalizeData() %>% 
+  FindVariableFeatures() %>% 
+  ScaleData() %>% 
+  RunPCA(verbose=FALSE)
+
+seu <- seu %>% 
+  RunHarmony(., 'SampleID',
+             lambda = 1, verbose = FALSE) %>% 
+  RunUMAP(reduction = "harmony", dims = 1:20, verbose=F) 
+
+seu <- subset(seu, ANNOTATION_FINAL %in% c("myeloid_cells", "B_cells", "T_cells",
+                                           "malignant_cells","stromal_cells", "endothelial_cells"))
+
+seu <- JoinLayers(seu)
+# qsave(seu, paste0(PREPRDATADIR, 'seu_naivetreatment_v2.qs'))
+seu <- qread(paste0(PREPRDATADIR, 'seu_naivetreatment_v2.qs'))
+seu %>% 
+  DimPlot(group.by='ANNOTATION_FINAL', cols = c("#9ACD32FF", "#FF69B4FF", "#DDA0DDFF", "#4682B4FF",  "#87CEEBFF", "#FFA07AFF")) +
+  ggtitle('Annotation') 
+seu %>% 
+  DimPlot(group.by='Study', cols = c("#9ACD32FF", "#FF69B4FF", "#DDA0DDFF", "#4682B4FF",  "#87CEEBFF")) +
+  ggtitle('Study')
+```
+
+# scVI integration
+
+```{r}
+seu <- qread(paste0(PREPRDATADIR, 'seu_naivetreatment_v2_scvi.qs'))
+
+```
+
+```{r}
+path_to_python <- "/tmp/RtmpWlYYFy/rstudio/terminal/python"
+use_python(path_to_python)
+sc <- import('scanpy', convert = FALSE)
+scvi <- import("scvi", convert = FALSE)
+torch <- import("torch")
+gpu_available <- torch$cuda$is_available()
+cat("GPU available:", gpu_available, "\n")
+```
+
+## Preprocessing
+
+```{r}
+seu[["RNA"]] <- as(seu[["RNA"]], "Assay")
+seu <- FindVariableFeatures(seu, selection.method = "vst", nfeatures = 2000)
+top2000 <- head(VariableFeatures(seu), 2000)
+seu2000 <- seu[top2000]
+seu2000[["RNA"]] <- as(seu2000[["RNA"]], "Assay")
+adata <- convertFormat(seu2000, from="seurat", to="anndata", main_layer="counts", drop_single_values=FALSE)
+print(adata) # Note generally in Python, dataset conventions are obs x var
+```
+
+```{r}
+scvi$settings$seed = 100L
+```
+
+## Set model
+
+```{r}
+adata$X = adata$X$tocsr()
+# run setup_anndata, use column Study for batch
+scvi$model$SCVI$setup_anndata(adata, batch_key = 'Study', continuous_covariate_keys = list('nFeature_RNA'))
+
+# create the model
+model = scvi$model$SCVI(adata, n_layers=2L, n_latent=30L, gene_likelihood="nb")
+```
+
+## Training
+
+```{r}
+# train the model
+model$train()
+
+# to specify the number of epochs when training:
+# model$train(max_epochs = as.integer(400))
+```
+
+## Add to seurat 
+
+```{r}
+SCVI_LATENT_KEY = "X_scVI"
+latent = model$get_latent_representation()
+```
+
+```{r}
+latent <- as.matrix(latent)
+rownames(latent) = colnames(seu)
+seu[["scvi"]] <- CreateDimReducObject(embeddings = latent, key = "scvi_", assay = DefaultAssay(seu))
+```
+
+## Visualization
+
+```{r}
+# Find clusters, then run UMAP, and visualize
+seu <- FindNeighbors(seu, dims = 1:30, reduction = "scvi")
+seu <- FindClusters(seu, resolution = 1)
+
+seu <- RunUMAP(seu, dims = 1:30, reduction = "scvi", n.components = 2)
+
+DimPlot(seu, reduction = "umap", pt.size = 1, group.by = 'ANNOTATION_FINAL')
+DimPlot(seu, reduction = "umap", pt.size = 1, group.by = 'Study')
+```
+
+# scANVI integration
+
+## Set model
+
+```{r}
+scanvi_model = scvi$model$SCANVI$from_scvi_model(
+    model,
+    adata=adata,
+    labels_key="ANNOTATION_FINAL",
+    unlabeled_category="Unknown"
+)
+```
+
+## Training
+
+```{r}
+scanvi_model$train(max_epochs=20L, n_samples_per_label=100L)
+```
+
+## Add to seurat 
+
+```{r}
+latent_scanvi = scanvi_model$get_latent_representation()
+```
+
+```{r}
+latent_scanvi <- as.matrix(latent_scanvi)
+rownames(latent_scanvi) = colnames(seu)
+seu[["scanvi"]] <- CreateDimReducObject(embeddings = latent_scanvi, key = "scanvi_", assay = DefaultAssay(seu))
+
+# qsave(seu, paste0(PREPRDATADIR, 'seu_naivetreatment_v2_scvi.qs'))
+```
+
+## Visualization
+
+```{r}
+# Find clusters, then run UMAP, and visualize
+seu <- FindNeighbors(seu, dims = 1:30, reduction = "scanvi")
+seu <- FindClusters(seu, resolution =1)
+
+seu <- RunUMAP(seu, dims = 1:30, reduction = "scanvi", n.components = 2)
+
+DimPlot(seu, reduction = "umap", pt.size = 1, group.by = 'ANNOTATION_FINAL')
+DimPlot(seu, reduction = "umap", pt.size = 1, group.by = 'Study')
+```
+
+# Different atlases
+
+```{r}
+seu <- qread(paste0(PREPRDATADIR, 'seu_naivetreatment_v2.qs'))
+sn <- subset(seu, Study %in% c('grossman', 'jansky'))
+```
+
+```{r}
+sc <- qread(paste0(PREPRDATADIR, 'sc_v1.qs'))
+sn <- qread(paste0(PREPRDATADIR, 'sn_v1.qs'))
+```
+
+## Single Cell
+
+```{r}
+sc <- subset(seu, Study %in% c('dong', 'verhoeven', 'wienke'))
+sc <- sc %>% 
+  NormalizeData() %>% 
+  FindVariableFeatures() %>% 
+  ScaleData() %>% 
+  RunPCA(verbose=FALSE)
+
+sc <- sc %>% 
+  RunHarmony(., 'SampleID',
+             lambda = 1, verbose = FALSE) %>% 
+  RunUMAP(reduction = "harmony", dims = 1:20, verbose=F) 
+
+DimPlot(sc, reduction = "umap", group.by = 'ANNOTATION_FINAL', cols = my_colors)
+DimPlot(sc, reduction = "umap", group.by = 'Study', cols = my_colors)
+```
+
+## Single Nuclei
+
+```{r}
+sn <- subset(seu, Study %in% c('grossman', 'jansky'))
+sn <- sn %>% 
+  NormalizeData() %>% 
+  FindVariableFeatures() %>% 
+  ScaleData() %>% 
+  RunPCA(verbose=FALSE)
+
+sn <- sn %>% 
+  RunHarmony(., 'Study',
+             lambda = 1, verbose = FALSE) %>% 
+  RunUMAP(reduction = "harmony", dims = 1:20, verbose=F) 
+
+DimPlot(sn, reduction = "umap", pt.size = 1, group.by = 'ANNOTATION_FINAL', cols = my_colors)
+DimPlot(sn, reduction = "umap", pt.size = 1, group.by = 'Study', cols = my_colors)
+```
+
+
+
