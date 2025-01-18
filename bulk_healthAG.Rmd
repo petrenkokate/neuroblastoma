@@ -24,6 +24,7 @@ library(tibble)
 library(magrittr)
 library(cowplot)
 library(pathview)
+library(qs)
 ```
 
 ```{r global variables, include=FALSE}
@@ -89,6 +90,9 @@ rownames(counts) <- genes
 condition <- factor(c(rep("Adult", 4), rep("Young", 4)))
 metadata <- data.frame(row.names = sample_names,
                       condition = condition)
+
+qsave(counts, paste0(PREPRDATADIR, 'counts_bulk_mice.qs'))
+qsave(metadata, paste0(PREPRDATADIR, 'metadata_bulk_mice.qs'))
 ```
 
 ```{r eval=FALSE, include=FALSE}
