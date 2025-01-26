@@ -183,6 +183,24 @@ qsave(bulk, paste0(PREPRDATADIR, 'bulk_replicates_ATLAS.qs'))
 
 ```{r}
 bulk <- qread(paste0(PREPRDATADIR, 'bulk_replicates_ATLAS.qs'))
+
+# Aggregate across replicates
+bulk_no_rep <- AggregateExpression(bulk,
+                                  return.seurat = TRUE, 
+                                  slot = "counts",
+                                  group.by = c("Annotation", "SampleID", "less18M"))
+
+# Metadata will be lost after aggregation, so add it back
+sample_metadata <- bulk@meta.data[!duplicated(bulk$SampleID), 
+                                 c("Sex", "MYCN_status", "method")]
+rownames(sample_metadata) <- unique(bulk$SampleID)
+bulk_no_rep@meta.data[, c("Sex", "MYCN_status", "method")] <- 
+  sample_metadata[bulk_no_rep$SampleID, ]
+
+# Set identity
+Idents(bulk_no_rep) <- "less18M"
+
+bulk <- bulk_no_rep
 ```
 
 ## EDA
@@ -260,8 +278,7 @@ fit_model <- function(bulk){
   # Create base metadata
   metadata <- data.frame(
     group = as.factor(bulk$less18M),
-    SampleID = bulk$SampleID,
-    rep = as.factor(bulk$rep)  # Always include rep initially
+    SampleID = bulk$SampleID
   )
   rownames(metadata) <- colnames(bulk)
   
@@ -271,14 +288,6 @@ fit_model <- function(bulk){
   # Check group levels
   if(length(unique(metadata$group)) < 2) {
     stop("Not enough groups for comparison (need both age groups present)")
-  }
-  
-  # Check rep levels
-  if(length(unique(metadata$rep)) > 1) {
-    design_parts <- c(design_parts, "rep")
-    print("Including rep in design matrix")
-  } else {
-    print("Only one replicate level, excluding from design")
   }
   
   # Add Sex if available and has multiple levels
@@ -1334,6 +1343,52 @@ for(ct in names(pathways_list)) {
 }
 ```
 
+## Enrichment map
+
+```{r fig.height=10, fig.width=10}
+library(enrichplot)
+create_emap <- function(enrichment_result, title) {
+  if(is.null(enrichment_result) || nrow(enrichment_result) == 0) {
+    return(NULL)
+  }
+  
+  edo <- pairwise_termsim(enrichment_result)
+  
+  p1 <- emapplot(edo, 
+                 layout.params = list(layout = "kk"),
+                 cex.params = list(category_node = 1.5),
+                 max.overlaps = 20) +
+    ggtitle(title) +
+    theme_minimal()
+  
+  return(p1)
+}
+
+# Create and save plots
+for(celltype in names(pathway_results)) {
+  if(!is.null(pathway_results[[celltype]])) {
+    tryCatch({
+      # GO enrichment map
+      go_emap <- create_emap(pathway_results[[celltype]]$go, 
+                           paste("GO Enrichment Map -", celltype))
+      if(!is.null(go_emap)) print(go_emap)
+      
+      # KEGG enrichment map
+      kegg_emap <- create_emap(pathway_results[[celltype]]$kegg,
+                             paste("KEGG Enrichment Map -", celltype))
+      if(!is.null(kegg_emap)) print(kegg_emap)
+      
+      # Reactome enrichment map  
+      reactome_emap <- create_emap(pathway_results[[celltype]]$reactome,
+                                 paste("Reactome Enrichment Map -", celltype))
+      if(!is.null(reactome_emap)) print(reactome_emap)
+    }, error = function(e) {
+      message(paste("Error in", celltype, ":", e$message))
+    })
+  }
+}
+```
+
 ## TF - Enrichment
 
 ```{r}
@@ -1480,20 +1535,23 @@ summarize_tf_results <- function(tf_results) {
 }
 ```
 
-```{r}
+```{r fig.height=12, fig.width=12}
 # Run the analysis
 tf_enrichment_results <- run_tf_enrichment_analysis(meta_analysis_results)
 
 # Get summary statistics
 tf_summary <- summarize_tf_results(tf_enrichment_results)
 
-tf_enrichment_results
+plots <- lapply(tf_enrichment_results, function(x) x$plot)
+plots <- plots[!sapply(plots, is.null)]
+
+plot_grid(plotlist = plots, ncol = 2)
 tf_summary
 ```
 
 ### Myeloid cells
 
-```{r}
+```{r fig.height=5, fig.width=9}
 # Extract and plot Reactome results for Myeloid cells
 if(!is.null(pathway_results[["Myeloid-cells"]]) && 
    !is.null(pathway_results[["Myeloid-cells"]]$reactome)) {
@@ -1618,9 +1676,54 @@ create_patient_heatmaps_genes(bulk, gene_symbols)
 ```
 
 ```{r}
+library(tidyverse)
+
+# Function to extract logFC and significance from results
+get_gene_stats <- function(results, dataset) {
+  de_table <- results$de_table
+  
+  data.frame(
+    gene = rownames(de_table),
+    logFC = de_table$logFC,
+    FDR = de_table$FDR,
+    dataset = dataset
+  ) %>%
+    filter(gene %in% gene_symbols)
+}
+
+# Combine data from all datasets
+plot_data <- bind_rows(
+  get_gene_stats(results$`Myeloid-cells`$grossmann, "Grossmann"),
+  get_gene_stats(results$`Myeloid-cells`$patel, "Patel"),
+  get_gene_stats(results$`Myeloid-cells`$bonine, "Bonine"),
+  get_gene_stats(results$`Myeloid-cells`$verhoeven, "Verhoeven"),
+  get_gene_stats(results$`Myeloid-cells`$dong, "Dong")
+)
+plot_data <- plot_data %>%
+ mutate(logFC_capped = case_when(
+   logFC > 2 ~ 2,
+   logFC < -2 ~ -2,
+   TRUE ~ logFC
+ ))
+# Create dotplot
+ggplot(plot_data, aes(x = gene, y = dataset)) +
+  geom_point(aes(color = logFC_capped), size = 5) +
+  scale_color_gradient2(low = "blue", mid = "white", high = "#FF69B4FF", midpoint = 0,
+                        limits = c(-2, 2)) +
+  geom_point(data = subset(plot_data, FDR < 0.05), 
+             shape = "*", size = 5, color = "black") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(x = "Genes", y = "Datasets", 
+       color = "Log2FC",
+       size = "-log10(FDR)") +
+  scale_size_continuous(range = c(1, 5))
+```
+
+```{r}
 meta_analysis_results$`Myeloid-cells` %>% 
   dplyr::filter(gene %in% gene_symbols) %>% 
-  dplyr::filter(FDR < 0.001)
+  dplyr::filter(FDR < 0.05)
 ```
 
 ```{r}
@@ -1643,7 +1746,7 @@ convert_human_to_mouse <- function(gene_list) {
 neutrophils.mouse <- convert_human_to_mouse(gene_symbols)[,2]
 ```
 
-```{r fig.height=7, fig.width=6}
+```{r fig.height=10, fig.width=6}
 mouse <- qread('~/Desktop/lab/neuroblastoma/data/seu_mouse.qs')
 
 Idents(mouse) <- 'age'
@@ -1655,7 +1758,7 @@ neutrophils_mouse_sig <- neutrophils_mouse_test %>%
   dplyr::filter(rownames(.) %in% neutrophils.mouse) %>% 
   dplyr::filter(p_val < 0.05)
 
-VlnPlot(subset(mouse, annotation == 'myeloid_cells'), features = neutrophils_mouse_sig %>% rownames(), group.by = 'annotation', split.by = 'age')
+VlnPlot(subset(mouse, annotation == 'myeloid_cells'), features = neutrophils_mouse_sig %>% rownames(), group.by = 'age')
 ```
 
 ```{r}
