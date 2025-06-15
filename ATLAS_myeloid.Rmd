@@ -1,0 +1,96 @@
+---
+title: "ATLAS_myeloid"
+author: "Kate Petrenko"
+date: "2025-04-03"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(data.table)
+library(Seurat)
+library(scDblFinder)
+library(DoubletFinder)
+library(dplyr)
+library(remotes)
+# remotes::install_github("carmonalab/STACAS")
+library(STACAS)
+library(SingleR)
+# install.packages("scGate")
+library(scGate)
+library(ggplot2)
+library(BiocParallel)
+library(harmony)
+library(RColorBrewer)
+library(stringr)
+library(cowplot)
+library(scuttle)
+# install.packages("devtools")
+# BiocManager::install("Homo.sapiens")
+# BiocManager::install("jpmam1/scalop") #forked copy of a really good guy 
+# devtools::install_github("jlaffy/infercna")
+library(infercna)
+library(infercnv)
+library(parallel)
+library(future)
+library(clustree)
+library(dittoSeq)
+# install.packages("ggh4x")
+library(ggh4x)
+#BiocManager::install('EnhancedVolcano')
+library(EnhancedVolcano)
+library(clusterProfiler)
+library("org.Hs.eg.db")
+library(ReactomePA)
+library(msigdbr)
+# install.packages('qs')
+library(qs)
+library(DESeq2)
+library(magrittr)
+library(tibble)
+library(tidyr)
+library(pheatmap)
+# BiocManager::install('apeglm')
+# install.packages('ashr')
+
+library(reticulate)
+# install.packages('anndata')
+library(anndata)
+# devtools::install_github("cellgeni/sceasy")
+# BiocManager::install(c("LoomExperiment"))
+library(sceasy)
+library(SeuratData)
+library(CellMentor)
+library(cluster)
+library(aricode)
+```
+
+```{r global variables, include=FALSE}
+set.seed(100)
+DATADIR = '~/neuroblastoma/data/'
+WORKDIR = '~/neuroblastoma/'
+PREPRDATADIR = '~/neuroblastoma/preprocessing_data/'
+
+my_colors <- c("#9ACD32FF", "#4682B4FF",  "#DDA0DDFF", "#FFA07AFF", "#8FBC8BFF",
+               "#40E0D0FF",  "#F0E68CFF", "#5F9EA0FF", "#D2B48CFF",  
+               "#6495EDFF", "#FF69B4FF", "#BA55D3FF",  "#F08080FF", "#32CD32FF",  
+               "#FFDAB9FF",  "#87CEEBFF")
+```
+
+```{r}
+ad <- import("anndata", convert = FALSE)
+atlas <- ad$read_h5ad("nba_integration/ATLAS_celltypist.h5ad")
+atlas <- SeuratDisk::Convert(atlas, to = "seurat")
+sceasy::convertFormat("nba_integration/ATLAS_celltypist.h5ad", from="anndata", to="seurat",
+                       outFile='atlas_python.rds')
+
+library(Seurat)
+library(reticulate)
+library(anndata)
+
+data <- read_h5ad("file_path/file.h5ad")
+data <- CreateSeuratObject(counts = t(as.matrix(atlas$X)), meta.data = atlas$obs)
+saveRDS(data,"file_path/file.rds")
+DimPlot(atlas, group.by = 'annotation')
+```
+

@@ -66,13 +66,14 @@ library(SeuratData)
 library(metafor)
 # install.packages('UpSetR')
 library(UpSetR)
+library(ggpubr)
 ```
 
 ```{r global variables, include=FALSE}
 set.seed(100)
-DATADIR = '~/Desktop/lab/neuroblastoma/data/'
-WORKDIR = '~/Desktop/lab/neuroblastoma/'
-PREPRDATADIR = '~/Desktop/lab/neuroblastoma/preprocessing_data/'
+DATADIR = '~/neuroblastoma/data/'
+WORKDIR = '~/neuroblastoma/'
+PREPRDATADIR = '~/neuroblastoma/preprocessing_data/'
 
 my_colors <- c("#9ACD32FF", "#4682B4FF",  "#DDA0DDFF", "#FFA07AFF", "#8FBC8BFF",
                "#40E0D0FF",  "#F0E68CFF", "#5F9EA0FF", "#D2B48CFF",  
@@ -105,6 +106,7 @@ atlas$less18M <- sample_metadata[clean_sample_id(atlas$SampleID),]$less18M
 atlas$Sex <- sample_metadata[clean_sample_id(atlas$SampleID),]$Sex
 atlas$MYCN_status <- sample_metadata[clean_sample_id(atlas$SampleID),]$MYCN
 atlas$method <- sample_metadata[clean_sample_id(atlas$SampleID),]$Method
+
 ```
 
 # Pseudobulk
@@ -224,6 +226,7 @@ extract_dataset <- function(sample_id) {
     return(NA)
   }
 }
+bulk_no_rep$dataset <- sapply(bulk_no_rep$SampleID, extract_dataset)
 ```
 
 ```{r fig.height=4, fig.width=12}
@@ -271,7 +274,6 @@ Bonine2024 - MYCN only
 Patel2024 - all
 
 ```{r}
-#TODO: write function to do deg by celltypes 
 fit_model <- function(bulk){
   counts <- GetAssayData(bulk, slot = "counts")
   
@@ -458,7 +460,7 @@ run_deg_analysis <- function(bulk) {
 
 ```{r fig.height=7, fig.width=7}
 # Run the analysis
-results <- run_deg_analysis(bulk)
+results <- run_deg_analysis(bulk_no_rep)
 ```
 
 ```{r}
@@ -602,6 +604,78 @@ plot_meta_results <- function(meta_results, celltype) {
 for(celltype in names(meta_analysis_results)) {
   print(plot_meta_results(meta_analysis_results[[celltype]], celltype))
 }
+```
+
+
+```{r fig.height=7, fig.width=7}
+rrr <- qread(paste0(PREPRDATADIR, 'DEG_ATLAS_pseudobulk_norep_results.qs'))
+for(celltype in names(rrr$meta_results)) {
+  print(EnhancedVolcano(rrr$meta_results[[celltype]],
+    lab = rep('', length(rownames(rrr$meta_results[[celltype]]))),
+    x = 'mean_logFC',
+    y = 'FDR',
+    col = c("grey30","#8FBC8BFF", "#6495EDFF", "#BA55D3FF"),
+    drawConnectors = TRUE,
+    pCutoff = 0.05, 
+    FCcutoff = 0.5,
+    max.overlaps = 100,
+    titleLabSize = 14, 
+    subtitleLabSize = 12,
+    captionLabSize = 12,
+    legendLabSize = 12,
+    legendIconSize = 3,
+    ylim = c(0, 7)
+) + labs(subtitle = "< 18 months vs > 18 months", title = celltype))
+}
+
+
+```
+
+```{r fig.height=7, fig.width=7}
+net_genes <- read.csv(paste0(DATADIR, 'net_genes.csv'))
+
+library(EnhancedVolcano)
+# Get your results data
+results_df <- rrr$meta_results$`Myeloid-cells`
+genes <- pathway_results[["Myeloid-cells"]]$reactome@result %>% 
+  dplyr::filter(ID == 'R-HSA-6798695') %>% 
+  .$core_enrichment %>% 
+  str_split('/') %>% 
+  .[[1]]
+
+# Convert ENTREZ IDs to gene symbols
+gene_symbols <- mapIds(org.Hs.eg.db, 
+                      keys = genes,
+                      column = "SYMBOL",
+                      keytype = "ENTREZID",
+                      multiVals = "first")
+# Create the label vector (same length as the data)
+label_vector <- ifelse(results_df$gene %in% c(net_genes$NETs.related.genes, 'S1008A8', 'S1008A9', gene_symbols),
+                       results_df$gene, "")
+
+# Now use it in EnhancedVolcano
+EnhancedVolcano(results_df,
+    lab = label_vector,
+    x = 'mean_logFC',
+    y = 'FDR',
+    col = c("grey30","#8FBC8BFF", "#6495EDFF", "#BA55D3FF"),
+    drawConnectors = TRUE,
+    pCutoff = 0.05, 
+    FCcutoff = 0.5,
+    max.overlaps = 100,
+    titleLabSize = 14, 
+    subtitleLabSize = 12,
+    captionLabSize = 12,
+    legendLabSize = 12,
+    legendIconSize = 3,
+    ylim = c(0, 7)
+) + labs(subtitle = "< 18 months vs > 18 months", title = 'Myeloid cells')
+```
+
+
+```{r eval=FALSE, include=FALSE}
+qsave(list(results = results,
+           meta_results = meta_analysis_results), paste0(PREPRDATADIR, 'DEG_ATLAS_pseudobulk_norep_results.qs'))
 ```
 
 ## Heatmaps
@@ -1129,6 +1203,11 @@ for(celltype in names(meta_analysis_results)) {
 }
 ```
 
+```{r fig.height=5, fig.width=8}
+library(enrichplot)
+gseaplot2(pathway_results$`Myeloid-cells`$reactome, geneSetID = 4:4, title = 'Neutrophil degranulation in myeloid cells')
+```
+
 ```{r}
 # Visualize pathway results for each cell type
 for(celltype in names(pathway_results)) {
@@ -1343,50 +1422,216 @@ for(ct in names(pathways_list)) {
 }
 ```
 
-## Enrichment map
+```{r}
+plots_list$`Myeloid-cells`
+```
 
-```{r fig.height=10, fig.width=10}
-library(enrichplot)
-create_emap <- function(enrichment_result, title) {
-  if(is.null(enrichment_result) || nrow(enrichment_result) == 0) {
+# IFN ab
+
+```{r}
+pathway_results$`Endothelial-cells`$reactome@result
+```
+
+```{r}
+genes <- pathway_results[["Endothelial-cells"]]$reactome@result %>% 
+  dplyr::filter(ID == 'R-HSA-1280215') %>% 
+  .$core_enrichment %>% 
+  str_split('/') %>% 
+  .[[1]]
+
+# Convert ENTREZ IDs to gene symbols
+gene_symbols <- mapIds(org.Hs.eg.db, 
+                      keys = genes,
+                      column = "SYMBOL",
+                      keytype = "ENTREZID",
+                      multiVals = "first")
+
+# Create forest plots for these genes
+forest_plots <- lapply(unname(gene_symbols), function(gene) {
+  plot <- create_forest_plot_custom(results, "Endothelial-cells", gene)
+  # Return the plot only if we got results
+  if(!is.null(plot)) {
+    return(plot$plot)
+  }
+  return(NULL)
+})
+
+# Remove NULL results
+forest_plots <- forest_plots[!sapply(forest_plots, is.null)]
+
+# Print the plots
+for(p in forest_plots) {
+  print(p)
+}
+```
+
+```{r}
+check_genes <- c('STAT1', 'STAT2',  'IFNA1', 'IFNA2', 'IFNB1', 'IRF7', 'MX1', 'IFIT1', 'OAS1',
+                  'CXCL10', 'CCL5', 'CSF2', 'IL15', 'ICAM1', 'VCAM1', 'VEGFA', 'VEGFB', 'TNFRSF1A',
+                 	'CXCL1', 'CXCL2', 'CCL3', 'IL10')
+for(gene in check_genes) {
+  plot_results <- create_forest_plot_custom(results, "Endothelial-cells", gene)
+  if(!is.null(plot_results)) {
+    print(plot_results$plot)
+  }
+}
+check_genes <- c('IL10')
+```
+
+```{r}
+gene_symbols <- c('IFNA1', 'IFNA2', 'IFNB1', 'IFNAR1', 'IFNAR2', 'STAT1', 'STAT2', 'IRF7',
+                  'MX1', 'OAS1', 'IFIT1')
+library(tidyverse)
+
+# Function to extract logFC and significance from results
+get_gene_stats <- function(results, dataset) {
+  de_table <- results$de_table
+  
+  data.frame(
+    gene = rownames(de_table),
+    logFC = de_table$logFC,
+    FDR = de_table$FDR,
+    dataset = dataset
+  ) %>%
+    filter(gene %in% gene_symbols)
+}
+
+# Combine data from all datasets
+plot_data <- bind_rows(
+  get_gene_stats(results$`Endothelial-cells`$grossmann, "Grossmann"),
+  get_gene_stats(results$`Endothelial-cells`$patel, "Patel")
+  # ,
+  # get_gene_stats(results$`Stromal-cells`$bonine, "Bonine"),
+  # get_gene_stats(results$`Stromal-cells`$verhoeven, "Verhoeven")
+  # ,
+  # get_gene_stats(results$`Stromal-cells`$dong, "Dong")
+)
+plot_data <- plot_data %>%
+ mutate(logFC_capped = case_when(
+   logFC > 2 ~ 2,
+   logFC < -2 ~ -2,
+   TRUE ~ logFC
+ ))
+# Create dotplot
+ggplot(plot_data, aes(x = gene, y = dataset)) +
+  geom_point(aes(color = logFC_capped), size = 5) +
+  scale_color_gradient2(low = "blue", mid = "white", high = "#FF69B4FF", midpoint = 0,
+                        limits = c(-2, 2)) +
+  geom_point(data = subset(plot_data, FDR < 0.05), 
+             shape = "*", size = 5, color = "black") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(x = "Genes", y = "Datasets", 
+       color = "Log2FC",
+       size = "-log10(FDR)") +
+  scale_size_continuous(range = c(1, 5))
+```
+
+```{r}
+check_genes <- c('IFNAR1', 'IFNAR2')
+for(gene in check_genes) {
+  plot_results <- create_forest_plot_custom(results, "Endothelial-cells", gene)
+  if(!is.null(plot_results)) {
+    print(plot_results$plot)
+  }
+}
+```
+
+## mouse
+
+```{r}
+mouse <- qread(paste0(PREPRDATADIR, 'seu_mouse_v2.qs'))
+
+Idents(mouse) <- 'age'
+```
+
+```{r fig.height=10, fig.width=14}
+genes <- c('Ifna1', 'Ifna2', 'Ifnb1', 'Ifna4', 'Ifna5', 'Ifna6', 'Ifna7', 'Ifnar1', 
+           'Ifnar2', 'Stat1', 'Stat2', 'Irf7', 'Mx1', 'Oas1a', 'Ifit3', 'Rsad2',  'Gbp2'
+           )
+VlnPlot(subset(mouse, annotation == 'fibroblasts'), features = genes, group.by = 'age', cols =c("#6495EDFF", "#FF69B4FF"))
+VlnPlot(subset(mouse, annotation == 'endothelial_cells'), features = genes, group.by = 'age', cols =c("#6495EDFF", "#FF69B4FF"))
+VlnPlot(subset(mouse, annotation == 'myeloid_cells'), features = genes, group.by = 'age', cols =c("#6495EDFF", "#FF69B4FF"))
+```
+
+```{r}
+plot_gene_module <- function(seurat_obj, gene_set, group_var = "less18M", celltype) {
+ seurat_sub <- subset(seurat_obj, Annotation == celltype)
+ seurat_sub <- AddModuleScore(seurat_sub, features = list(gene_set), name = "gene_module")
+ 
+ plot_data <- data.frame(
+   score = seurat_sub$gene_module1,
+   group = seurat_sub@meta.data[[group_var]],
+   sample = seurat_sub$SampleID,
+   dataset = seurat_sub$dataset
+ )
+ 
+ # Sort samples within each dataset by mean score
+ sample_means <- plot_data %>%
+   group_by(dataset, sample) %>%
+   summarize(mean_score = mean(score), .groups = 'drop') %>%
+   arrange(dataset, desc(mean_score))
+ 
+ plot_data$sample <- factor(plot_data$sample, levels = sample_means$sample)
+ 
+ ggplot(plot_data, aes(x = sample, y = score, fill = group)) +
+   geom_boxplot() +
+   facet_wrap(~dataset, scales = "free_x") +
+   theme_minimal() +
+   theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+   labs(x = "Sample", y = "Module Score", fill = group_var) +
+   stat_compare_means(aes(group = group), method = "wilcox.test", label = "p.signif")
+}
+
+plot_gene_module(atlas, gene_set = gene_symbols, celltype = 'Stromal_cells')
+```
+
+```{r}
+plot_gene_expression <- function(seurat_obj, gene, group_var = "less18M", celltype) {
+  # Check if the gene is in the dataset
+  if (!(gene %in% rownames(seurat_obj))) {
+    message(paste("Skipping", gene, "- not found in the expression matrix"))
     return(NULL)
   }
-  
-  edo <- pairwise_termsim(enrichment_result)
-  
-  p1 <- emapplot(edo, 
-                 layout.params = list(layout = "kk"),
-                 cex.params = list(category_node = 1.5),
-                 max.overlaps = 20) +
-    ggtitle(title) +
-    theme_minimal()
-  
-  return(p1)
+
+  # Subset the Seurat object by cell type
+  seurat_sub <- subset(seurat_obj, Annotation == celltype)
+
+  # Extract gene expression data
+  plot_data <- data.frame(
+    expression = FetchData(seurat_sub, vars = gene)[, 1],
+    group = seurat_sub@meta.data[[group_var]],
+    sample = seurat_sub$SampleID,
+    dataset = seurat_sub$dataset
+  )
+
+  # Sort samples within each dataset by mean expression
+  sample_means <- plot_data %>%
+    group_by(dataset, sample) %>%
+    summarize(mean_expression = mean(expression), .groups = 'drop') %>%
+    arrange(dataset, desc(mean_expression))
+
+  plot_data$sample <- factor(plot_data$sample, levels = sample_means$sample)
+
+  # Plot
+  ggplot(plot_data, aes(x = sample, y = expression, fill = group)) +
+    geom_boxplot() +
+    facet_wrap(~dataset, scales = "free_x") +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+    labs(x = "Sample", y = paste("Expression of", gene), fill = group_var) +
+    stat_compare_means(aes(group = group), method = "wilcox.test", label = "p.signif")
 }
 
-# Create and save plots
-for(celltype in names(pathway_results)) {
-  if(!is.null(pathway_results[[celltype]])) {
-    tryCatch({
-      # GO enrichment map
-      go_emap <- create_emap(pathway_results[[celltype]]$go, 
-                           paste("GO Enrichment Map -", celltype))
-      if(!is.null(go_emap)) print(go_emap)
-      
-      # KEGG enrichment map
-      kegg_emap <- create_emap(pathway_results[[celltype]]$kegg,
-                             paste("KEGG Enrichment Map -", celltype))
-      if(!is.null(kegg_emap)) print(kegg_emap)
-      
-      # Reactome enrichment map  
-      reactome_emap <- create_emap(pathway_results[[celltype]]$reactome,
-                                 paste("Reactome Enrichment Map -", celltype))
-      if(!is.null(reactome_emap)) print(reactome_emap)
-    }, error = function(e) {
-      message(paste("Error in", celltype, ":", e$message))
-    })
-  }
+# Example usage
+
+gene_symbols <- c('IFNA1', 'IFNA2', 'IFNB1', 'IFNAR1', 'IFNAR2', 'STAT1', 'STAT2', 'IRF7',
+                  'MX1', 'OAS1', 'IFIT1')
+
+for (gene in gene_symbols) {
+  print(plot_gene_expression(atlas, gene = gene, celltype = 'Endothelial_cells'))
 }
+
 ```
 
 ## TF - Enrichment
@@ -1617,6 +1862,10 @@ if(!is.null(pathway_results[["Myeloid-cells"]]) &&
 }
 ```
 
+```{r fig.height=6, fig.width=10}
+gseaplot2(pathway_results[["Myeloid-cells"]]$reactome, geneSetID = 1:5)
+```
+
 ```{r}
 library(org.Hs.eg.db)
 
@@ -1747,7 +1996,7 @@ neutrophils.mouse <- convert_human_to_mouse(gene_symbols)[,2]
 ```
 
 ```{r fig.height=10, fig.width=6}
-mouse <- qread('~/Desktop/lab/neuroblastoma/data/seu_mouse.qs')
+mouse <- qread(paste0(PREPRDATADIR, 'seu_mouse_v2.qs'))
 
 Idents(mouse) <- 'age'
 
@@ -1843,136 +2092,225 @@ for(gene in gene_symbols_cc) {
 }
 ```
 
-## DEG
+## DEG in sc
+
+```{r fig.height=9, fig.width=9}
+plot_gene_module <- function(seurat_obj, gene_set, group_var = "less18M", celltype) {
+ seurat_sub <- subset(seurat_obj, Annotation == celltype)
+ seurat_sub <- AddModuleScore(seurat_sub, features = list(gene_set), name = "gene_module")
+ 
+ plot_data <- data.frame(
+   score = seurat_sub$gene_module1,
+   group = seurat_sub@meta.data[[group_var]],
+   sample = seurat_sub$SampleID,
+   dataset = seurat_sub$dataset
+ )
+ 
+ # Sort samples within each dataset by mean score
+ sample_means <- plot_data %>%
+   group_by(dataset, sample) %>%
+   summarize(mean_score = mean(score), .groups = 'drop') %>%
+   arrange(dataset, desc(mean_score))
+ 
+ plot_data$sample <- factor(plot_data$sample, levels = sample_means$sample)
+ 
+ ggplot(plot_data, aes(x = sample, y = score, fill = group)) +
+   geom_boxplot() +
+   facet_wrap(~dataset, scales = "free_x") +
+   theme_minimal() +
+   theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+   labs(x = "Sample", y = "Module Score", fill = group_var) +
+   stat_compare_means(aes(group = group), method = "wilcox.test", label = "p.signif")
+}
+
+p <- plot_gene_module(atlas, gene_set = gene_symbols, celltype = 'Myeloid_cells')
+```
+
+## gene
+
+```{r fig.height=9, fig.width=9}
+plot_gene_expression <- function(seurat_obj, gene, group_var = "less18M", celltype) {
+ seurat_sub <- subset(seurat_obj, Annotation == celltype)
+ 
+ plot_data <- data.frame(
+   expression = GetAssayData(seurat_sub, slot = "data")[gene,],
+   group = seurat_sub@meta.data[[group_var]],
+   sample = seurat_sub$SampleID,
+   dataset = seurat_sub$method
+ )
+ 
+ sample_means <- plot_data %>%
+   group_by(dataset, sample) %>%
+   summarize(mean_exp = mean(expression), .groups = 'drop') %>%
+   arrange(dataset, desc(mean_exp))
+ 
+ plot_data$sample <- factor(plot_data$sample, levels = sample_means$sample)
+ 
+ ggplot(plot_data, aes(x = sample, y = expression, fill = group)) +
+   geom_boxplot() +
+   facet_wrap(~dataset, scales = "free_x") +
+   theme_minimal() +
+   theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+   labs(x = "Sample", y = paste(gene, "Expression"), fill = group_var) +
+   stat_compare_means(aes(group = group), method = "wilcox.test", label = "p.signif")
+}
+
+plot_list <- lapply(gene_symbols[1:5], function(gene) {
+  plot_gene_module(atlas, gene, celltype = 'Myeloid_cells')})
+```
+
+## KEGG view
 
 ```{r}
-create_expression_boxplots <- function(bulk, genes, group_by = c("dataset", "less18M"), 
-                                       facet_by = "Annotation", 
-                                       ncol = 3) {
-  # Get normalized data
-  expression_data <- GetAssayData(bulk, slot = "data")
-  
-  # Check if genes exist in the dataset
-  genes <- intersect(genes, rownames(expression_data))
-  if(length(genes) == 0) {
-    stop("None of the specified genes found in the dataset")
+library(pathview)
+gene_list <- meta_analysis_results$`Myeloid-cells`$mean_logFC
+names(gene_list) <-  meta_analysis_results$`Myeloid-cells`$gene
+
+gene_entrez <- mapIds(org.Hs.eg.db, 
+                      keys = names(gene_list), 
+                      column = "ENTREZID", 
+                      keytype = "SYMBOL",
+                      multiVals = "first")
+
+# Remove NAs (unmapped genes)
+gene_list <- gene_list[!is.na(gene_entrez)]
+names(gene_list) <- gene_entrez[!is.na(gene_entrez)]
+
+pathview(gene.data = gene_list, 
+         pathway.id = "hsa04613", 
+         species = "hsa", 
+         limit = list(gene = c(-1, 1)),
+         low = "blue", mid = "white", high = "red", 
+         kegg.native = TRUE) 
+```
+
+# Neutrophils scanvi
+
+```{r}
+de_table <- read.csv('differential_expression_by_age.csv')
+
+# Create ranked gene list: sign(log2fc) * -log10(pval)
+gene_list <- sign(de_table$log2fc) * -log10(de_table$pval)
+names(gene_list) <- de_table$gene
+gene_list <- sort(gene_list, decreasing = TRUE)
+
+# Convert gene symbols to ENTREZ IDs
+entrez_ids <- mapIds(org.Hs.eg.db,
+                    keys = names(gene_list),
+                    column = "ENTREZID",
+                    keytype = "SYMBOL",
+                    multiVals = "first")
+
+# Remove NA values
+gene_list <- gene_list[!is.na(entrez_ids)]
+entrez_ids <- entrez_ids[!is.na(entrez_ids)]
+names(gene_list) <- entrez_ids
+gene_list <- sort(gene_list, decreasing = TRUE)
+# Run GO enrichment
+go_results <- gseGO(geneList = gene_list,
+                    ont = "BP",
+                    OrgDb = org.Hs.eg.db,
+                    minGSSize = 10,
+                    maxGSSize = 500,
+                    pvalueCutoff = 0.05,
+                    verbose = FALSE)
+
+# Run KEGG pathway analysis
+kegg_results <- gseKEGG(geneList = gene_list,
+                       organism = "hsa",
+                       minGSSize = 10,
+                       maxGSSize = 500,
+                       pvalueCutoff = 0.05,
+                       verbose = FALSE)
+
+# Run Reactome pathway analysis
+reactome_results <- gsePathway(geneList = gene_list,
+                              organism = "human",
+                              minGSSize = 10,
+                              maxGSSize = 500,
+                              pvalueCutoff = 0.05,
+                              verbose = FALSE)
+
+# Create visualization function
+plot_enrichment <- function(results, title) {
+  if(is.null(results) || nrow(results) == 0) {
+    return(NULL)
   }
   
-  # Create long format data frame for plotting
-  plot_data <- data.frame(t(expression_data[genes, , drop = FALSE]))
-  plot_data$dataset <- bulk$dataset
-  plot_data$less18M <- bulk$less18M
-  plot_data$Annotation <- bulk$Annotation
-  
-  # Melt data for plotting
-  plot_data_long <- reshape2::melt(plot_data, 
-                                  id.vars = c("dataset", "less18M", "Annotation"),
-                                  variable.name = "gene",
-                                  value.name = "expression")
-  
-  # Create basic boxplot
-  p <- ggplot(plot_data_long, aes(x = dataset, y = expression, fill = less18M)) +
-    geom_boxplot(outlier.size = 0.5, alpha = 0.7) +
-    facet_wrap(~gene + get(facet_by), scales = "free_y", ncol = ncol) +
+  dotplot(results, showCategory = 10, title = title) +
     theme_minimal() +
-    theme(
-      axis.text.x = element_text(angle = 45, hjust = 1),
-      panel.grid.minor = element_blank(),
-      strip.text = element_text(face = "bold"),
-      legend.position = "top"
-    ) +
-    scale_fill_manual(values = c("FALSE" = "blue", "TRUE" = "red"),
-                     labels = c("FALSE" = ">18M", "TRUE" = "≤18M"),
-                     name = "Age Group") +
-    labs(x = "Dataset", y = "Expression Level")
-  
-  return(p)
+    theme(axis.text.y = element_text(size = 8))
 }
 
-# Function to test for differential expression across conditions
-test_gene_expression <- function(bulk, genes, cell_types = NULL) {
-  # Get normalized data
-  expression_data <- GetAssayData(bulk, slot = "data")
-  
-  # Check if genes exist in the dataset
-  genes <- intersect(genes, rownames(expression_data))
-  if(length(genes) == 0) {
-    stop("None of the specified genes found in the dataset")
-  }
-  
-  # If no cell types specified, use all
-  if(is.null(cell_types)) {
-    cell_types <- unique(bulk$Annotation)
-  }
-  
-  # Initialize results list
-  results <- list()
-  
-  # For each cell type
-  for(ct in cell_types) {
-    results[[ct]] <- list()
-    
-    # For each dataset
-    for(ds in unique(bulk$dataset)) {
-      # Subset data
-      subset_idx <- bulk$Annotation == ct & bulk$dataset == ds
-      if(sum(subset_idx) > 0) {
-        
-        # Get expression data
-        expr <- expression_data[genes, subset_idx, drop = FALSE]
-        groups <- bulk$less18M[subset_idx]
-        
-        # Only test if we have both groups
-        if(length(unique(groups)) > 1) {
-          # Run Wilcoxon test for each gene
-          test_results <- lapply(genes, function(g) {
-            test <- wilcox.test(expr[g,] ~ groups)
-            data.frame(
-              gene = g,
-              celltype = ct,
-              dataset = ds,
-              p_value = test$p.value,
-              stringsAsFactors = FALSE
-            )
-          })
-          
-          results[[ct]][[ds]] <- do.call(rbind, test_results)
-        }
-      }
-    }
-    
-    # Combine results for cell type
-    if(length(results[[ct]]) > 0) {
-      results[[ct]] <- do.call(rbind, results[[ct]])
-      results[[ct]]$p_adj <- p.adjust(results[[ct]]$p_value, method = "BH")
-    }
-  }
-  
-  return(results)
-}
+# Create plots
+plots <- list(
+  go = plot_enrichment(go_results, paste("GO Biological Process ")),
+  kegg = plot_enrichment(kegg_results, paste("KEGG Pathways ")),
+  reactome = plot_enrichment(reactome_results, paste("Reactome Pathways "))
+)
 ```
 
-```{r fig.height=20, fig.width=9}
-# 1. Basic boxplot for specific genes
-genes_of_interest <- c('STK10')  # replace with your genes of interest
-boxplot <- create_expression_boxplots(bulk, genes_of_interest)
-print(boxplot)
-
-# 3. Test for significant differences
-test_results <- test_gene_expression(bulk, genes_of_interest)
-
-# Print significant results
-for(ct in names(test_results)) {
-  if(length(test_results[[ct]]) > 0) {
-    sig_results <- test_results[[ct]][test_results[[ct]]$p_adj < 0.05,]
-    if(nrow(sig_results) > 0) {
-      cat("\nSignificant differences in", ct, ":\n")
-      print(sig_results)
-    }
-  }
-}
+```{r}
+reactome_results@result
 ```
 
-# MAST
-## TODO
+```{r}
+library(enrichplot)
+gseaplot2(reactome_results, geneSetID = 25:3)
+```
+
+```{r fig.height=5, fig.width=7}
+library(clusterProfiler)
+library(ReactomePA)
+library(org.Hs.eg.db)
+library(DOSE)
+
+# Load differential expression results
+de_table <- read.csv('differential_expression_by_age.csv')
+
+# Filter top upregulated genes by log2FC and p-value (adjust threshold if needed)
+top_upregulated <- subset(de_table, log2fc > 1 & padj < 0.0001)
+
+# Convert gene symbols to ENTREZ IDs
+entrez_ids <- mapIds(org.Hs.eg.db,
+                     keys = top_upregulated$gene,
+                     column = "ENTREZID",
+                     keytype = "SYMBOL",
+                     multiVals = "first")
+
+# Remove NA values
+entrez_ids <- na.omit(entrez_ids)
+
+# Run Reactome pathway over-representation analysis
+reactome_results <- enrichPathway(gene         = entrez_ids,
+                                  organism     = "human",
+                                  pvalueCutoff = 0.05,
+                                  readable     = TRUE)
+
+dotplot(reactome_results, showCategory = 15) +
+    theme_minimal() +
+    theme(axis.text.y = element_text(size = 8))
+
+library(ReactomePA)
+library(dplyr)
+
+# Convert result to data frame
+reactome_df <- as.data.frame(reactome_results)
+
+# Filter rows of interest
+filtered_df <- reactome_df %>%
+  filter(grepl("Interferon|Neutrophil", Description, ignore.case = TRUE))
+
+# Create a new enrichResult object manually
+filtered_reactome <- reactome_results
+filtered_reactome@result <- filtered_df
+
+# Now plot
+dotplot(filtered_reactome, showCategory = 5)
+```
+
+
+```{r}
+reactome_results@result
+```
 

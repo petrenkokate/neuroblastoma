@@ -1,0 +1,406 @@
+---
+title: "WGCNA_mouse"
+author: "Kate Petrenko"
+date: "2025-02-18"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+# devtools::install_github('smorabit/hdWGCNA', ref='dev', force = T)
+library(WGCNA)
+library(hdWGCNA)
+library(data.table)
+library(Seurat)
+library(scDblFinder)
+library(DoubletFinder)
+library(remotes)
+# remotes::install_github("carmonalab/STACAS")
+library(STACAS)
+library(SingleR)
+# install.packages("scGate")
+library(scGate)
+library(ggplot2)
+library(BiocParallel)
+# BiocManager::install("harmony")
+library(harmony)
+library(RColorBrewer)
+library(stringr)
+library(cowplot)
+library(scuttle)
+# install.packages("devtools")
+# BiocManager::install("Homo.sapiens")
+# BiocManager::install("jpmam1/scalop") #forked copy of a really good guy
+# devtools::install_github("jlaffy/infercna")
+library(infercna)
+# library(infercnv)
+library(parallel)
+library(future)
+library(clustree)
+library(dittoSeq)
+# install.packages("ggh4x")
+library(ggh4x)
+# BiocManager::install('EnhancedVolcano')
+library(EnhancedVolcano)
+library(clusterProfiler)
+# BiocManager::install('org.Mm.eg.db')
+library("org.Mm.eg.db")
+library("org.Hs.eg.db")
+# BiocManager::install('ReactomePA')
+library(ReactomePA)
+# BiocManager::install('msigdbr')
+library(msigdbr)
+# install.packages('qs')
+library(qs)
+# BiocManager::install('enrichR')
+library(enrichR)
+library(patchwork)
+library(dplyr)
+```
+
+```{r global variables, include=FALSE}
+set.seed(100)
+DATADIR = '~/neuroblastoma/data/'
+WORKDIR = '~/neuroblastoma/'
+PREPRDATADIR = '~/neuroblastoma/preprocessing_data/'
+
+my_colors <- c("#6495EDFF", "#FF69B4FF", "#BA55D3FF",  "#F08080FF", "#32CD32FF",  
+               "#9ACD32FF", "#4682B4FF",  "#DDA0DDFF", "#FFA07AFF", "#8FBC8BFF",
+               "#40E0D0FF",  "#F0E68CFF", "#5F9EA0FF", "#D2B48CFF",  
+               "#FFDAB9FF",  "#87CEEBFF")
+```
+
+```{r}
+seu <- qread(paste0(PREPRDATADIR, 'seu_mouse_neutrophils.qs'))
+atlas <- qread(paste0(PREPRDATADIR, 'ATLAS_object.qs'))
+```
+
+```{r}
+enableWGCNAThreads(nThreads = 8)
+```
+
+```{r}
+DimPlot(atlas, group.by='Annotation', label=TRUE, cols = my_colors) +
+   umap_theme() + ggtitle('Human annotation') + NoLegend()
+```
+
+# Setup object
+
+v1 - Malignant_MOUSE
+myeloid_cells_v1 - myeloid_cells_v1 mouse
+Endothelial_cells_v1 - Endothelial_cells_v1 human
+
+```{r}
+sample_metadata <- read.csv(paste0(DATADIR, 'samples_metadata_v5.csv'))
+sample_metadata[sample_metadata==""] <- NA
+
+rownames(sample_metadata) <- sample_metadata$Sample_dataset
+
+
+
+clean_sample_id <- function(id) {
+  # First remove _rep1 and _rep2
+  id <- gsub("_rep[12]$", "", id)
+  
+  # Handle the special bonine cases
+  id <- gsub("_sn$", "", id)      # Remove _sn suffix
+  id <- gsub("_[12]$", "", id)    # Remove _1 or _2 suffix
+  
+  return(id)
+}
+
+atlas$less18M <- sample_metadata[clean_sample_id(atlas$SampleID),]$less18M
+```
+
+```{r}
+atlas <- SetupForWGCNA(
+  atlas,
+  gene_select = "fraction", # the gene selection approach
+  fraction = 0.05, # fraction of cells that a gene needs to be expressed in order to be included
+  # group_by = 'annotation',
+  wgcna_name = "Endothelial_cells_v1" # the name of the hdWGCNA experiment
+)
+```
+
+```{r}
+# construct metacells  in each group
+atlas <- MetacellsByGroups(
+  seurat_obj = atlas,
+  group.by = c("Annotation", "less18M"), # specify the columns in seurat_obj@meta.data to group by
+  reduction = 'harmony', # select the dimensionality reduction to perform KNN on
+  k = 25, # nearest-neighbors parameter
+  max_shared = 15, # maximum number of shared cells between two metacells
+  ident.group = 'Annotation' # set the Idents of the metacell seurat object
+)
+
+# normalize metacell expression matrix:
+atlas <- NormalizeMetacells(atlas)
+```
+
+```{r}
+atlas <- SetDatExpr(
+  atlas,
+  group_name = "Endothelial_cells",
+  group.by='Annotation'
+)
+```
+
+# Soft power
+
+```{r}
+atlas <- TestSoftPowers(
+  atlas,
+  networkType = 'signed' # you can also use "unsigned" or "signed hybrid"
+)
+
+# plot the results:
+plot_list <- PlotSoftPowers(atlas)
+
+# assemble with patchwork
+wrap_plots(plot_list, ncol=2)
+```
+
+# Construct network
+
+```{r}
+# construct co-expression network:
+atlas <- ConstructNetwork(
+  atlas,
+  tom_name = 'Endo_HUMAN', # name of the topoligical overlap matrix written to disk
+  overwrite_tom = TRUE
+)
+```
+
+```{r}
+PlotDendrogram(atlas, main='HUMAN hdWGCNA Dendrogram')
+```
+
+```{r}
+TOM <- GetTOM(atlas)
+```
+
+# Modules
+
+```{r}
+# need to run ScaleData first or else harmony throws an error:
+#seurat_obj <- ScaleData(seurat_obj, features=VariableFeatures(seurat_obj))
+
+# compute all MEs in the full single-cell dataset
+atlas <- ModuleEigengenes(
+ atlas,
+ group.by.vars="less18M"
+)
+```
+
+```{r}
+hMEs <- GetMEs(atlas)
+```
+
+# Module connectivity
+
+```{r}
+# compute eigengene-based connectivity (kME):
+atlas <- ModuleConnectivity(
+  atlas,
+  group.by = 'Annotation', group_name = "Endothelial_cells"
+)
+```
+
+```{r fig.height=6, fig.width=12}
+conflicted::conflict_prefer("select", "dplyr")
+# plot genes ranked by kME for each module
+p <- PlotKMEs(atlas, ncol=6)
+p
+```
+
+```{r fig.height=10, fig.width=10}
+ModuleRadarPlot(
+  seu,
+  group.by = 'less18M',
+  barcodes = seu@meta.data %>% subset(Annotation == 'Endothelial_cells') %>% rownames(),
+  axis.label.size=4,
+  grid.label.size=4
+)
+```
+
+# DE
+
+```{r}
+group1 <- atlas@meta.data %>% subset(Annotation == 'Endothelial_cells' & less18M == TRUE) %>% rownames
+group2 <- atlas@meta.data %>% subset(Annotation == 'Endothelial_cells' & less18M == FALSE) %>% rownames
+
+head(group1)
+```
+
+```{r}
+DMEs <- FindDMEs(
+  atlas,
+  barcodes1 = group1,
+  barcodes2 = group2,
+  test.use='wilcox',
+  wgcna_name='Endothelial_cells_v1',
+  features = 'ModuleScores'
+)
+
+head(DMEs)
+```
+
+```{r}
+PlotDMEsLollipop(
+  atlas, 
+  DMEs, 
+  wgcna_name='Endothelial_cells_v1', 
+  pvalue = "p_val_adj"
+)
+```
+
+# Signature score
+
+```{r}
+library(UCell)
+atlas <- ModuleExprScore(
+  atlas,
+  n_genes = 50,
+  method='UCell'
+)
+```
+
+```{r fig.height=5, fig.width=10}
+# make a featureplot of hMEs for each module
+plot_list <- ModuleFeaturePlot(
+  atlas,
+  features='hMEs', # plot the hMEs
+  order=TRUE # order so the points with highest hMEs are on top
+)
+
+# stitch together with patchwork
+wrap_plots(plot_list, ncol=6)
+```
+
+```{r fig.height=5, fig.width=10}
+# make a featureplot of hub scores for each module
+plot_list <- ModuleFeaturePlot(
+  atlas,
+  features='scores', # plot the hub gene scores
+  order='shuffle', # order so cells are shuffled
+  ucell = TRUE # depending on Seurat vs UCell for gene scoring
+)
+
+# stitch together with patchwork
+wrap_plots(plot_list, ncol=6)
+```
+
+# Modules analysis 
+
+```{r}
+# get the module assignment table:
+modules <- GetModules(atlas) %>% subset(module != 'grey')
+
+modules %>% 
+  dplyr::filter(module == 'green') %>% 
+  arrange(desc(kME_green))
+```
+
+
+```{r}
+# define the enrichr databases to test
+dbs <- c('GO_Biological_Process_2023','GO_Cellular_Component_2023','GO_Molecular_Function_2023')
+
+# perform enrichment tests
+atlas <- RunEnrichr(
+  atlas,
+  dbs=dbs,
+  max_genes = Inf # use max_genes = Inf to choose all genes
+)
+
+```
+
+```{r}
+# retrieve the output table
+enrich_df <- GetEnrichrTable(atlas)
+
+enrich_df %>% 
+  # dplyr::filter(grepl("neutrophil", Term, ignore.case = TRUE)) %>% 
+  dplyr::filter(Adjusted.P.value < 0.05) %>% 
+  dplyr::filter(module == 'green')
+  # dplyr::filter(module == 'black')
+  # dplyr::filter(module == 'brown')
+```
+
+```{r eval=FALSE, include=FALSE}
+# make GO term plots:
+EnrichrBarPlot(
+  atlas,
+  outdir = "enrichr_plots", # name of output directory
+  n_terms = 10, # number of enriched terms to show (sometimes more are shown if there are ties)
+  plot_size = c(5,7), # width, height of the output .pdfs
+  logscale=TRUE # do you want to show the enrichment as a log scale?
+)
+```
+
+Older mice’s tumors may rely more on glycolysis and hypoxia-driven pathways, which are associated with faster growth, metastasis, and therapy resistance.
+
+```{r fig.height=5, fig.width=10}
+# enrichr dotplot
+EnrichrDotPlot(
+  atlas,
+  mods = "all", # use all modules (default)
+  database = "GO_Biological_Process_2023", # this must match one of the dbs used previously
+  n_terms=5, # number of terms per module
+  term_size=8, # font size for the terms
+  p_adj = FALSE # show the p-val or adjusted p-val?
+)  + scale_color_stepsn(colors=rev(viridis::magma(256)))
+```
+
+```{r eval=FALSE, include=FALSE}
+qsave(atlas, paste0(PREPRDATADIR, 'atlas_WGCNA_endo.qs'))
+```
+
+```{r}
+stromal <- subset(atlas, Annotation == 'Endothelial_cells')
+stromal$brown_score <- stromal@misc$Endothelial_cells_v1$module_scores$brown
+VlnPlot(stromal, features = 'brown_score')
+VlnPlot(stromal, features = 'brown_score', group.by = 'less18M')
+DimPlot(stromal, cols = my_colors)
+DimPlot(stromal, group.by = 'less18M', cols = my_colors)
+FeaturePlot(stromal, 'brown_score')
+```
+
+```{r}
+stromal$green_score <- stromal@misc$Endothelial_cells_v1$module_scores$green
+VlnPlot(stromal, features = 'green_score')
+VlnPlot(stromal, features = 'green_score', group.by = 'less18M')
+DimPlot(stromal, cols = my_colors)
+DimPlot(stromal, group.by = 'less18M', cols = my_colors)
+FeaturePlot(stromal, 'green_score')
+```
+
+```{r}
+stromal$green_score <- stromal@misc$Endothelial_cells_v1$MEs$green
+VlnPlot(stromal, features = 'green_score')
+VlnPlot(stromal, features = 'green_score', group.by = 'less18M')
+DimPlot(stromal, cols = my_colors)
+DimPlot(stromal, group.by = 'less18M', cols = my_colors)
+FeaturePlot(stromal, 'green_score')
+```
+
+```{r}
+stromal$yellow_score <- stromal@misc$Endothelial_cells_v1$module_scores$yellow
+VlnPlot(stromal, features = 'yellow_score')
+VlnPlot(stromal, features = 'yellow_score', group.by = 'less18M')
+DimPlot(stromal, cols = my_colors)
+DimPlot(stromal, group.by = 'less18M', cols = my_colors)
+FeaturePlot(stromal, 'yellow_score')
+```
+
+```{r}
+genes <- modules %>% 
+  dplyr::filter(module == 'green') %>% 
+  arrange(desc(kME_green)) %>% 
+  .$gene_name
+
+for (gene in genes) {
+  print(VlnPlot(stromal, features = gene, group.by = 'less18M'))
+}
+```
+

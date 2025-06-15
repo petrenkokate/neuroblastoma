@@ -440,6 +440,10 @@ DimPlot(seu, group.by = 'age', cols = c("#6495EDFF", "#FF69B4FF")) +
   ggtitle("Age"), nrow = 1, rel_widths = c(1, 0.8))
 ```
 
+```{r}
+qsave(seu, paste0(PREPRDATADIR, 'seu_mouse_neutrophils.qs'))
+```
+
 ```{r fig.height=5, fig.width=14}
 Idents(seu) <- 'annotation'
 markers <- FindAllMarkers(seu, only.pos = T, min.pct = 0.25)
@@ -504,6 +508,13 @@ myeloid.de.markers <- FindMarkers(subset(seu, annotation == 'Myeloid_cells'),
 malignant.de.markers <- FindMarkers(subset(seu, annotation == 'Malignant_cells'), 
                                   ident.1 = "young", ident.2 = "adult", 
                                   min.pct = 0.25)
+endo.de.markers <- FindMarkers(subset(seu, annotation == 'Endothelial_cells'), 
+                                  ident.1 = "young", ident.2 = "adult", 
+                                  min.pct = 0.25)
+
+stromal.de.markers <- FindMarkers(subset(seu, annotation == 'Fibroblasts'), 
+                                  ident.1 = "young", ident.2 = "adult", 
+                                  min.pct = 0.25)
 
 volcano_plot <- function(de.markers) {
   EnhancedVolcano(de.markers,
@@ -528,6 +539,36 @@ plot_grid(volcano_plot(t_cells.de.markers[!grepl("^Hb[ab]", rownames(t_cells.de.
           volcano_plot(malignant.de.markers[!grepl("^Hb[ab]", rownames(malignant.de.markers)), ]) +
             ggtitle('Malignant cells'),
           nrow = 1)
+```
+
+
+```{r eval=FALSE, include=FALSE}
+prepare_de_results <- function(df, celltype) {
+  df <- df %>%
+    mutate(gene = rownames(df), celltype = celltype)
+  rownames(df) <- NULL # Remove row names
+  return(df)
+}
+
+# Apply the function to each DE result
+t_cells.de.markers <- prepare_de_results(t_cells.de.markers, "T_cells")
+b_cells.de.markers <- prepare_de_results(b_cells.de.markers, "B_cells")
+myeloid.de.markers <- prepare_de_results(myeloid.de.markers, "Myeloid_cells")
+malignant.de.markers <- prepare_de_results(malignant.de.markers, "Malignant_cells")
+endo.de.markers <- prepare_de_results(endo.de.markers, "Endothelial_cells")
+stromal.de.markers <- prepare_de_results(stromal.de.markers, "Stromal_cells")
+
+# Combine all dataframes into one
+all_de_markers <- bind_rows(
+  t_cells.de.markers,
+  b_cells.de.markers,
+  myeloid.de.markers,
+  malignant.de.markers,
+  endo.de.markers,
+  stromal.de.markers
+)
+
+qsave(all_de_markers, paste0(PREPRDATADIR, 'DEG_sc_mouse.qs'))
 ```
 
 # Scatter plots
@@ -624,23 +665,24 @@ seu_bulk <- AggregateExpression(seu_bulk, return.seurat = T, slot = "counts", as
                             group.by = c("annotation", "age", 'rep'))
 ```
 
+
 ```{r fig.height=8, fig.width=20}
 Idents(seu_bulk) <- "age"
-t_cells.de.markers <- FindMarkers(subset(seu_bulk, annotation == 'T-cells'), 
+t_cells.de.markers <- FindMarkers(subset(seu_bulk, annotation == 'T cells'), 
                                   ident.1 = "young", ident.2 = "adult", 
                                   slot = "counts",
                                   test.use = "DESeq2", verbose = F)
 
-b_cells.de.markers <- FindMarkers(subset(seu_bulk, annotation == 'B-cells'), 
+b_cells.de.markers <- FindMarkers(subset(seu_bulk, annotation == 'B cells'), 
                                   ident.1 = "young", ident.2 = "adult", slot = "counts",
                                   test.use = "DESeq2", verbose = F, 
                                   min.cells.group = 2)
 
-myeloid.de.markers <- FindMarkers(subset(seu_bulk, annotation == 'Myeloid-cells'), 
+myeloid.de.markers <- FindMarkers(subset(seu_bulk, annotation == 'Myeloid cells'), 
                                   ident.1 = "young", ident.2 = "adult", slot = "counts",
                                   test.use = "DESeq2", verbose = F)
 
-malignant.de.markers <- FindMarkers(subset(seu_bulk, annotation == 'Malignant-cells'), 
+malignant.de.markers <- FindMarkers(subset(seu_bulk, annotation == 'Malignant cells'), 
                                   ident.1 = "young", ident.2 = "adult", slot = "counts",
                                   test.use = "DESeq2", verbose = F)
 
@@ -862,5 +904,34 @@ VlnPlot(seu, features = 'S100a9', group.by = 'annotation', split.by = 'age', spl
 
 ```{r}
 FeaturePlot(seu, c('S100a9', 'S100a8'))
+```
+
+
+## Targets of calprotectin
+
+```{r}
+mouse_genes <- c(
+  "Bcl2", "Mapk1", "Bax", "Nfkb1", "Jun", "Tnf", "Il6", "Ap1", "Cxcl1", "Ccl5", "Ccl7", 
+  "Slc39a10", "Lcn2", "Zc3h12a", "Enpp2", "Mmp10", "Mmp1", "Mmp2", "Mmp9", 
+  "Pik3ca", "Rac1",
+  "Casp1", "Casp3", "Casp4", "Casp5", "Casp7", "Casp8", "Casp9", "Casp10", "Casp14",
+  "Xaf1", "Ulk1", "Xiap", "H2afx", "Trp53bp1", "Atg13", "Rb1cc1", "Ambra1", "Becn1", 
+  "Pik3c3", "Atg14", "Uvrag", "Atg5", "Atg12", "Atg16l1", "Map1lc3a", "Atg7", "Atg3", 
+  "Atg10", "Rab7a", "Lamp1", "Lamp2", "Stx17", "Mtor", "Prkaa1", "Tfeb", "Bak1", 
+  "Bnip3", "Bbc3", "Pmaip1", "Fas", "Mcl1", "Birc5", "Dnm1l", "Vdac1", "Mptp", 
+  "Tfam", "Atp5f1a", "Tnfrsf1a", "Ddit3", "Atf4", "Tlr4", "Ager", "P2rx7", "Nlrp3", 
+  "Capn1", "Nfe2l2", "Cycs", "Gsk3b", "Il18", "Aifm1", "Nox1", "Nox2", "Nox3", "Nox4", "Nox5", 
+  "Sod1", "Sod2", "Sod3", "Cat", "Gpx1", "Gpx4", "Txn", "Txnrd1", "Prdx1", "Prdx2", "Prdx3", 
+  "Xdh", "Ahr", 
+  # Fibroblast related
+  "Vim", "Stat3", "Smad2", "Smad3", "Il33", "Il1b", "Acta2", "Cxcl8", "Col1a1", "Pdgfb",
+  # Macrophage related
+  "Arg1", "P2rx7", "Socs3", "Nlrp3", "Myd88", "Nos2"
+)
+```
+
+
+```{r fig.height=20, fig.width=20}
+VlnPlot(mouse, features = c('Atg12', 'Myd88', 'Uvrag'), group.by = 'annotation', split.by = 'age', split.plot = T, cols = my_colors)
 ```
 

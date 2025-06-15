@@ -1,0 +1,1257 @@
+---
+title: "mouse_human_deg"
+author: "Kate Petrenko"
+date: "2025-02-17"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(data.table)
+library(Seurat)
+library(scDblFinder)
+library(DoubletFinder)
+library(dplyr)
+library(remotes)
+# remotes::install_github("carmonalab/STACAS")
+library(STACAS)
+library(SingleR)
+# install.packages("scGate")
+library(scGate)
+library(ggplot2)
+library(BiocParallel)
+# BiocManager::install("harmony")
+library(harmony)
+library(RColorBrewer)
+library(stringr)
+library(cowplot)
+library(scuttle)
+# install.packages("devtools")
+# BiocManager::install("Homo.sapiens")
+# BiocManager::install("jpmam1/scalop") #forked copy of a really good guy
+# devtools::install_github("jlaffy/infercna")
+library(infercna)
+# library(infercnv)
+library(parallel)
+library(future)
+library(clustree)
+library(dittoSeq)
+# install.packages("ggh4x")
+library(ggh4x)
+# BiocManager::install('EnhancedVolcano')
+library(EnhancedVolcano)
+library(clusterProfiler)
+# BiocManager::install('org.Mm.eg.db')
+library("org.Mm.eg.db")
+library("org.Hs.eg.db")
+# BiocManager::install('ReactomePA')
+library(ReactomePA)
+# BiocManager::install('msigdbr')
+library(msigdbr)
+# install.packages('qs')
+library(qs)
+# BiocManager::install('enrichR')
+library(enrichR)
+library(tibble)
+library(ggpubr)
+```
+
+```{r global variables, include=FALSE}
+set.seed(100)
+DATADIR = '~/neuroblastoma/data/'
+WORKDIR = '~/neuroblastoma/'
+PREPRDATADIR = '~/neuroblastoma/preprocessing_data/'
+
+my_colors <- c("#6495EDFF", "#FF69B4FF", "#BA55D3FF",  "#F08080FF", "#32CD32FF",  
+               "#9ACD32FF", "#4682B4FF",  "#DDA0DDFF", "#FFA07AFF", "#8FBC8BFF",
+               "#40E0D0FF",  "#F0E68CFF", "#5F9EA0FF", "#D2B48CFF",  
+               "#FFDAB9FF",  "#87CEEBFF")
+```
+
+```{r}
+DEG_sc_mouse <- qread(paste0(PREPRDATADIR, 'DEG_sc_mouse.qs'))
+DEG_bulk_human <- qread(paste0(PREPRDATADIR, 'DEG_ATLAS_pseudobulk_norep_results.qs'))
+atlas <- qread(paste0(PREPRDATADIR, 'ATLAS_object.qs'))
+mouse <- qread(paste0(PREPRDATADIR, 'seu_mouse_neutrophils.qs'))
+```
+
+```{r eval=FALSE, include=FALSE}
+library(Matrix)
+
+# Extract raw counts as sparse matrix
+raw_counts <- GetAssayData(atlas, slot = "counts")
+
+# Save as Matrix Market format (.mtx)
+writeMM(raw_counts, paste0(PREPRDATADIR, "ATLAS_raw_counts.mtx"))
+
+# Save gene and cell metadata for reference
+write.csv(rownames(raw_counts), paste0(PREPRDATADIR, "ATLAS_genes.csv"), row.names = FALSE)
+write.csv(colnames(raw_counts), paste0(PREPRDATADIR, "ATLAS_cells.csv"), row.names = FALSE)
+```
+
+```{r}
+datasets <- c('grossmann', 'patel', 'jansky', 'dong', 'bonine', 'verhoeven', 'wienke')
+extract_dataset <- function(sample_id) {
+  # Convert known datasets to lowercase for matching
+  datasets_lower <- tolower(datasets)
+  
+  # Convert sample_id to lowercase for matching
+  sample_id_lower <- tolower(sample_id)
+  
+  # Find which dataset appears in the sample_id
+  dataset_match <- datasets_lower[sapply(datasets_lower, function(x) grepl(x, sample_id_lower))]
+  
+  # Return the first match in original case
+  if (length(dataset_match) > 0) {
+    return(datasets[tolower(datasets) == dataset_match[1]])
+  } else {
+    return(NA)
+  }
+}
+atlas$dataset <- sapply(atlas$SampleID, extract_dataset)
+```
+
+```{r}
+sample_metadata <- read.csv(paste0(DATADIR, 'samples_metadata_v5.csv'))
+sample_metadata[sample_metadata==""] <- NA
+
+rownames(sample_metadata) <- sample_metadata$Sample_dataset
+
+
+
+clean_sample_id <- function(id) {
+  # First remove _rep1 and _rep2
+  id <- gsub("_rep[12]$", "", id)
+  
+  # Handle the special bonine cases
+  id <- gsub("_sn$", "", id)      # Remove _sn suffix
+  id <- gsub("_[12]$", "", id)    # Remove _1 or _2 suffix
+  
+  return(id)
+}
+
+atlas$less18M <- sample_metadata[clean_sample_id(atlas$SampleID),]$less18M
+atlas$Sex <- sample_metadata[clean_sample_id(atlas$SampleID),]$Sex
+atlas$MYCN_status <- sample_metadata[clean_sample_id(atlas$SampleID),]$MYCN
+atlas$method <- sample_metadata[clean_sample_id(atlas$SampleID),]$Method
+```
+
+```{r}
+convert_human_to_mouse <- function(gene_list) {
+    mouse_human_genes <- read.csv("https://www.informatics.jax.org/downloads/reports/HOM_MouseHumanSequence.rpt", sep="\t")
+
+    # Initialize an empty data frame
+    output <- data.frame(human_gene = character(), mouse_gene = character(), stringsAsFactors = FALSE)
+
+    for (gene in gene_list) {
+        class_key <- (mouse_human_genes %>% filter(Symbol == gene & Common.Organism.Name == "human"))[['DB.Class.Key']]
+        
+        if (!identical(class_key, integer(0))) {
+            mouse_genes <- (mouse_human_genes %>% filter(DB.Class.Key == class_key & Common.Organism.Name == "mouse, laboratory"))[,"Symbol"]
+            
+            if (length(mouse_genes) > 0) {
+                temp_df <- data.frame(human_gene = gene, mouse_gene = mouse_genes, stringsAsFactors = FALSE)
+                output <- bind_rows(output, temp_df) 
+            } else {
+                output <- bind_rows(output, data.frame(human_gene = gene, mouse_gene = NA, stringsAsFactors = FALSE))
+            }
+        } else {
+            output <- bind_rows(output, data.frame(human_gene = gene, mouse_gene = NA, stringsAsFactors = FALSE))
+        }
+    }
+    return(output)
+}
+```
+
+```{r}
+plot_enrichment <- function(ego, celltype, show_n_each = 10) {
+  reactome_data <- as.data.frame(ego@result)
+  plot_data <- data.frame()
+    if(nrow(reactome_data) > 0) {
+      plot_data <- rbind(plot_data, 
+                        reactome_data[, c("Description", "NES", "pvalue", "p.adjust")])
+    }
+  
+  if(nrow(plot_data) == 0) {
+    return(NULL)
+  }
+  
+  # Split into positive and negative NES
+  pos_data <- plot_data[plot_data$NES > 0, ]
+  neg_data <- plot_data[plot_data$NES < 0, ]
+  
+  # Sort and take top N from each
+  pos_data <- pos_data[order(-pos_data$NES), ]
+  neg_data <- neg_data[order(neg_data$NES), ]
+  
+  pos_data <- head(pos_data, show_n_each)
+  neg_data <- head(neg_data, show_n_each)
+  
+  # Combine the data
+  plot_data <- rbind(pos_data, neg_data)
+  
+  # Add significance levels for plotting
+  plot_data$sig_level <- case_when(
+    plot_data$p.adjust < 0.001 ~ "***",
+    plot_data$p.adjust < 0.01 ~ "**",
+    plot_data$p.adjust < 0.05 ~ "*",
+    TRUE ~ ""
+  )
+  
+  # Make pathway names more readable
+  plot_data$Description <- factor(plot_data$Description, 
+                                levels = plot_data$Description[order(plot_data$NES)])
+  
+  # Calculate maximum absolute NES for symmetric plotting
+  max_abs_nes <- max(abs(plot_data$NES))
+  
+  # Create combined plot
+  p <- ggplot(plot_data, aes(x = NES, y = Description)) +
+    geom_col(aes(fill = NES)) +
+    geom_text(aes(label = sig_level), hjust = -0.5) +
+    scale_fill_gradient2(low = "blue", mid = "white", high = "red", midpoint = 0) +
+    theme_minimal() +
+    theme(
+      axis.text.y = element_text(size = 8),
+      plot.title = element_text(size = 12, face = "bold"),
+      legend.position = "right",
+      panel.grid.major.y = element_blank()
+    ) +
+    labs(
+      title = paste("Enriched Pathways in", celltype),
+      subtitle = paste0("Top ", show_n_each, " positively and negatively enriched pathways"),
+      x = "Normalized Enrichment Score (NES)",
+      y = NULL,
+      caption = "FDR significance: *** < 0.001, ** < 0.01, * < 0.05"
+    ) +
+    # Make x-axis symmetric around 0
+    xlim(-max_abs_nes * 1.2, max_abs_nes * 1.2)
+  
+  # Add database information to the data frame
+  plot_data$direction <- ifelse(plot_data$NES > 0, "Upregulated in young", "Downregulated in young")
+  
+  return(list(
+    plot = p,
+    data = plot_data
+  ))
+}
+```
+
+```{r}
+plot_gene_module <- function(seurat_obj, gene_set, group_var = "less18M", celltype) {
+ seurat_sub <- subset(seurat_obj, Annotation == celltype)
+ seurat_sub <- AddModuleScore(seurat_sub, features = list(gene_set), name = "gene_module")
+ 
+ plot_data <- data.frame(
+   score = seurat_sub$gene_module1,
+   group = seurat_sub@meta.data[[group_var]],
+   sample = seurat_sub$SampleID,
+   dataset = seurat_sub$dataset
+ )
+ 
+ # Sort samples within each dataset by mean score
+ sample_means <- plot_data %>%
+   group_by(dataset, sample) %>%
+   summarize(mean_score = mean(score), .groups = 'drop') %>%
+   arrange(dataset, desc(mean_score))
+ 
+ plot_data$sample <- factor(plot_data$sample, levels = sample_means$sample)
+ 
+ ggplot(plot_data, aes(x = sample, y = score, fill = group)) +
+   geom_boxplot() +
+   facet_wrap(~dataset, scales = "free_x") +
+   theme_minimal() +
+   theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+   labs(x = "Sample", y = "Module Score", fill = group_var) +
+   stat_compare_means(aes(group = group), method = "wilcox.test", label = "p.signif")
+}
+```
+
+```{r}
+plot_gene_expression <- function(seurat_obj, gene, group_var = "less18M", celltype) {
+  # Check if the gene is in the dataset
+  if (!(gene %in% rownames(seurat_obj))) {
+    message(paste("Skipping", gene, "- not found in the expression matrix"))
+    return(NULL)
+  }
+
+  # Subset the Seurat object by cell type
+  seurat_sub <- subset(seurat_obj, Annotation == celltype)
+
+  # Extract gene expression data
+  plot_data <- data.frame(
+    expression = FetchData(seurat_sub, vars = gene)[, 1],
+    group = seurat_sub@meta.data[[group_var]],
+    sample = seurat_sub$SampleID,
+    dataset = seurat_sub$dataset
+  )
+
+  # Sort samples within each dataset by mean expression
+  sample_means <- plot_data %>%
+    group_by(dataset, sample) %>%
+    summarize(mean_expression = mean(expression), .groups = 'drop') %>%
+    arrange(dataset, desc(mean_expression))
+
+  plot_data$sample <- factor(plot_data$sample, levels = sample_means$sample)
+
+  # Plot
+  ggplot(plot_data, aes(x = sample, y = expression, fill = group)) +
+    geom_boxplot() +
+    facet_wrap(~dataset, scales = "free_x") +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+    labs(x = "Sample", y = paste("Expression of", gene), fill = group_var)
+}
+```
+
+# Stromal cells
+
+```{r}
+# Convert the human genes to mouse genes
+gene_conversion <- convert_human_to_mouse(DEG_bulk_human$meta_results$`Stromal-cells`$gene)
+
+# Merge with original dataframe
+stromal <- DEG_bulk_human$meta_results$`Stromal-cells` %>%
+  left_join(gene_conversion, by = c("gene" = "human_gene")) %>%
+  rename(gene_mouse = mouse_gene)  # Rename for clarity
+
+stromal_both <- stromal %>%
+  inner_join(DEG_sc_mouse %>% 
+               dplyr::filter(celltype == 'Stromal_cells'), by = c("gene_mouse" = "gene")) %>% 
+  dplyr::mutate(the_same_direction = (mean_logFC * avg_log2FC) > 0) 
+
+stromal_genes <- stromal_both %>% 
+  dplyr::filter(the_same_direction) %>% 
+  dplyr::mutate(rank = -log10(combined_p) * sign(avg_log2FC)) %>% 
+  arrange(desc(rank)) %>%
+  dplyr::select(gene, rank) %>%
+  deframe()
+  
+ids <- bitr(names(stromal_genes), fromType = "SYMBOL", 
+                     toType = "ENTREZID", OrgDb = org.Hs.eg.db)
+
+stromal_genes <- stromal_genes[ids$SYMBOL]
+names(stromal_genes) <- ids$ENTREZID
+
+stromal_both %>% 
+  dplyr::filter(the_same_direction) %>% 
+  dplyr::filter(combined_p < 0.05) %>% 
+  arrange(combined_p)
+```
+
+## Enrichment
+
+```{r}
+stromal_reactome <- gsePathway(geneList = stromal_genes,
+                                organism = "human",
+                                minGSSize = 10,
+                                maxGSSize = 500,
+                                pvalueCutoff = 1,
+                                verbose = FALSE)
+
+plot_enrichment(stromal_reactome, 'Stromal cells')
+```
+
+```{r}
+genes <- stromal_reactome@result %>% 
+  dplyr::filter(ID == 'R-HSA-1474244') %>% 
+  .$core_enrichment %>% 
+  str_split('/') %>% 
+  .[[1]]
+
+# Convert ENTREZ IDs to gene symbols
+gene_symbols <- mapIds(org.Hs.eg.db, 
+                      keys = genes,
+                      column = "SYMBOL",
+                      keytype = "ENTREZID",
+                      multiVals = "first")
+```
+
+```{r}
+plot_gene_module(atlas, gene_set = gene_symbols, celltype = 'Stromal_cells')
+```
+
+```{r}
+for (gene in gene_symbols) {
+  print(plot_gene_expression(atlas, gene = gene, celltype = 'Stromal_cells'))
+}
+
+```
+
+## Metabolism
+
+```{r}
+genes <- stromal_reactome@result %>% 
+  dplyr::filter(ID == 'R-HSA-1430728') %>% 
+  .$core_enrichment %>% 
+  str_split('/') %>% 
+  .[[1]]
+
+# Convert ENTREZ IDs to gene symbols
+gene_symbols <- mapIds(org.Hs.eg.db, 
+                      keys = genes,
+                      column = "SYMBOL",
+                      keytype = "ENTREZID",
+                      multiVals = "first")
+```
+
+```{r fig.height=10, fig.width=10}
+plot_gene_module(atlas, gene_set = gene_symbols, celltype = 'Stromal_cells')
+```
+
+```{r fig.height=10, fig.width=10}
+for (gene in gene_symbols) {
+  print(plot_gene_expression(atlas, gene = gene, celltype = 'Stromal_cells'))
+}
+
+```
+# Endothelial cells
+
+```{r}
+# Convert the human genes to mouse genes
+gene_conversion <- convert_human_to_mouse(DEG_bulk_human$meta_results$`Endothelial-cells`$gene)
+
+# Merge with original dataframe
+endo <- DEG_bulk_human$meta_results$`Endothelial-cells` %>%
+  left_join(gene_conversion, by = c("gene" = "human_gene")) %>%
+  rename(gene_mouse = mouse_gene)  # Rename for clarity
+
+endo_both <- endo %>%
+  inner_join(DEG_sc_mouse %>% 
+               dplyr::filter(celltype == 'Endothelial_cells'), by = c("gene_mouse" = "gene")) %>% 
+  dplyr::mutate(the_same_direction = (mean_logFC * avg_log2FC) > 0) 
+
+endo_genes <- endo_both %>% 
+  dplyr::filter(the_same_direction) %>% 
+  dplyr::mutate(rank = -log10(combined_p) * sign(avg_log2FC)) %>% 
+  arrange(desc(rank)) %>%
+  dplyr::select(gene, rank) %>%
+  deframe()
+  
+ids <- bitr(names(endo_genes), fromType = "SYMBOL", 
+                     toType = "ENTREZID", OrgDb = org.Hs.eg.db)
+
+endo_genes <- endo_genes[ids$SYMBOL]
+names(endo_genes) <- ids$ENTREZID
+
+endo_both %>% 
+  dplyr::filter(the_same_direction) %>% 
+  arrange(combined_p)
+```
+
+## Enrichment
+
+```{r}
+endo_reactome <- gsePathway(geneList = endo_genes,
+                                organism = "human",
+                                minGSSize = 10,
+                                maxGSSize = 500,
+                                pvalueCutoff = 1,
+                                verbose = FALSE)
+
+plot_enrichment(endo_reactome, 'Endothelial cells')
+```
+
+```{r}
+genes <- endo_reactome@result %>% 
+  dplyr::filter(ID == 'R-HSA-1474244') %>% 
+  .$core_enrichment %>% 
+  str_split('/') %>% 
+  .[[1]]
+
+# Convert ENTREZ IDs to gene symbols
+gene_symbols <- mapIds(org.Hs.eg.db, 
+                      keys = genes,
+                      column = "SYMBOL",
+                      keytype = "ENTREZID",
+                      multiVals = "first")
+```
+
+```{r fig.height=10, fig.width=10}
+plot_gene_module(atlas, gene_set = gene_symbols, celltype = 'Endothelial_cells')
+```
+
+```{r fig.height=10, fig.width=10}
+for (gene in gene_symbols) {
+  print(plot_gene_expression(atlas, gene = gene, celltype = 'Endothelial_cells'))
+}
+
+```
+
+```{r}
+VlnPlot(subset(mouse, annotation == 'Endothelial_cells'), features = c('Adamts9'), group.by = 'age')
+VlnPlot(subset(mouse, annotation == 'Fibroblasts'), features = c('Adamts9'), group.by = 'age')
+```
+
+## TGF-beta
+
+```{r}
+genes <- endo_reactome@result %>% 
+  dplyr::filter(ID == 'R-HSA-9006936') %>% 
+  .$core_enrichment %>% 
+  str_split('/') %>% 
+  .[[1]]
+
+# Convert ENTREZ IDs to gene symbols
+gene_symbols <- mapIds(org.Hs.eg.db, 
+                      keys = genes,
+                      column = "SYMBOL",
+                      keytype = "ENTREZID",
+                      multiVals = "first")
+```
+
+```{r fig.height=10, fig.width=10}
+plot_gene_module(atlas, gene_set = gene_symbols, celltype = 'Endothelial_cells')
+```
+
+```{r fig.height=10, fig.width=10}
+for (gene in gene_symbols) {
+  print(plot_gene_expression(atlas, gene = gene, celltype = 'Endothelial_cells'))
+}
+
+```
+
+# Neutrophils
+
+https://www.nature.com/articles/s41598-025-88608-x#data-availability
+
+```{r}
+DEG_bulk_human$meta_results$`Myeloid-cells`
+
+net_genes <- read.csv(paste0(DATADIR, 'net_genes.csv'))
+
+DEG_bulk_human$meta_results$`Myeloid-cells` %>% 
+  dplyr::filter(combined_p < 0.05) %>% 
+  dplyr::filter(abs(mean_logFC) > 0.5 ) %>% 
+  dplyr::filter(gene %in% net_genes$NETs.related.genes)
+DEG_bulk_human$meta_results$Neuroendocrine %>% 
+  dplyr::filter(combined_p < 0.05) %>% 
+  dplyr::filter(abs(mean_logFC) > 0.5 ) %>% 
+  dplyr::filter(gene %in% net_genes$NETs.related.genes)
+DEG_bulk_human$meta_results$`Stromal-cells` %>% 
+  dplyr::filter(combined_p < 0.05) %>% 
+  dplyr::filter(abs(mean_logFC) > 0.5 ) %>% 
+  dplyr::filter(gene %in% net_genes$NETs.related.genes)
+DEG_bulk_human$meta_results$`Endothelial-cells` %>% 
+  dplyr::filter(combined_p < 0.05) %>% 
+  dplyr::filter(abs(mean_logFC) > 0.5 ) %>% 
+  dplyr::filter(gene %in% net_genes$NETs.related.genes)
+DEG_bulk_human$meta_results$`T-cells` %>% 
+  dplyr::filter(combined_p < 0.05) %>% 
+  dplyr::filter(abs(mean_logFC) > 0.5 ) %>% 
+  dplyr::filter(gene %in% net_genes$NETs.related.genes)
+```
+
+```{r fig.height=10, fig.width=10}
+gene_symbols <- DEG_bulk_human$meta_results$`Myeloid-cells` %>% 
+  dplyr::filter(combined_p < 0.05) %>% 
+  dplyr::filter(gene %in% net_genes$NETs.related.genes) %>% 
+  .$gene
+for (gene in gene_symbols) {
+  print(plot_gene_expression(atlas, gene = gene, celltype = 'Myeloid_cells'))
+}
+
+```
+
+```{r}
+library(tidyverse)
+
+# Function to extract logFC and significance from results
+get_gene_stats <- function(results, dataset) {
+  
+  de_table <- results$de_table
+  
+  data.frame(
+    gene = rownames(de_table),
+    logFC = de_table$logFC,
+    FDR = de_table$FDR,
+    dataset = dataset
+  ) %>%
+    filter(gene %in% gene_symbols)
+}
+
+# Combine data from all datasets
+plot_data <- bind_rows(
+  get_gene_stats(DEG_bulk_human$results$`Myeloid-cells`$grossmann, "Grossmann"),
+  get_gene_stats(DEG_bulk_human$results$`Myeloid-cells`$patel, "Patel"),
+  get_gene_stats(DEG_bulk_human$results$`Myeloid-cells`$bonine, "Bonine"),
+  get_gene_stats(DEG_bulk_human$results$`Myeloid-cells`$verhoeven, "Verhoeven"),
+  get_gene_stats(DEG_bulk_human$results$`Myeloid-cells`$dong, "Dong")
+)
+plot_data <- plot_data %>%
+ mutate(logFC_capped = case_when(
+   logFC > 2 ~ 2,
+   logFC < -2 ~ -2,
+   TRUE ~ logFC
+ ))
+# Create dotplot
+ggplot(plot_data, aes(x = gene, y = dataset)) +
+  geom_point(aes(color = logFC_capped), size = 5) +
+  scale_color_gradient2(low = "blue", mid = "white", high = "#FF69B4FF", midpoint = 0,
+                        limits = c(-2, 2)) +
+  geom_point(data = subset(plot_data, FDR < 0.05), 
+             shape = "*", size = 5, color = "black") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(x = "Genes", y = "Datasets", 
+       color = "Log2FC",
+       size = "-log10(FDR)") +
+  scale_size_continuous(range = c(1, 5))
+```
+
+## mouse
+
+```{r}
+gene_conversion <- convert_human_to_mouse(net_genes$NETs.related.genes)
+
+plot_data <- DEG_sc_mouse %>% 
+  dplyr::filter(celltype == 'Myeloid_cells' & p_val_adj < 0.05) %>% 
+  dplyr::filter(gene %in% gene_conversion$mouse_gene)
+
+plot_data <- plot_data[order(plot_data$avg_log2FC, decreasing = TRUE), ]
+
+# Dot Plot Visualization
+ggplot(plot_data, aes(x = reorder(gene, avg_log2FC), y = celltype, size = abs(avg_log2FC), color = avg_log2FC)) +
+  geom_point() +
+  scale_color_gradient2(low = "blue", mid = "white", high = "#FF69B4FF", midpoint = 0) +
+  labs(
+    title = "Mouse Single Cell Myeloid cells",
+    x = "Gene (sorted by Log2 Fold Change)",
+    y = "Cell Type",
+    color = "Log2 Fold Change",
+    size = "|Log2 Fold Change|"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+## bulk
+
+```{r fig.height=12, fig.width=8}
+library(readxl)
+mouse_bulk <- read_excel(paste0(PREPRDATADIR, 'bulk_mouse_adrenal_gland.xlsx'))
+vsd_mat <- qread(paste0(PREPRDATADIR, 'bulk_healthAG_vsd.qs'))
+plot_data <- mouse_bulk %>% 
+  dplyr::filter(symbol %in% gene_conversion$mouse_gene)
+library(pheatmap)
+
+filtered_genes <- mouse_bulk %>% 
+  dplyr::filter(symbol %in% gene_conversion$mouse_gene) %>% 
+  dplyr::filter(padj < 0.05) %>% 
+  .$symbol
+filtered_vsd <- vsd_mat[rownames(vsd_mat) %in% filtered_genes, ]
+
+# Optional: Scale the data (for better visual contrast)
+scaled_vsd <- t(scale(t(filtered_vsd)))
+
+# Create a heatmap
+pheatmap(
+  scaled_vsd,
+  cluster_rows = TRUE,      # Cluster genes
+  cluster_cols = TRUE,      # Cluster samples
+  color = colorRampPalette(c("blue", "white", "#FF69B4FF"))(100),
+  main = "Health adrenal gland - bulk",
+  fontsize_row = 8,
+  fontsize_col = 10,
+  show_rownames = TRUE,
+  show_colnames = TRUE
+)
+```
+
+### Enrichment
+
+```{r fig.height=8, fig.width=6}
+# Gene list for ORA
+genes <- filtered_genes
+
+# Convert gene symbols to ENTREZ IDs
+entrez_genes <- bitr(genes, fromType = "SYMBOL", toType = "ENTREZID", OrgDb = org.Mm.eg.db)
+
+# ORA for GO terms
+go_enrich <- enrichGO(
+  gene = entrez_genes$ENTREZID,
+  OrgDb = org.Mm.eg.db,
+  keyType = "ENTREZID",
+  ont = "BP", # "BP" for Biological Process, "MF" for Molecular Function, "CC" for Cellular Component
+  pAdjustMethod = "BH",
+  pvalueCutoff = 0.05,
+  qvalueCutoff = 0.05
+)
+
+# Visualize enriched terms
+dotplot(go_enrich, showCategory = 20) + ggtitle("GO Enrichment Analysis")
+
+# KEGG Pathway Enrichment
+kegg_enrich <- enrichKEGG(
+  gene = entrez_genes$ENTREZID,
+  organism = "mmu",  # Mouse organism code
+  pvalueCutoff = 0.05
+)
+
+# Visualize KEGG pathways
+dotplot(kegg_enrich, showCategory = 20) + ggtitle("KEGG Enrichment Analysis")
+```
+
+```{r}
+# Prepare ranked gene list
+# ranked_genes <- resLFC %>%
+#   as.data.frame() %>% the same result
+ranked_genes <- mouse_bulk %>%
+  dplyr::filter(symbol %in% filtered_genes) %>% 
+  mutate(rank_score = sign(log2FoldChange) * -log10(pvalue)) %>% 
+  dplyr::select(symbol, rank_score) %>%
+  dplyr::arrange(desc(rank_score)) %>%
+  tibble::deframe()
+
+# Convert gene symbols to ENTREZ IDs for GSEA
+gsea_genes <- bitr(names(ranked_genes), fromType = "SYMBOL", toType = "ENTREZID", OrgDb = org.Mm.eg.db)
+
+# Map ranked list to ENTREZ IDs
+names(ranked_genes) <- gsea_genes$ENTREZID
+
+# Perform GSEA for GO
+reactome_gsea <- gsePathway(
+  geneList = ranked_genes,
+  organism = "mouse",       
+  pvalueCutoff = 0.05,
+  pAdjustMethod = "BH",
+  minGSSize = 10,
+  maxGSSize = 500
+)
+library(enrichplot)
+gseaplot2(reactome_gsea, geneSetID = 1:1, title = 'Neutrophil degranulation')
+
+
+```
+
+# ECM
+
+```{r}
+esm_genes_df <- read.csv(paste0(WORKDIR, 'matrisome.csv'), sep = ',', header = T)
+```
+
+```{r}
+convert_human_to_mouse <- function(gene_list) {
+    mouse_human_genes <- read.csv("https://www.informatics.jax.org/downloads/reports/HOM_MouseHumanSequence.rpt", sep="\t")
+
+    # Initialize an empty data frame
+    output <- data.frame(human_gene = character(), mouse_gene = character(), stringsAsFactors = FALSE)
+
+    for (gene in gene_list) {
+        class_key <- unique((mouse_human_genes %>% 
+                             filter(Symbol == gene & Common.Organism.Name == "human"))[['DB.Class.Key']])
+        
+        if (length(class_key) > 0) {
+            mouse_genes <- unique((mouse_human_genes %>% 
+                                   filter(DB.Class.Key %in% class_key & 
+                                          Common.Organism.Name == "mouse, laboratory"))[,"Symbol"])
+
+            # Collapse multiple mouse genes into a string
+            mouse_genes_str <- ifelse(length(mouse_genes) > 0, paste(mouse_genes, collapse = ", "), NA)
+            
+            output <- bind_rows(output, data.frame(human_gene = gene, mouse_gene = mouse_genes_str, stringsAsFactors = FALSE))
+        } else {
+            output <- bind_rows(output, data.frame(human_gene = gene, mouse_gene = NA, stringsAsFactors = FALSE))
+        }
+    }
+    return(output)
+}
+
+esm_genes_df$mouse.gene <- convert_human_to_mouse(esm_genes_df$Gene.Symbol)[,2]
+```
+
+```{r}
+DEG_bulk_human$meta_results$Neuroendocrine %>% 
+  dplyr::filter(combined_p < 0.05) %>% 
+  # dplyr::filter(abs(mean_logFC) > 0.5 ) %>% 
+  dplyr::filter(gene %in% esm_genes_df$Gene.Symbol)
+DEG_bulk_human$meta_results$`Stromal-cells` %>% 
+  dplyr::filter(combined_p < 0.05) %>% 
+  # dplyr::filter(abs(mean_logFC) > 0.5 ) %>% 
+  dplyr::filter(gene %in% esm_genes_df$Gene.Symbol)
+DEG_bulk_human$meta_results$`Endothelial-cells` %>% 
+  dplyr::filter(combined_p < 0.05) %>% 
+  # dplyr::filter(abs(mean_logFC) > 0.5 ) %>% 
+  dplyr::filter(gene %in% esm_genes_df$Gene.Symbol)
+```
+
+## NE
+
+```{r fig.height=10, fig.width=10}
+gene_symbols <- DEG_bulk_human$meta_results$Neuroendocrine %>% 
+  dplyr::filter(combined_p < 0.05) %>% 
+  # dplyr::filter(abs(mean_logFC) > 0.5 ) %>% 
+  dplyr::filter(gene %in% esm_genes_df$Gene.Symbol) %>% 
+  .$gene
+for (gene in gene_symbols) {
+  print(plot_gene_expression(atlas, gene = gene, celltype = 'Neuroendocrine'))
+}
+
+```
+
+```{r}
+library(tidyverse)
+
+# Function to extract logFC and significance from results
+get_gene_stats <- function(results, dataset) {
+  
+  de_table <- results$de_table
+  
+  data.frame(
+    gene = rownames(de_table),
+    logFC = de_table$logFC,
+    FDR = de_table$FDR,
+    dataset = dataset
+  ) %>%
+    filter(gene %in% gene_symbols)
+}
+
+# Combine data from all datasets
+plot_data <- bind_rows(
+  get_gene_stats(DEG_bulk_human$results$`Neuroendocrine`$grossmann, "Grossmann"),
+  get_gene_stats(DEG_bulk_human$results$`Neuroendocrine`$patel, "Patel"),
+  get_gene_stats(DEG_bulk_human$results$`Neuroendocrine`$bonine, "Bonine"),
+  # get_gene_stats(DEG_bulk_human$results$`Neuroendocrine`$verhoeven, "Verhoeven"),
+  get_gene_stats(DEG_bulk_human$results$`Neuroendocrine`$dong, "Dong")
+)
+plot_data <- plot_data %>%
+ mutate(logFC_capped = case_when(
+   logFC > 2 ~ 2,
+   logFC < -2 ~ -2,
+   TRUE ~ logFC
+ ))
+plot_data <- plot_data[order(plot_data$logFC_capped, decreasing = TRUE), ]
+
+# Create dotplot
+ggplot(plot_data, aes(x = reorder(gene, logFC_capped), y = dataset)) +
+  geom_point(aes(color = logFC_capped), size = 5) +
+  scale_color_gradient2(low = "blue", mid = "white", high = "#FF69B4FF", midpoint = 0,
+                        limits = c(-2, 2)) +
+  geom_point(data = subset(plot_data, FDR < 0.05), 
+             shape = "*", size = 5, color = "black") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(x = "Genes", y = "Datasets", 
+       color = "Log2FC",
+       size = "-log10(FDR)",
+       title = 'Neuroendocrine') +
+  scale_size_continuous(range = c(1, 5))
+```
+
+## Stromal cells
+
+```{r fig.height=10, fig.width=10}
+gene_symbols <- DEG_bulk_human$meta_results$`Stromal-cells` %>% 
+  dplyr::filter(combined_p < 0.05) %>% 
+  # dplyr::filter(abs(mean_logFC) > 0.5 ) %>% 
+  dplyr::filter(gene %in% esm_genes_df$Gene.Symbol) %>% 
+  .$gene
+for (gene in gene_symbols) {
+  print(plot_gene_expression(atlas, gene = gene, celltype = 'Stromal_cells'))
+}
+
+```
+
+```{r}
+# Combine data from all datasets
+plot_data <- bind_rows(
+  get_gene_stats(DEG_bulk_human$results$`Stromal-cells`$grossmann, "Grossmann"),
+  get_gene_stats(DEG_bulk_human$results$`Stromal-cells`$patel, "Patel"),
+  get_gene_stats(DEG_bulk_human$results$`Stromal-cells`$bonine, "Bonine"),
+  get_gene_stats(DEG_bulk_human$results$`Stromal-cells`$verhoeven, "Verhoeven")
+  # get_gene_stats(DEG_bulk_human$results$`Stromal-cells`$dong, "Dong")
+)
+plot_data <- plot_data %>%
+ mutate(logFC_capped = case_when(
+   logFC > 2 ~ 2,
+   logFC < -2 ~ -2,
+   TRUE ~ logFC
+ ))
+plot_data <- plot_data[order(plot_data$logFC_capped, decreasing = TRUE), ]
+
+# Create dotplot
+ggplot(plot_data, aes(x = reorder(gene, logFC_capped), y = dataset)) +
+  geom_point(aes(color = logFC_capped), size = 5) +
+  scale_color_gradient2(low = "blue", mid = "white", high = "#FF69B4FF", midpoint = 0,
+                        limits = c(-2, 2)) +
+  geom_point(data = subset(plot_data, FDR < 0.05), 
+             shape = "*", size = 5, color = "black") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(x = "Genes", y = "Datasets", 
+       color = "Log2FC",
+       size = "-log10(FDR)",
+       title = 'Stromal cells') +
+  scale_size_continuous(range = c(1, 5))
+```
+
+```{r fig.height=8, fig.width=6}
+# Gene list for ORA
+genes <- DEG_bulk_human$meta_results$`Stromal-cells` %>% 
+  dplyr::filter(combined_p < 0.05) %>% 
+  # dplyr::filter(abs(mean_logFC) > 0.5 ) %>% 
+  dplyr::filter(gene %in% esm_genes_df$Gene.Symbol) %>% 
+  .$gene
+
+# Convert gene symbols to ENTREZ IDs
+entrez_genes <- bitr(genes, fromType = "SYMBOL", toType = "ENTREZID", OrgDb = org.Hs.eg.db)
+
+ranked_genes <-  DEG_bulk_human$meta_results$`Stromal-cells` %>%
+  dplyr::filter(gene %in% genes) %>% 
+  mutate(rank_score = sign(mean_logFC) * -log10(combined_p)) %>% 
+  dplyr::select(gene, rank_score) %>%
+  dplyr::arrange(desc(rank_score)) %>%
+  tibble::deframe()
+
+# Convert gene symbols to ENTREZ IDs for GSEA
+gsea_genes <- bitr(names(ranked_genes), fromType = "SYMBOL", toType = "ENTREZID", OrgDb = org.Hs.eg.db)
+
+# Map ranked list to ENTREZ IDs
+names(ranked_genes) <- gsea_genes$ENTREZID
+
+# Perform GSEA for GO
+reactome_gsea <- gsePathway(
+  geneList = ranked_genes,
+  organism = "human",       
+  pvalueCutoff = 1,
+  pAdjustMethod = "BH",
+  minGSSize = 10,
+  maxGSSize = 500
+)
+library(enrichplot)
+gseaplot2(reactome_gsea, geneSetID = 1:2)
+```
+
+## Endothelial cells
+
+```{r fig.height=10, fig.width=10}
+gene_symbols <- DEG_bulk_human$meta_results$`Endothelial-cells` %>% 
+  dplyr::filter(combined_p < 0.05) %>% 
+  # dplyr::filter(abs(mean_logFC) > 0.5 ) %>% 
+  dplyr::filter(gene %in% esm_genes_df$Gene.Symbol) %>% 
+  .$gene
+for (gene in gene_symbols) {
+  print(plot_gene_expression(atlas, gene = gene, celltype = 'Endothelial_cells'))
+}
+
+```
+
+```{r fig.height=6, fig.width=12}
+library(tidyverse)
+
+# Combine data from all datasets
+plot_data <- bind_rows(
+  get_gene_stats(DEG_bulk_human$results$`Neuroendocrine`$grossmann, "Grossmann"),
+  get_gene_stats(DEG_bulk_human$results$`Neuroendocrine`$patel, "Patel"),
+  get_gene_stats(DEG_bulk_human$results$`Neuroendocrine`$bonine, "Bonine"),
+  # get_gene_stats(DEG_bulk_human$results$`Neuroendocrine`$verhoeven, "Verhoeven"),
+  get_gene_stats(DEG_bulk_human$results$`Neuroendocrine`$dong, "Dong")
+)
+plot_data <- plot_data %>%
+ mutate(logFC_capped = case_when(
+   logFC > 2 ~ 2,
+   logFC < -2 ~ -2,
+   TRUE ~ logFC
+ ))
+plot_data <- plot_data[order(plot_data$logFC_capped, decreasing = TRUE), ]
+
+# Create dotplot
+ggplot(plot_data, aes(x = reorder(gene, logFC_capped), y = dataset)) +
+  geom_point(aes(color = logFC_capped), size = 5) +
+  scale_color_gradient2(low = "blue", mid = "white", high = "#FF69B4FF", midpoint = 0,
+                        limits = c(-2, 2)) +
+  geom_point(data = subset(plot_data, FDR < 0.05), 
+             shape = "*", size = 5, color = "black") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(x = "Genes", y = "Datasets", 
+       color = "Log2FC",
+       size = "-log10(FDR)",
+       title = 'Endothelial cells') +
+  scale_size_continuous(range = c(1, 5))
+```
+
+```{r fig.height=8, fig.width=6}
+# Gene list for ORA
+genes <- DEG_bulk_human$meta_results$`Endothelial-cells` %>% 
+  dplyr::filter(combined_p < 0.05) %>% 
+  # dplyr::filter(abs(mean_logFC) > 0.5 ) %>% 
+  dplyr::filter(gene %in% esm_genes_df$Gene.Symbol) %>% 
+  .$gene
+
+# Convert gene symbols to ENTREZ IDs
+entrez_genes <- bitr(genes, fromType = "SYMBOL", toType = "ENTREZID", OrgDb = org.Hs.eg.db)
+
+ranked_genes <-  DEG_bulk_human$meta_results$`Stromal-cells` %>%
+  dplyr::filter(gene %in% genes) %>% 
+  mutate(rank_score = sign(mean_logFC) * -log10(combined_p)) %>% 
+  dplyr::select(gene, rank_score) %>%
+  dplyr::arrange(desc(rank_score)) %>%
+  tibble::deframe()
+
+# Convert gene symbols to ENTREZ IDs for GSEA
+gsea_genes <- bitr(names(ranked_genes), fromType = "SYMBOL", toType = "ENTREZID", OrgDb = org.Hs.eg.db)
+
+# Map ranked list to ENTREZ IDs
+names(ranked_genes) <- gsea_genes$ENTREZID
+
+# Perform GSEA for GO
+reactome_gsea <- gsePathway(
+  geneList = ranked_genes,
+  organism = "human",       
+  pvalueCutoff = 1,
+  pAdjustMethod = "BH",
+  minGSSize = 10,
+  maxGSSize = 500
+)
+library(enrichplot)
+gseaplot2(reactome_gsea, geneSetID = 1:2)
+```
+
+# Enrichment
+
+```{r}
+perform_pathway_analysis <- function(meta_results, celltype) {
+  if(is.null(meta_results[[celltype]])) {
+    return(NULL)
+  }
+  
+  # Create ranked gene list
+  gene_list <-  meta_results[[celltype]] %>%
+    mutate(rank_score = sign(mean_logFC) * -log10(combined_p)) %>% 
+    dplyr::select(gene, rank_score) %>%
+    dplyr::arrange(desc(rank_score)) %>%
+    tibble::deframe()
+  names(gene_list) <- meta_results[[celltype]]$gene
+  gene_list <- sort(gene_list, decreasing = TRUE)
+  
+  # Convert gene symbols to ENTREZ IDs
+  entrez_ids <- mapIds(org.Hs.eg.db,
+                      keys = names(gene_list),
+                      column = "ENTREZID",
+                      keytype = "SYMBOL",
+                      multiVals = "first")
+  
+  # Remove NA values
+  gene_list <- gene_list[!is.na(entrez_ids)]
+  entrez_ids <- entrez_ids[!is.na(entrez_ids)]
+  names(gene_list) <- entrez_ids
+  
+  # Run GO enrichment
+  go_results <- gseGO(geneList = gene_list,
+                      ont = "BP",
+                      OrgDb = org.Hs.eg.db,
+                      minGSSize = 10,
+                      maxGSSize = 500,
+                      pvalueCutoff = 0.05,
+                      verbose = FALSE)
+  
+  # Run KEGG pathway analysis
+  kegg_results <- gseKEGG(geneList = gene_list,
+                         organism = "hsa",
+                         minGSSize = 10,
+                         maxGSSize = 500,
+                         pvalueCutoff = 0.05,
+                         verbose = FALSE)
+  
+  # Run Reactome pathway analysis
+  reactome_results <- gsePathway(geneList = gene_list,
+                                organism = "human",
+                                minGSSize = 10,
+                                maxGSSize = 500,
+                                pvalueCutoff = 0.05,
+                                verbose = FALSE)
+  
+  # Create visualization function
+  plot_enrichment <- function(results, title) {
+    if(is.null(results) || nrow(results) == 0) {
+      return(NULL)
+    }
+    
+    dotplot(results, showCategory = 10, title = title) +
+      theme_minimal() +
+      theme(axis.text.y = element_text(size = 8))
+  }
+  
+  # Create plots
+  plots <- list(
+    go = plot_enrichment(go_results, paste("GO Biological Process -", celltype)),
+    kegg = plot_enrichment(kegg_results, paste("KEGG Pathways -", celltype)),
+    reactome = plot_enrichment(reactome_results, paste("Reactome Pathways -", celltype))
+  )
+  
+  return(list(
+    go = go_results,
+    kegg = kegg_results,
+    reactome = reactome_results,
+    plots = plots
+  ))
+}
+```
+
+```{r}
+pathway_results <- list()
+for(celltype in names(DEG_bulk_human$meta_results)) {
+  print(paste("Analyzing pathways for", celltype))
+  pathway_results[[celltype]] <- perform_pathway_analysis(DEG_bulk_human$meta_results, celltype)
+}
+```
+
+```{r}
+plot_enrichment_results <- function(pathway_results, celltype, 
+                                     show_n_each = 10, 
+                                     min_fdr = 0.25) {
+  
+  if(is.null(pathway_results[[celltype]])) {
+    return(NULL)
+  }
+  
+  # Extract results for different databases
+  plot_data <- data.frame()
+  
+  # Process GO results
+  if(!is.null(pathway_results[[celltype]]$go)) {
+    go_data <- as.data.frame(pathway_results[[celltype]]$go@result)
+    if(nrow(go_data) > 0) {
+      go_data$database <- "GO"
+      plot_data <- rbind(plot_data, 
+                        go_data[, c("Description", "NES", "pvalue", "p.adjust", "database")])
+    }
+  }
+  
+  # Process KEGG results
+  if(!is.null(pathway_results[[celltype]]$kegg)) {
+    kegg_data <- as.data.frame(pathway_results[[celltype]]$kegg@result)
+    if(nrow(kegg_data) > 0) {
+      kegg_data$database <- "KEGG"
+      plot_data <- rbind(plot_data, 
+                        kegg_data[, c("Description", "NES", "pvalue", "p.adjust", "database")])
+    }
+  }
+  
+  # Process Reactome results
+  if(!is.null(pathway_results[[celltype]]$reactome)) {
+    reactome_data <- as.data.frame(pathway_results[[celltype]]$reactome@result)
+    if(nrow(reactome_data) > 0) {
+      reactome_data$database <- "Reactome"
+      plot_data <- rbind(plot_data, 
+                        reactome_data[, c("Description", "NES", "pvalue", "p.adjust", "database")])
+    }
+  }
+  
+  if(nrow(plot_data) == 0) {
+    return(NULL)
+  }
+  
+  # Filter by FDR
+  plot_data <- plot_data[plot_data$p.adjust < min_fdr, ]
+  
+  if(nrow(plot_data) == 0) {
+    return(NULL)
+  }
+  
+  # Split into positive and negative NES
+  pos_data <- plot_data[plot_data$NES > 0, ]
+  neg_data <- plot_data[plot_data$NES < 0, ]
+  
+  # Sort and take top N from each
+  pos_data <- pos_data[order(-pos_data$NES), ]
+  neg_data <- neg_data[order(neg_data$NES), ]
+  
+  pos_data <- head(pos_data, show_n_each)
+  neg_data <- head(neg_data, show_n_each)
+  
+  # Combine the data
+  plot_data <- rbind(pos_data, neg_data)
+  
+  # Add significance levels for plotting
+  plot_data$sig_level <- case_when(
+    plot_data$p.adjust < 0.001 ~ "***",
+    plot_data$p.adjust < 0.01 ~ "**",
+    plot_data$p.adjust < 0.05 ~ "*",
+    TRUE ~ ""
+  )
+  
+  # Make pathway names more readable
+  plot_data$Description <- factor(plot_data$Description, 
+                                levels = plot_data$Description[order(plot_data$NES)])
+  
+  # Calculate maximum absolute NES for symmetric plotting
+  max_abs_nes <- max(abs(plot_data$NES))
+  
+  # Create combined plot
+  p <- ggplot(plot_data, aes(x = NES, y = Description)) +
+    geom_col(aes(fill = NES)) +
+    geom_text(aes(label = sig_level), hjust = -0.5) +
+    scale_fill_gradient2(low = "blue", mid = "white", high = "red", midpoint = 0) +
+    theme_minimal() +
+    theme(
+      axis.text.y = element_text(size = 8),
+      plot.title = element_text(size = 12, face = "bold"),
+      legend.position = "right",
+      panel.grid.major.y = element_blank()
+    ) +
+    labs(
+      title = paste("Enriched Pathways in", celltype),
+      subtitle = paste0("Top ", show_n_each, " positively and negatively enriched pathways"),
+      x = "Normalized Enrichment Score (NES)",
+      y = NULL,
+      caption = "FDR significance: *** < 0.001, ** < 0.01, * < 0.05"
+    ) +
+    # Make x-axis symmetric around 0
+    xlim(-max_abs_nes * 1.2, max_abs_nes * 1.2)
+  
+  # Add database information to the data frame
+  plot_data$direction <- ifelse(plot_data$NES > 0, "Downregulated in >18M", "Upregulated in >18M")
+  
+  return(list(
+    plot = p,
+    data = plot_data
+  ))
+}
+```
+
+```{r}
+pathways_list
+```
+
+```{r fig.height=12, fig.width=16}
+library(dplyr)
+library(patchwork)  # for arranging multiple plots
+
+# Create a list to store all plots
+plots_list <- list()
+pathways_list <- list()
+
+# Process each cell type
+for(ct in names(pathway_results)) {
+  results <- plot_enrichment_results(pathway_results, ct, show_n_each = 10)
+  
+  if(!is.null(results)) {
+    plots_list[[ct]] <- results$plot
+    
+    # Store pathway details
+    pathways_list[[ct]] <- results$data %>%
+      as.data.frame() %>%
+      arrange(desc(NES)) %>%
+      dplyr::select(Description, NES, p.adjust, direction, database)
+  }
+}
+
+combined_plots <- wrap_plots(plots_list, ncol = 2)
+print(combined_plots)
+
+# Print pathway details for each cell type
+for(ct in names(pathways_list)) {
+  cat("\n\n==== Enriched pathways for", ct, "====\n")
+  print(pathways_list[[ct]])
+}
+```
+
+# Calprotectin
+
+```{r}
+DEG_bulk_human$meta_results$`Endothelial-cells` %>% 
+  dplyr::filter(gene %in% human_genes)
+```
+

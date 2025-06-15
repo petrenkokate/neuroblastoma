@@ -1,0 +1,1076 @@
+---
+title: "CellMentor_ATLAS"
+author: "Kate Petrenko"
+date: "2025-02-25"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(data.table)
+library(Seurat)
+library(scDblFinder)
+library(DoubletFinder)
+library(dplyr)
+library(remotes)
+# remotes::install_github("carmonalab/STACAS")
+library(STACAS)
+library(SingleR)
+# install.packages("scGate")
+library(scGate)
+library(ggplot2)
+library(BiocParallel)
+library(harmony)
+library(RColorBrewer)
+library(stringr)
+library(cowplot)
+library(scuttle)
+# install.packages("devtools")
+# BiocManager::install("Homo.sapiens")
+# BiocManager::install("jpmam1/scalop") #forked copy of a really good guy 
+# devtools::install_github("jlaffy/infercna")
+library(infercna)
+library(infercnv)
+library(parallel)
+library(future)
+library(clustree)
+library(dittoSeq)
+# install.packages("ggh4x")
+library(ggh4x)
+#BiocManager::install('EnhancedVolcano')
+library(EnhancedVolcano)
+library(clusterProfiler)
+library("org.Hs.eg.db")
+library(ReactomePA)
+library(msigdbr)
+# install.packages('qs')
+library(qs)
+library(DESeq2)
+library(magrittr)
+library(tibble)
+library(tidyr)
+library(pheatmap)
+# BiocManager::install('apeglm')
+# install.packages('ashr')
+
+library(reticulate)
+# install.packages('anndata')
+library(anndata)
+# devtools::install_github("cellgeni/sceasy")
+# BiocManager::install(c("LoomExperiment"))
+library(sceasy)
+library(SeuratData)
+library(CellMentor)
+library(cluster)
+library(aricode)
+```
+
+```{r global variables, include=FALSE}
+set.seed(100)
+DATADIR = '~/neuroblastoma/data/'
+WORKDIR = '~/neuroblastoma/'
+PREPRDATADIR = '~/neuroblastoma/preprocessing_data/'
+
+my_colors <- c("#6495EDFF", "#FF69B4FF", "#BA55D3FF", "#F08080FF", "#32CD32FF",  
+    "#9ACD32FF", "#4682B4FF", "#DDA0DDFF", "#FFA07AFF", "#8FBC8BFF",
+    "#40E0D0FF", "#F0E68CFF", "#5F9EA0FF", "#D2B48CFF",  
+    "#FFDAB9FF", "#87CEEBFF", "#B4A0E5", "#5BC0BE", "#773344", "#A4BEF3")
+```
+
+# Data
+
+```{r}
+atlas_ref <- readRDS(paste0(DATADIR, 'NB_atlas/NB_atlas_v2.rds'))
+# atlas_ref <- qread(paste0(PREPRDATADIR, 'atlas_ref_subset_v2.qs'))
+atlas <- qread(paste0(PREPRDATADIR, 'ATLAS_object.qs'))
+
+DimPlot(atlas_ref, group.by = 'Cell_type_wImmuneZoomAnnot')
+```
+
+```{r eval=FALSE, include=FALSE}
+sample_metadata <- read.csv(paste0(DATADIR, 'samples_metadata_v5.csv'))
+sample_metadata[sample_metadata==""] <- NA
+
+rownames(sample_metadata) <- sample_metadata$Sample_dataset
+
+
+
+clean_sample_id <- function(id) {
+  # First remove _rep1 and _rep2
+  id <- gsub("_rep[12]$", "", id)
+  
+  # Handle the special bonine cases
+  id <- gsub("_sn$", "", id)      # Remove _sn suffix
+  id <- gsub("_[12]$", "", id)    # Remove _1 or _2 suffix
+  
+  return(id)
+}
+
+atlas$less18M <- sample_metadata[clean_sample_id(atlas$SampleID),]$less18M
+atlas$Sex <- sample_metadata[clean_sample_id(atlas$SampleID),]$Sex
+atlas$MYCN_status <- sample_metadata[clean_sample_id(atlas$SampleID),]$MYCN
+atlas$method <- sample_metadata[clean_sample_id(atlas$SampleID),]$Method
+```
+
+```{r}
+metadata_python <- read.csv("query_metadata_with_umap.csv", row.names = 1)
+
+# Match to Seurat cells
+metadata_python <- metadata_python[colnames(atlas), ]
+atlas <- AddMetaData(atlas, metadata = metadata_python[c("Age", "celltypist_cell_label_fine", "Final_Annotation")])
+
+# Add UMAP
+atlas[['UMAP']] <- CreateDimReducObject(embeddings = as.matrix(metadata_python[, c("UMAP_1", "UMAP_2")]), key = "UMAP_", global = T, assay = "RNA")
+
+DimPlot(atlas, group.by = 'Final_Annotation', cols = my_colors, reduction = 'UMAP')
+```
+
+```{r v1, eval=FALSE, include=FALSE}
+cell_type_counts <- table(atlas_ref$Cell_type_wImmuneZoomAnnot)
+
+# Identify cell types to keep (< 2000 cells) and those to downsample
+keep_cell_types <- names(cell_type_counts[cell_type_counts < 4000])
+downsample_cell_types <- names(cell_type_counts[cell_type_counts >= 4000])
+
+# Initialize a vector to store selected cell indices
+subset_cells <- c()
+
+# Keep all cells from cell types with fewer than 2000 cells
+subset_cells <- c(subset_cells, which(atlas_ref$Cell_type_wImmuneZoomAnnot %in% keep_cell_types))
+
+# Downsample each large cell type to 2000 while ensuring an equal contribution from each study
+set.seed(123)  # For reproducibility
+for (cell_type in downsample_cell_types) {
+  
+  # Get indices of all cells of this type
+  cell_indices <- which(atlas_ref$Cell_type_wImmuneZoomAnnot == cell_type)
+  
+  # Extract study information for this cell type
+  cell_studies <- atlas_ref$Study[cell_indices]
+  
+  # Get study distribution
+  study_distribution <- table(cell_studies)
+  
+  # Compute the target number of cells per study (equal distribution)
+  num_studies <- length(study_distribution)
+  target_per_study <- rep(floor(2000 / num_studies), num_studies)
+
+  # Distribute remaining cells due to rounding
+  extra_cells <- 2000 %% num_studies
+  target_per_study[seq_len(extra_cells)] <- target_per_study[seq_len(extra_cells)] + 1
+
+  # Sample cells from each study
+  sampled_indices <- unlist(mapply(function(study, target) {
+    study_indices <- cell_indices[cell_studies == study]
+    
+    if (length(study_indices) <= target) {
+      return(study_indices)  # Keep all if less than or equal to the target
+    } else {
+      return(sample(study_indices, target, replace = FALSE))
+    }
+  }, names(study_distribution), target_per_study, SIMPLIFY = FALSE))
+
+  subset_cells <- c(subset_cells, sampled_indices)
+}
+
+# Subset the Seurat object
+atlas_subset <- subset(atlas_ref, cells = colnames(atlas_ref)[subset_cells])
+
+qsave(atlas_subset, paste0(PREPRDATADIR, 'atlas_ref_subset.qs'))
+```
+
+```{r v2, eval=FALSE, include=FALSE}
+cell_type_counts <- table(atlas_ref$Cell_type_wImmuneZoomAnnot)
+
+keep_cell_types <- names(cell_type_counts[cell_type_counts < 4000])
+downsample_cell_types <- names(cell_type_counts[cell_type_counts >= 4000])
+
+# Initialize a vector to store selected cell indices
+subset_cells <- c()
+
+# Keep all cells from cell types with fewer than 4000 cells
+subset_cells <- c(subset_cells, which(atlas_ref$Cell_type_wImmuneZoomAnnot %in% keep_cell_types))
+
+set.seed(100)
+# Downsample each large cell type to target while ensuring balanced contribution from studies
+for (cell_type in downsample_cell_types) {
+  
+  # Get indices of all cells of this type
+  cell_indices <- which(atlas_ref$Cell_type_wImmuneZoomAnnot == cell_type)
+  
+  # Extract study information for this cell type
+  cell_studies <- atlas_ref$Study[cell_indices]
+  
+  # Get study distribution
+  study_distribution <- table(cell_studies)
+  
+  # Set target based on cell type
+  total_target <- if (cell_type == 'NE') 20000 else 4000
+  
+  # Calculate target per study (equal distribution initially)
+  num_studies <- length(study_distribution)
+  target_per_study <- rep(floor(total_target / num_studies), num_studies)
+  names(target_per_study) <- names(study_distribution)
+  
+  # Distribute remaining cells due to rounding
+  extra_cells <- total_target %% num_studies
+  if (extra_cells > 0) {
+    target_per_study[1:extra_cells] <- target_per_study[1:extra_cells] + 1
+  }
+  
+  # First pass: Sample from each study, keeping track of actual samples
+  sampled_indices <- c()
+  actual_samples <- numeric(length(study_distribution))
+  names(actual_samples) <- names(study_distribution)
+  
+  for (study in names(study_distribution)) {
+    study_indices <- cell_indices[cell_studies == study]
+    target <- target_per_study[study]
+    
+    if (length(study_indices) <= target) {
+      # Keep all cells from this study
+      sampled_indices <- c(sampled_indices, study_indices)
+      actual_samples[study] <- length(study_indices)
+    } else {
+      # Sample from this study
+      sampled_study_indices <- sample(study_indices, target, replace = FALSE)
+      sampled_indices <- c(sampled_indices, sampled_study_indices)
+      actual_samples[study] <- target
+    }
+  }
+  
+  # Calculate shortfall
+  total_sampled <- sum(actual_samples)
+  shortfall <- total_target - total_sampled
+  
+  # Second pass: If there's a shortfall, redistribute among studies with excess
+  if (shortfall > 0) {
+    # Identify studies with excess cells
+    excess_studies <- c()
+    excess_counts <- c()
+    
+    for (study in names(study_distribution)) {
+      study_indices <- cell_indices[cell_studies == study]
+      already_sampled <- actual_samples[study]
+      excess <- length(study_indices) - already_sampled
+      
+      if (excess > 0) {
+        excess_studies <- c(excess_studies, study)
+        excess_counts <- c(excess_counts, excess)
+      }
+    }
+    
+    names(excess_counts) <- excess_studies
+    
+    if (length(excess_studies) > 0) {
+      # Distribute shortfall among excess studies
+      additional_per_study <- floor(shortfall / length(excess_studies))
+      extra_shortfall <- shortfall %% length(excess_studies)
+      
+      additional_targets <- rep(additional_per_study, length(excess_studies))
+      names(additional_targets) <- excess_studies
+      
+      if (extra_shortfall > 0) {
+        additional_targets[1:extra_shortfall] <- additional_targets[1:extra_shortfall] + 1
+      }
+      
+      # Sample additional cells from each excess study
+      for (study in excess_studies) {
+        additional_target <- additional_targets[study]
+        
+        # Get unsampled indices for this study
+        study_indices <- cell_indices[cell_studies == study]
+        already_sampled_indices <- sampled_indices[cell_studies[sampled_indices] == study]
+        unsampled_indices <- setdiff(study_indices, already_sampled_indices)
+        
+        # Sample additional cells
+        additional_to_sample <- min(additional_target, length(unsampled_indices))
+        if (additional_to_sample > 0) {
+          additional_indices <- sample(unsampled_indices, additional_to_sample, replace = FALSE)
+          sampled_indices <- c(sampled_indices, additional_indices)
+        }
+      }
+    }
+  }
+  
+  subset_cells <- c(subset_cells, sampled_indices)
+}
+
+# Subset the Seurat object
+atlas_subset <- subset(atlas_ref, cells = colnames(atlas_ref)[subset_cells])
+qsave(atlas_subset, paste0(PREPRDATADIR, 'atlas_ref_subset_v2.qs'))
+DimPlot(atlas_subset, group.by = 'Cell_type_wImmuneZoomAnnot')
+```
+
+```{r eval=FALSE, include=FALSE}
+table(atlas_subset$Cell_type_wImmuneZoomAnnot, atlas_subset$Study)
+table(atlas_subset$Cell_type_wImmuneZoomAnnot)
+```
+
+```{r eval=FALSE, include=FALSE}
+table(atlas_ref$Cell_type_wImmuneZoomAnnot)
+```
+
+# CellMentor
+
+```{r}
+ref <- subset(atlas_ref, Cell_type_wImmuneZoomAnnot %in% c(
+  'cDC1', 'cDC2/DC3', 'Classical monocyte', 'Macrophage',
+  'Migratory cDC', 'Neutrophil', 'Patrolling monocyte', 'pDC'
+))
+query <- subset(atlas, Final_Annotation %in% c('DC', 'Macrophages', 'Monocytes', 'Neutrophils', 'pDCs'))
+```
+
+```{r}
+# important_genes <- c('PHOX2B', 'NXPH1', 'SYT1', 'EGFL7', 'EMCN', 'PLVAP', 'CDH19', 'PLP1', 
+#                      'PTPRZ1', 'COL1A1', 'COL1A2', 'COL3A1', 'CD3D', 'CD3E', 'CD2', 'KLRF1', 
+#                      'KLRC1', 'XCL2', 'MS4A1', 'CD79A', 'VPREB3', 'IGHG1', 'IGHG2', 'IGHG3', 
+#                      'LYZ', 'IL1B', 'C1QC', 'LILRA4', 'SCT', 'PTCRA', 'CYP11B1', 'CYP21A2', 'FAM166B')
+object = CreateCSFNMFobject(as.matrix(ref[['RNA']]@counts), ref$Cell_type_wImmuneZoomAnnot,
+                            query[['RNA']]@counts) # my data)
+qsave(object, paste0(PREPRDATADIR, 'atlas_CellMentor_object_v3.qs'))
+```
+
+```{r}
+if (!requireNamespace("spam64", quietly = TRUE)) {
+  install.packages("spam64")
+}
+library(spam)
+library(spam64)
+options(spam.force64 = TRUE)    # forcing 64-bit structure
+```
+
+```{r}
+object <- qread(paste0(PREPRDATADIR, 'atlas_myel_CellMentor_object_v2.qs'))
+# install.packages("RcppML")
+optimal_params_meth <- select_optimal_parameters(object, num_cores = 10, alpha_range = c(1), beta_range = c(1),
+                                                 gamma_range = c(1), delta_range = c(0.5), init_methods = c('regulated'),
+                                                 k = 222)
+# k = 188 was calculated, others are just checking of method
+```
+
+
+```{r}
+qsave(optimal_params_meth, paste0(PREPRDATADIR, 'atlas_CellMentor_bestmethod_v3.qs'))
+optimal_params_meth <- qread(paste0(PREPRDATADIR, 'atlas_myel_CellMentor_bestmethod_7.qs'))
+```
+
+```{r}
+final_model <- optimal_params_meth$best_model
+h_test <- project_data(
+    W = final_model@W,                    # Use learned W matrix
+    X = final_model@matrices@data,        # Query/test data matrix
+    seed = 1,
+    num_cores = 5,
+    verbose = TRUE
+)
+
+h_test <- qread(paste0(PREPRDATADIR, 'atlas_myel_CellMentor_bestmethod_v5_htest.qs'))
+K_VALUE <- nrow(h_test)
+```
+
+```{r}
+# atlas_imm <- subset(atlas, Annotation != 'Neuroendocrine')
+atlas$CellMentor <- CreateDimReducObject(
+  embeddings = t(as.matrix(h_test)),
+  key = paste0('CellMentor', "_"),
+  assay = DefaultAssay(atlas),
+  loadings = as.matrix(final_model@W)
+)
+options(future.globals.maxSize= 3000*1024^2)
+atlas <- atlas %>%
+  RunUMAP(reduction = 'CellMentor', dims= 1:K_VALUE, reduction.name = 'umap_cellmentor', verbose = F) %>%
+  FindNeighbors(dims = 1:K_VALUE, reduction = 'CellMentor', verbose = F) %>%
+  FindClusters(resolution = 0.2, verbose = F)
+```
+
+```{r}
+# atlas_imm <- subset(atlas, Annotation != 'Neuroendocrine')
+query$CellMentor <- CreateDimReducObject(
+  embeddings = t(as.matrix(h_test)),
+  key = paste0('CellMentor', "_"),
+  assay = DefaultAssay(query),
+  loadings = as.matrix(final_model@W)
+)
+options(future.globals.maxSize= 3000*1024^2)
+query <- query %>%
+  RunUMAP(reduction = 'CellMentor', dims= 1:K_VALUE, reduction.name = 'umap_cellmentor', verbose = F) 
+  # %>%
+  # FindNeighbors(dims = 1:K_VALUE, reduction = 'CellMentor', verbose = F) %>%
+  # FindClusters(resolution = 0.2, verbose = F)
+```
+
+```{r fig.height=5, fig.width=12}
+plot_grid(DimPlot(query, group.by = 'Final_Annotation', reduction = 'umap_cellmentor'), 
+          DimPlot(query, group.by = 'Study', reduction = 'umap_cellmentor'), nrow = 1)
+```
+
+## SingleR
+
+```{r}
+sce <- as.SingleCellExperiment(atlas)
+  
+pred_singler <- SingleR(
+  test = sce, 
+  ref = as.SingleCellExperiment(atlas_ref), 
+  labels = atlas_ref$Cell_type_wImmuneZoomAnnot, 
+  BPPARAM = MulticoreParam(10)
+)
+
+pred_singler <- qread(paste0(PREPRDATADIR, 'ATLAS_singler.qs'))
+atlas$SingleR_NBatlas_deep <- pred_singler$pruned.labels
+
+
+atlas$SingleR_NBatlas <- NA
+
+qsave(atlas, paste0(PREPRDATADIR, 'ATLAS_object.qs'))
+```
+
+```{r}
+DimPlot(atlas, group.by = 'Annotation', reduction = 'umap_cellmentor')
+DimPlot(atlas, reduction = 'umap_cellmentor')
+DimPlot(atlas, group.by = 'Study', reduction = 'umap_cellmentor')
+```
+
+```{r}
+DimPlot(atlas, group.by = 'Annotation')
+DimPlot(atlas, group.by = 'SingleR_NBatlas_deep')
+```
+
+
+# Optimization
+
+```{r}
+ref <- subset(atlas_ref, Cell_type_wImmuneZoomAnnot %in% c('cDC1', 'cDC2/DC3', 'Classical monocyte', 'Macrophage',
+                                                           'Migratory cDC', 'Neutrophil', 'Patrolling monocyte', 'pDC'))
+
+# ref <- subset(ref, Study == 'Verhoeven2022')
+# ref <- subset(ref, Sample == 'Verhoeven2022_NB13')
+
+ref@meta.data <- ref@meta.data %>%
+  mutate(SimpleCellType = case_when(
+    Cell_type_wImmuneZoomAnnot %in% c('cDC1', 'cDC2/DC3', 'Migratory cDC') ~ 'cDC',
+    Cell_type_wImmuneZoomAnnot == 'pDC' ~ 'pDC',
+    Cell_type_wImmuneZoomAnnot == 'Macrophage' ~ 'Macrophages',
+    Cell_type_wImmuneZoomAnnot %in% c('Classical monocyte') ~ 'Classical monocytes',
+    Cell_type_wImmuneZoomAnnot %in% c('Patrolling monocyte') ~ 'Patrolling monocytes',
+    Cell_type_wImmuneZoomAnnot == 'Neutrophil' ~ 'Neutrophils',
+    TRUE ~ 'Other'
+  ))
+ref <- subset(ref, SimpleCellType != 'Other')
+```
+
+```{r}
+ref$CellMentor <- CreateDimReducObject(
+  embeddings = t(as.matrix(final_model@H)),
+  key = paste0('CellMentor', "_"),
+  assay = DefaultAssay(ref)
+  ) 
+
+ref <- ref %>% 
+  RunUMAP(reduction = 'CellMentor', dims= 1:K_VALUE, reduction.name = 'umap_cellmentor', verbose = F) 
+
+DimPlot(ref, reduction = 'umap_cellmentor', group.by = 'Cell_type_wImmuneZoomAnnot', cols = my_colors)
+```
+
+```{r}
+ref_verh <- subset(atlas_ref, Cell_type_wImmuneZoomAnnot %in% c('cDC1', 'cDC2/DC3', 'Classical monocyte', 'Macrophage',
+                                                          'Migratory cDC', 'Neutrophil', 'Patrolling monocyte', 'pDC'))
+ref_verh <- subset(ref_verh, Study == 'Verhoeven2022')
+
+ref_verh@meta.data <- ref_verh@meta.data %>%
+  mutate(SimpleCellType = case_when(
+    Cell_type_wImmuneZoomAnnot %in% c('cDC1', 'cDC2/DC3', 'Migratory cDC') ~ 'cDC',
+    Cell_type_wImmuneZoomAnnot == 'pDC' ~ 'pDC',
+    Cell_type_wImmuneZoomAnnot == 'Macrophage' ~ 'Macrophages',
+    Cell_type_wImmuneZoomAnnot %in% c('Classical monocyte') ~ 'Classical monocytes',
+    Cell_type_wImmuneZoomAnnot %in% c('Patrolling monocyte') ~ 'Patrolling monocytes',
+    Cell_type_wImmuneZoomAnnot == 'Neutrophil' ~ 'Neutrophils',
+    TRUE ~ 'Other'
+  ))
+ref_verh <- subset(ref_verh, SimpleCellType != 'Other')
+ref_verh$CellMentor <- CreateDimReducObject(
+  embeddings = t(as.matrix(final_model@H)),
+  key = paste0('CellMentor', "_"),
+  assay = DefaultAssay(ref_verh)
+  ) 
+
+ref_verh <- ref_verh %>% 
+  RunUMAP(reduction = 'CellMentor', dims= 1:optimal_params_meth$best_params$k, reduction.name = 'umap_cellmentor', verbose = F) 
+
+DimPlot(ref_verh, reduction = 'umap_cellmentor', group.by = 'SimpleCellType', cols = my_colors)
+```
+
+
+```{r}
+# Function to identify and select genes that are less affected by batch effects
+# Also ensures common genes between reference and query
+select_batch_robust_genes <- function(ref_matrix, query_matrix, ref_batch, n_genes = 5000, verbose = TRUE) {
+  if(verbose) cat("Selecting batch-robust genes...\n")
+  
+  # First check for common genes between reference and query
+  ref_genes <- rownames(ref_matrix)
+  query_genes <- rownames(query_matrix)
+  
+  if(verbose) {
+    cat("Reference genes:", length(ref_genes), "\n")
+    cat("Query genes:", length(query_genes), "\n")
+  }
+  
+  # Check if gene names exist
+  if(is.null(ref_genes) || is.null(query_genes)) {
+    stop("Row names (gene names) are missing in one or both matrices")
+  }
+  
+  # Find common genes
+  common_genes <- intersect(ref_genes, query_genes)
+  
+  if(verbose) {
+    cat("Common genes between reference and query:", length(common_genes), "\n")
+  }
+  
+  if(length(common_genes) == 0) {
+    stop("No common genes found between reference and query matrices! Check gene name formatting.")
+  }
+  
+  # Filter matrices to only include common genes
+  ref_matrix <- ref_matrix[common_genes, , drop = FALSE]
+  
+  if(verbose) {
+    cat("Proceeding with", length(common_genes), "common genes\n")
+  }
+  
+  # Check for and remove genes with all zeros
+  ref_zero_genes <- which(rowSums(ref_matrix) == 0)
+  if(length(ref_zero_genes) > 0) {
+    if(verbose) cat("Removing", length(ref_zero_genes), "genes with zero expression in reference\n")
+    ref_matrix <- ref_matrix[-ref_zero_genes, , drop = FALSE]
+    common_genes <- setdiff(common_genes, rownames(ref_matrix)[ref_zero_genes])
+  }
+  
+  # Convert to matrix if needed
+  if(inherits(ref_matrix, "dgCMatrix")) {
+    ref_matrix <- as.matrix(ref_matrix)
+  }
+  
+  # Calculate per-gene coefficient of variation within each batch
+  unique_batches <- unique(ref_batch)
+  if(verbose) cat("Processing", length(unique_batches), "batches...\n")
+  
+  cv_by_batch <- list()
+  for(i in seq_along(unique_batches)) {
+    batch <- unique_batches[i]
+    if(verbose) cat("  Processing batch", batch, "...\n")
+    
+    # Get cells for this batch
+    batch_cells <- which(ref_batch == batch)
+    batch_matrix <- ref_matrix[, batch_cells, drop = FALSE]
+    
+    # Calculate mean and standard deviation for each gene
+    gene_means <- rowMeans(batch_matrix)
+    gene_sds <- apply(batch_matrix, 1, sd)
+    
+    # Calculate CV (coefficient of variation)
+    gene_cv <- gene_sds / (gene_means + 1e-10) # Avoid division by zero
+    cv_by_batch[[i]] <- gene_cv
+  }
+  
+  # Convert to matrix
+  cv_matrix <- do.call(cbind, cv_by_batch)
+  colnames(cv_matrix) <- paste0("batch_", unique_batches)
+  
+  # Calculate variance of CV across batches
+  # Genes with high variance are more batch-specific
+  cv_variance <- apply(cv_matrix, 1, var)
+  names(cv_variance) <- rownames(ref_matrix)
+  
+  # Calculate mean expression level for each gene
+  gene_means_overall <- rowMeans(ref_matrix)
+  
+  # Create combined score that considers both low batch effect and reasonable expression
+  # We want genes with low CV variance (consistent across batches) and adequate expression
+  expression_weight <- 0.2 # Weight for expression level relative to batch consistency
+  combined_score <- -cv_variance + expression_weight * log1p(gene_means_overall)
+  
+  # Rank genes by combined score
+  gene_ranking <- order(combined_score, decreasing = TRUE)
+  
+  # Return top genes with low batch effect
+  selected_genes <- rownames(ref_matrix)[gene_ranking[1:min(n_genes, length(gene_ranking))]]
+  
+  if(verbose) {
+    cat("Selected", length(selected_genes), "batch-robust genes\n")
+    if(length(selected_genes) > 0) {
+      cat("Top 10 batch-robust genes:", paste(head(selected_genes, 10), collapse=", "), "\n")
+    }
+  }
+  
+  return(selected_genes)
+}
+
+# Function to check and clean matrices for common genes
+prepare_matrices <- function(ref_matrix, query_matrix, verbose = TRUE) {
+  if(verbose) cat("Preparing matrices...\n")
+  
+  # Check if matrices have rownames
+  if(is.null(rownames(ref_matrix))) {
+    stop("Reference matrix is missing row names (gene names)")
+  }
+  if(is.null(rownames(query_matrix))) {
+    stop("Query matrix is missing row names (gene names)")
+  }
+  
+  # Check for non-overlapping gene name formats
+  ref_genes <- rownames(ref_matrix)
+  query_genes <- rownames(query_matrix)
+  
+  # Look for common naming patterns
+  ref_pattern <- NA
+  query_pattern <- NA
+  
+  # Check for ENSG format in reference
+  if(any(grepl("^ENSG", ref_genes))) {
+    ref_pattern <- "ENSG"
+    if(verbose) cat("Reference genes appear to use Ensembl IDs\n")
+  }
+  # Check for gene symbols in reference
+  else if(any(grepl("^[A-Z][A-Z0-9]+$", ref_genes))) {
+    ref_pattern <- "symbol"
+    if(verbose) cat("Reference genes appear to use gene symbols\n")
+  }
+  
+  # Check for ENSG format in query
+  if(any(grepl("^ENSG", query_genes))) {
+    query_pattern <- "ENSG"
+    if(verbose) cat("Query genes appear to use Ensembl IDs\n")
+  }
+  # Check for gene symbols in query
+  else if(any(grepl("^[A-Z][A-Z0-9]+$", query_genes))) {
+    query_pattern <- "symbol"
+    if(verbose) cat("Query genes appear to use gene symbols\n")
+  }
+  
+  # Check for gene name mismatches
+  common_genes <- intersect(ref_genes, query_genes)
+  if(length(common_genes) < min(length(ref_genes), length(query_genes)) * 0.1) {
+    warning("Very few common genes found. Gene name formats may be different.")
+    
+    # Show examples of gene names
+    if(verbose) {
+      cat("Sample reference gene names:", paste(head(ref_genes, 5), collapse=", "), "...\n")
+      cat("Sample query gene names:", paste(head(query_genes, 5), collapse=", "), "...\n")
+    }
+  } else {
+    if(verbose) cat("Found", length(common_genes), "common genes\n")
+  }
+  
+  # Filter matrices to only include common genes
+  ref_filtered <- ref_matrix[common_genes, , drop = FALSE]
+  query_filtered <- query_matrix[common_genes, , drop = FALSE]
+  
+  # Remove genes with all zeros in either dataset
+  ref_zero_genes <- which(rowSums(ref_filtered) == 0)
+  query_zero_genes <- which(rowSums(query_filtered) == 0)
+  zero_genes <- union(ref_zero_genes, query_zero_genes)
+  
+  if(length(zero_genes) > 0) {
+    if(verbose) cat("Removing", length(zero_genes), "genes with zero expression\n")
+    non_zero_genes <- setdiff(common_genes, names(zero_genes))
+    ref_filtered <- ref_filtered[non_zero_genes, , drop = FALSE]
+    query_filtered <- query_filtered[non_zero_genes, , drop = FALSE]
+  }
+  
+  return(list(
+    ref_matrix = ref_filtered,
+    query_matrix = query_filtered,
+    common_genes = rownames(ref_filtered)
+  ))
+}
+
+# Use this to diagnose your gene name issue
+diagnose_gene_names <- function(ref_matrix, query_matrix) {
+  cat("Diagnosing gene name issues:\n")
+  
+  ref_genes <- rownames(ref_matrix)
+  query_genes <- rownames(query_matrix)
+  
+  cat("Reference matrix dimensions:", dim(ref_matrix), "\n")
+  cat("Query matrix dimensions:", dim(query_matrix), "\n")
+  
+  if(is.null(ref_genes)) {
+    cat("WARNING: Reference matrix is missing rownames!\n")
+  } else {
+    cat("Reference gene name examples:", paste(head(ref_genes, 10), collapse=", "), "...\n")
+  }
+  
+  if(is.null(query_genes)) {
+    cat("WARNING: Query matrix is missing rownames!\n")
+  } else {
+    cat("Query gene name examples:", paste(head(query_genes, 10), collapse=", "), "...\n")
+  }
+  
+  # Check for common genes
+  if(!is.null(ref_genes) && !is.null(query_genes)) {
+    common_genes <- intersect(ref_genes, query_genes)
+    cat("Number of common genes:", length(common_genes), "\n")
+    
+    if(length(common_genes) > 0) {
+      cat("Common gene examples:", paste(head(common_genes, 10), collapse=", "), "...\n")
+    } else {
+      cat("NO COMMON GENES FOUND!\n")
+      
+      # Check for potential format issues
+      ref_has_version <- any(grepl("\\.[0-9]+$", ref_genes))
+      query_has_version <- any(grepl("\\.[0-9]+$", query_genes))
+      
+      if(ref_has_version != query_has_version) {
+        cat("Possible Ensembl ID version mismatch. One dataset has version numbers (.1, .2, etc) and the other doesn't.\n")
+        
+        # Try removing versions and checking again
+        ref_genes_stripped <- sub("\\.[0-9]+$", "", ref_genes)
+        query_genes_stripped <- sub("\\.[0-9]+$", "", query_genes)
+        common_stripped <- intersect(ref_genes_stripped, query_genes_stripped)
+        
+        cat("After removing version numbers, common genes:", length(common_stripped), "\n")
+        if(length(common_stripped) > 0) {
+          cat("Suggestion: Remove version numbers from gene IDs\n")
+        }
+      }
+      
+      # Check for case sensitivity
+      ref_upper <- toupper(ref_genes)
+      query_upper <- toupper(query_genes)
+      common_upper <- intersect(ref_upper, query_upper)
+      
+      if(length(common_upper) > length(common_genes)) {
+        cat("Case sensitivity issue detected. After converting to uppercase, common genes:", length(common_upper), "\n")
+        cat("Suggestion: Convert gene names to uppercase\n")
+      }
+      
+      # Check for leading/trailing whitespace
+      ref_trimmed <- trimws(ref_genes)
+      query_trimmed <- trimws(query_genes)
+      common_trimmed <- intersect(ref_trimmed, query_trimmed)
+      
+      if(length(common_trimmed) > length(common_genes)) {
+        cat("Whitespace issue detected. After trimming, common genes:", length(common_trimmed), "\n")
+        cat("Suggestion: Trim whitespace from gene names\n")
+      }
+    }
+  }
+}
+```
+
+
+```{r}
+# First diagnose the gene name issue
+diagnose_gene_names(as.matrix(ref[['RNA']]@counts), as.matrix(query[['RNA']]@counts))
+
+# If needed, fix gene names
+fix_gene_names <- function(ref_matrix, query_matrix) {
+  ref_genes <- rownames(ref_matrix)
+  query_genes <- rownames(query_matrix)
+  
+  # Check if both matrices have gene names
+  if(is.null(ref_genes) || is.null(query_genes)) {
+    stop("One or both matrices are missing gene names")
+  }
+  
+  # If Ensembl IDs with version numbers, remove versions
+  if(any(grepl("\\.[0-9]+$", ref_genes)) != any(grepl("\\.[0-9]+$", query_genes))) {
+    cat("Removing version numbers from Ensembl IDs...\n")
+    rownames(ref_matrix) <- sub("\\.[0-9]+$", "", ref_genes)
+    rownames(query_matrix) <- sub("\\.[0-9]+$", "", query_genes)
+  }
+  
+  # Make gene names case-insensitive if needed
+  common_genes <- intersect(rownames(ref_matrix), rownames(query_matrix))
+  common_upper <- intersect(toupper(rownames(ref_matrix)), toupper(rownames(query_matrix)))
+  
+  if(length(common_upper) > length(common_genes)) {
+    cat("Converting gene names to uppercase for better matching...\n")
+    rownames(ref_matrix) <- toupper(rownames(ref_matrix))
+    rownames(query_matrix) <- toupper(rownames(query_matrix))
+  }
+  
+  # Trim whitespace if needed
+  common_genes <- intersect(rownames(ref_matrix), rownames(query_matrix))
+  common_trimmed <- intersect(trimws(rownames(ref_matrix)), trimws(rownames(query_matrix)))
+  
+  if(length(common_trimmed) > length(common_genes)) {
+    cat("Trimming whitespace from gene names...\n")
+    rownames(ref_matrix) <- trimws(rownames(ref_matrix))
+    rownames(query_matrix) <- trimws(rownames(query_matrix))
+  }
+  
+  # Check results
+  common_genes <- intersect(rownames(ref_matrix), rownames(query_matrix))
+  cat("After fixes, found", length(common_genes), "common genes\n")
+  
+  return(list(
+    ref_matrix = ref_matrix,
+    query_matrix = query_matrix
+  ))
+}
+
+# Apply the fix
+fixed_matrices <- fix_gene_names(ref_data$matrix, query_data$matrix)
+ref_data$matrix <- fixed_matrices$ref_matrix
+query_data$matrix <- fixed_matrices$query_matrix
+
+# Prepare matrices properly
+prepared_data <- prepare_matrices(as.matrix(ref[['RNA']]@counts), as.matrix(query[['RNA']]@counts), verbose = TRUE)
+
+# Now apply batch-robust gene selection on the properly prepared matrices
+batch_robust_genes <- select_batch_robust_genes(
+  prepared_data$ref_matrix,
+  prepared_data$query_matrix,
+  ref$Study,
+  n_genes = 5000,
+  verbose = TRUE
+)
+
+# Create CSFNMF object with common batch-robust genes
+object <- CreateCSFNMFobject(
+  ref_matrix = prepared_data$ref_matrix[batch_robust_genes, ],
+  ref_celltype = ref$SimpleCellType[colnames(prepared_data$ref_matrix)],
+  data_matrix = prepared_data$query_matrix[batch_robust_genes, ],
+  verbose = TRUE
+)
+
+qsave(object, paste0(PREPRDATADIR, 'atlas_myel_CellMentor_object_v2.qs'))
+```
+
+## New object
+
+```{r}
+#' Create CellMentor Object with Batch-Robust Gene Selection
+#'
+#' @description
+#' Creates and initializes a CSFNMF object using Seurat's SelectIntegrationFeatures
+#' to identify batch-robust genes before running CellMentor analysis.
+#'
+#' @param ref_matrix Reference expression matrix (genes × cells)
+#' @param ref_celltype Vector of cell type labels for reference cells
+#' @param ref_batch Vector of batch labels for reference cells
+#' @param data_matrix Query expression matrix (genes × cells)
+#' @param n_features Number of batch-robust features to select (default: 5000)
+#' @param norm Logical: perform normalization (default: TRUE)
+#' @param scale Logical: perform scaling (default: TRUE)
+#' @param scale_by Character: scaling method, "cells" or "genes" (default: "cells")
+#' @param verbose Logical: show progress messages (default: TRUE)
+#' @param num_cores Integer: number of cores for parallel processing (default: 1)
+#'
+#' @return A CSFNMF object containing processed data with batch-robust genes
+#' 
+#' @examples
+#' object <- CreateBatchRobustCSFNMFobject(
+#'   ref_matrix = reference_data,
+#'   ref_celltype = cell_types,
+#'   ref_batch = batch_info,
+#'   data_matrix = query_data
+#' )
+#'
+#' @export
+CreateBatchRobustCSFNMFobject <- function(ref_matrix,
+                                         ref_celltype,
+                                         ref_batch,
+                                         data_matrix,
+                                         n_features = 5000,
+                                         norm = TRUE,
+                                         scale = TRUE,
+                                         scale_by = "cells",
+                                         verbose = TRUE,
+                                         num_cores = 1) {
+  
+  if(!requireNamespace("Seurat", quietly = TRUE)) {
+    stop("The Seurat package is required for batch-robust gene selection")
+  }
+  
+  # Create reporter function for verbose output
+  report <- function(message) {
+    if(verbose) cat("[", format(Sys.time(), "%H:%M:%S"), "]", message, "\n")
+  }
+  
+  report("Starting batch-robust CellMentor object creation")
+  
+  # Check for common genes between matrices
+  report("Checking for common genes")
+  ref_genes <- rownames(ref_matrix)
+  data_genes <- rownames(data_matrix)
+  
+  if(is.null(ref_genes) || is.null(data_genes)) {
+    stop("Both matrices must have gene names as rownames")
+  }
+  
+  common_genes <- intersect(ref_genes, data_genes)
+  report(paste("Found", length(common_genes), "common genes between reference and query"))
+  
+  if(length(common_genes) < 1000) {
+    warning("Very few common genes found. Check gene name formatting.")
+  }
+  
+  # Filter matrices to common genes
+  ref_matrix <- ref_matrix[common_genes,]
+  data_matrix <- data_matrix[common_genes,]
+  
+  # Create Seurat object for batch-robust gene selection
+  report("Creating Seurat object for batch-robust gene selection")
+  seurat_obj <- Seurat::CreateSeuratObject(counts = ref_matrix)
+  seurat_obj$batch <- ref_batch
+  
+  # Split by batch
+  report("Splitting by batch for integration feature selection")
+  batch_list <- Seurat::SplitObject(seurat_obj, split.by = "batch")
+  
+  # Process each batch
+  report(paste("Processing", length(batch_list), "batches"))
+  for(i in seq_along(batch_list)) {
+    batch_list[[i]] <- Seurat::NormalizeData(batch_list[[i]], verbose = FALSE)
+    batch_list[[i]] <- Seurat::FindVariableFeatures(
+      batch_list[[i]],
+      selection.method = "vst",
+      nfeatures = min(2000, ncol(batch_list[[i]])/2),
+      verbose = FALSE
+    )
+  }
+  
+  # Find integration features
+  report(paste("Selecting", n_features, "batch-robust integration features"))
+  integration_features <- Seurat::SelectIntegrationFeatures(
+    batch_list,
+    nfeatures = min(n_features, length(common_genes)),
+    verbose = FALSE
+  )
+  
+  report(paste("Selected", length(integration_features), "batch-robust features"))
+  
+  # Create standard CSFNMF object with batch-robust genes
+  report("Creating CellMentor object with batch-robust genes")
+  object <- CreateCSFNMFobject(
+    ref_matrix = ref_matrix[integration_features,],
+    ref_celltype = ref_celltype,
+    data_matrix = data_matrix[integration_features,],
+    norm = norm,
+    most.variable = FALSE,  # We already selected variable genes
+    scale = scale,
+    scale_by = scale_by,
+    gene_list = NULL,
+    verbose = verbose,
+    num_cores = num_cores
+  )
+  
+  # Store batch information and selected features
+  object@annotation$batch <- ref_batch
+  
+  # Add attributes with batch-robust information
+  attr(object, "batch_robust_info") <- list(
+    n_original_genes = length(common_genes),
+    n_selected_genes = length(integration_features),
+    batch_robust_genes = integration_features,
+    n_batches = length(unique(ref_batch))
+  )
+  
+  report("Batch-robust CellMentor object creation complete")
+  return(object)
+}
+```
+
+```{r}
+# Create batch-robust CellMentor object
+object <- CreateBatchRobustCSFNMFobject(
+  ref_matrix = as.matrix(ref[['RNA']]@counts), 
+  ref_celltype = ref$SimpleCellType,
+  ref_batch = ref$Study,
+  data_matrix = as.matrix(query[['RNA']]@counts),
+  n_features = 5000,
+  verbose = TRUE
+)
+
+optimal_params_meth <- CellMentor(object, num_cores = 10, alpha_range = c(1), beta_range = c(1),
+                                                 gamma_range = c(1), delta_range = c(0.5), init_methods = c('regulated'),
+                                                 k = 222)
+# Run CellMentor with higher values for alpha and beta
+# to emphasize cell type identity over batch effects
+trained_model <- RunCSFNMF(
+  train_object = object@train_object,
+  k = 25,  # Or use SelectRank function
+  init_method = "NNDSVD",
+  const.alpha = 15,
+  const.beta = 15,
+  const.gamma = 0.001,
+  const.delta = 0.5,
+  verbose = TRUE
+)
+rank_result <- SelectRank(
+        train_matrix = object@matrices@ref,
+        max_p_value = 0.01,
+        numCores = 10
+      )
+best_model <- RunCSFNMF(
+      train_object = object,
+      k = rank_result,
+      const.alpha = 15,
+      const.beta = 15,
+      const.gamma = 0.001,
+      const.delta = 0.5,
+      max.iter = 100,
+      verbose = T,
+      num_cores = 10,
+      whole_object = TRUE
+    )
+
+# Project query data
+h_project <- project_data(
+  W = trained_model@W,
+  X = object@matrices@data,
+  verbose = TRUE
+)
+```
+
+# Mouse
+
+```{r}
+library(zellkonverter)
+library(Seurat)
+
+adata <- readH5AD("mouse_ref/MCA_BatchRemoved_Merge_dge.h5ad")
+mouse_ref <- as.Seurat(adata, counts = "X", data = NULL)
+metadata <- read.csv("mouse_ref/MCA_BatchRemoved_Merge_dge_cellinfo.csv", row.names = 1)
+head(metadata)
+
+rownames(metadata) <- metadata$index
+metadata$index <- NULL  # optional: remove now redundant column
+
+mouse_ref <- AddMetaData(mouse_ref, metadata)
+
+annotations <- read.csv("mouse_ref/MCA_CellAssignments.csv", row.names = 1)
+head(annotations)
+
+rownames(annotations) <- annotations$Cell.name
+annotations$Cell.name <- NULL  # optional: remove now redundant column
+
+mouse_ref <- AddMetaData(mouse_ref, annotations)
+```
+
+```{r}
+myeloid_terms <- c("macrophage", "monocyte", "dendritic", "neutrophil")
+
+# Find matching annotations
+myeloid_annos <- unique(mouse_ref$Annotation[grepl(paste(myeloid_terms, collapse="|"), 
+                                                   mouse_ref$Annotation, ignore.case = TRUE)])
+length(myeloid_annos)
+
+mouse_ref_sub <- subset(mouse_ref, subset = Annotation %in% myeloid_annos)
+
+mouse_ref_sub$MyeloidAnnotation <- NA  # start with NA
+
+# Assign labels based on keywords in Annotation
+mouse_ref_sub$MyeloidAnnotation[grepl("macrophage", mouse_ref_sub$Annotation, ignore.case = TRUE)] <- "Macrophage"
+mouse_ref_sub$MyeloidAnnotation[grepl("monocyte", mouse_ref_sub$Annotation, ignore.case = TRUE)]  <- "Monocyte"
+mouse_ref_sub$MyeloidAnnotation[grepl("dendritic", mouse_ref_sub$Annotation, ignore.case = TRUE)] <- "Dendritic cell"
+mouse_ref_sub$MyeloidAnnotation[grepl("neutrophil", mouse_ref_sub$Annotation, ignore.case = TRUE)] <- "Neutrophil"
+
+qsave(mouse_ref_sub, 'mouse_ref/mouse_ref_myelsub.qs')
+```
+

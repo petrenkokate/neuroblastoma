@@ -1,0 +1,2267 @@
+---
+title: "DEA_neuroblastoma_deep"
+author: "Kate Petrenko"
+date: "2025-01-14"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+library(data.table)
+library(Seurat)
+library(scDblFinder)
+library(DoubletFinder)
+library(dplyr)
+library(remotes)
+# remotes::install_github("carmonalab/STACAS")
+library(STACAS)
+library(SingleR)
+# install.packages("scGate")
+library(scGate)
+library(ggplot2)
+library(BiocParallel)
+library(harmony)
+library(RColorBrewer)
+library(stringr)
+library(cowplot)
+library(scuttle)
+# install.packages("devtools")
+# BiocManager::install("Homo.sapiens")
+# BiocManager::install("jpmam1/scalop") #forked copy of a really good guy 
+# devtools::install_github("jlaffy/infercna")
+# library(infercna)
+# library(infercnv)
+library(parallel)
+library(future)
+library(clustree)
+library(dittoSeq)
+# install.packages("ggh4x")
+library(ggh4x)
+#BiocManager::install('EnhancedVolcano')
+library(EnhancedVolcano)
+library(clusterProfiler)
+library("org.Hs.eg.db")
+library(ReactomePA)
+library(msigdbr)
+# install.packages('qs')
+library(qs)
+library(DESeq2)
+library(magrittr)
+library(tibble)
+library(tidyr)
+library(pheatmap)
+# BiocManager::install('apeglm')
+# install.packages('ashr')
+library(edgeR)
+library(reticulate)
+# install.packages('anndata')
+# library(anndata)
+# devtools::install_github("cellgeni/sceasy")
+# BiocManager::install(c("LoomExperiment"))
+library(sceasy)
+library(SeuratData)
+# BiocManager::install("MAST")
+# library(MAST)
+# install.packages("metafor")
+library(metafor)
+# install.packages('UpSetR')
+library(UpSetR)
+library(ggpubr)
+```
+
+```{r global variables, include=FALSE}
+set.seed(100)
+DATADIR = '~/neuroblastoma/data/'
+WORKDIR = '~/neuroblastoma/'
+PREPRDATADIR = '~/neuroblastoma/preprocessing_data/'
+
+my_colors <- c("#9ACD32FF", "#4682B4FF",  "#DDA0DDFF", "#FFA07AFF", "#8FBC8BFF",
+               "#40E0D0FF",  "#F0E68CFF", "#5F9EA0FF", "#D2B48CFF",  
+               "#6495EDFF", "#FF69B4FF", "#BA55D3FF",  "#F08080FF", "#32CD32FF",  
+               "#FFDAB9FF",  "#87CEEBFF")
+```
+
+```{r}
+atlas <- qread(paste0(PREPRDATADIR, 'ATLAS_object.qs'))
+
+sample_metadata <- read.csv(paste0(DATADIR, 'samples_metadata_v5.csv'))
+sample_metadata[sample_metadata==""] <- NA
+
+rownames(sample_metadata) <- sample_metadata$Sample_dataset
+
+
+
+clean_sample_id <- function(id) {
+  # First remove _rep1 and _rep2
+  id <- gsub("_rep[12]$", "", id)
+
+  # Handle the special bonine cases
+  id <- gsub("_sn$", "", id)      # Remove _sn suffix
+  id <- gsub("_[12]$", "", id)    # Remove _1 or _2 suffix
+
+  return(id)
+}
+
+atlas$less18M <- sample_metadata[clean_sample_id(atlas$SampleID),]$less18M
+atlas$Sex <- sample_metadata[clean_sample_id(atlas$SampleID),]$Sex
+atlas$MYCN_status <- sample_metadata[clean_sample_id(atlas$SampleID),]$MYCN
+atlas$method <- sample_metadata[clean_sample_id(atlas$SampleID),]$Method
+
+metadata_python <- read.csv("query_metadata_with_umap.csv", row.names = 1)
+
+# Match to Seurat cells
+metadata_python <- metadata_python[colnames(atlas), ]
+atlas <- AddMetaData(atlas, metadata = metadata_python[c("Age", "celltypist_cell_label_fine", "Final_Annotation")])
+
+# Add UMAP
+atlas[['UMAP']] <- CreateDimReducObject(embeddings = as.matrix(metadata_python[, c("UMAP_1", "UMAP_2")]), key = "UMAP_", global = T, assay = "RNA")
+```
+
+# Pseudobulk
+
+```{r}
+atlas$less18M <- as.character(atlas$less18M)
+bulk <- AggregateExpression(atlas,
+                            return.seurat = T, slot = "counts", assays = "RNA", 
+                            group.by = c("Final_Annotation", "SampleID", "less18M"))
+Idents(bulk) <- "less18M"
+sample_sex_map <- data.frame(
+  SampleID = atlas$SampleID,
+  Sex = atlas$Sex
+) %>% unique()
+
+# Add Sex to bulk object by matching SampleID
+bulk$Sex <- sample_sex_map$Sex[match(gsub('-', '_', bulk$SampleID), sample_sex_map$SampleID)]
+
+sample_mycn_map <- data.frame(
+  SampleID = atlas$SampleID,
+  MYCN = atlas$MYCN_status
+) %>% unique()
+bulk$MYCN_status <- sample_mycn_map$MYCN[match(gsub('-', '_', bulk$SampleID), sample_mycn_map$SampleID)]
+
+sample_method_map <- data.frame(
+  SampleID = atlas$SampleID,
+  method = atlas$method
+) %>% unique()
+bulk$method <- sample_method_map$method[match(gsub('-', '_', bulk$SampleID), sample_method_map$SampleID)]
+
+qsave(bulk, paste0(PREPRDATADIR, 'bulk_norep_ATLAS_deep.qs'))
+```
+
+```{r}
+bulk <- qread(paste0(PREPRDATADIR, 'bulk_norep_ATLAS_deep.qs'))
+```
+
+## EDA
+
+```{r}
+datasets <- c('grossmann', 'patel', 'jansky', 'dong', 'bonine', 'verhoeven', 'wienke')
+extract_dataset <- function(sample_id) {
+  # Convert known datasets to lowercase for matching
+  datasets_lower <- tolower(datasets)
+  
+  # Convert sample_id to lowercase for matching
+  sample_id_lower <- tolower(sample_id)
+  
+  # Find which dataset appears in the sample_id
+  dataset_match <- datasets_lower[sapply(datasets_lower, function(x) grepl(x, sample_id_lower))]
+  
+  # Return the first match in original case
+  if (length(dataset_match) > 0) {
+    return(datasets[tolower(datasets) == dataset_match[1]])
+  } else {
+    return(NA)
+  }
+}
+bulk$dataset <- sapply(bulk$SampleID, extract_dataset)
+```
+
+```{r fig.height=4, fig.width=12}
+# First normalize the data if not already done
+bulk <- NormalizeData(bulk)
+
+# Find variable features
+bulk <- FindVariableFeatures(bulk, selection.method = "vst")
+
+# Scale the data
+bulk <- ScaleData(bulk)
+
+# Run PCA
+bulk <- RunPCA(bulk, features = VariableFeatures(object = bulk))
+
+# Visualize PCA
+# Basic PCA plot
+PCAPlot(bulk)
+
+# By dataset
+DimPlot(bulk, reduction = "pca", group.by = "dataset") + 
+    ggtitle("PCA colored by Dataset")
+
+# More customized PCA plots using ggplot2
+# By age group
+DimPlot(bulk, reduction = "pca", group.by = "less18M", split.by = "dataset") + 
+    ggtitle("PCA colored by Age Group")
+
+
+
+# By cell type
+DimPlot(bulk, reduction = "pca", group.by = "Final_Annotation", split.by = "dataset") + 
+    ggtitle("PCA colored by Cell Type")
+```
+
+## FIT MODEL
+
+Dong2020 - all
+Jansky2021 - sex only
+Verhoeven2022 - MYCN only
+Wienke2024 - all
+Grossman2024 - all
+Bonine2024 - MYCN only
+Patel2024 - all
+
+```{r}
+fit_model <- function(bulk){
+  counts <- GetAssayData(bulk, slot = "counts")
+  
+  # Create base metadata
+  metadata <- data.frame(
+    group = as.factor(bulk$less18M),
+    SampleID = bulk$SampleID
+  )
+  rownames(metadata) <- colnames(bulk)
+  
+  # Create design formula parts, checking number of levels
+  design_parts <- c()
+  
+  # Check group levels
+  if(length(unique(metadata$group)) < 2) {
+    stop("Not enough groups for comparison (need both age groups present)")
+  }
+  
+  # Add Sex if available and has multiple levels
+  if("Sex" %in% colnames(bulk@meta.data) && !any(is.na(bulk$Sex))) {
+    metadata$Sex <- as.factor(bulk$Sex)
+    if(length(unique(metadata$Sex)) > 1) {
+      design_parts <- c(design_parts, "Sex")
+      print("Including Sex in design matrix")
+    } else {
+      print("Only one Sex level, excluding from design")
+    }
+  }
+  
+  # Add MYCN_status if available and has multiple levels
+  if("MYCN_status" %in% colnames(bulk@meta.data) && !any(is.na(bulk$MYCN_status))) {
+    metadata$MYCN_status <- as.factor(bulk$MYCN_status)
+    if(length(unique(metadata$MYCN_status)) > 1) {
+      design_parts <- c(design_parts, "MYCN_status")
+      print("Including MYCN_status in design matrix")
+    } else {
+      print("Only one MYCN_status level, excluding from design")
+    }
+  }
+  
+  # Print factor levels for debugging
+  print("Factor levels in data:")
+  for(col in colnames(metadata)) {
+    if(is.factor(metadata[[col]])) {
+      print(paste(col, "levels:", paste(levels(metadata[[col]]), collapse=", ")))
+    }
+  }
+  
+  # Create design formula
+  if(length(design_parts) > 0) {
+    design_formula <- paste(c("~", paste(design_parts, collapse = " + "), "group"), collapse = " + ")
+  } else {
+    design_formula <- "~ group"
+  }
+  print(paste("Design formula:", design_formula))
+  
+  # Create design matrix
+  design <- model.matrix(as.formula(design_formula), data = metadata)
+  print(paste("Design formula:", design_formula))
+  
+  dge <- DGEList(counts = counts,
+                 samples = metadata)
+  
+  # Filter and normalize
+  print("Dimensions before subsetting:")
+  print(dim(dge))
+  keep <- filterByExpr(dge)
+  dge <- dge[keep, , keep.lib.sizes=FALSE]
+  print("Dimensions after subsetting:")
+  print(dim(dge))
+  
+  dge <- calcNormFactors(dge)
+  
+  # Estimate dispersion and fit model
+  dge <- estimateDisp(dge, design, robust = TRUE)
+  fit <- glmQLFit(dge, design, robust = TRUE)
+  
+  return(list("fit"=fit, "design"=design, "dge"=dge))
+}
+
+```
+
+```{r}
+# Function to check if we have enough samples in each group
+check_sample_size <- function(bulk, min_samples_per_group = 2) {
+  group_counts <- table(bulk$less18M)
+  enough_samples <- all(group_counts >= min_samples_per_group)
+  
+  if(!enough_samples) {
+    print(paste("Not enough samples in each group. Sample counts:", 
+                paste(names(group_counts), group_counts, collapse=", ")))
+  }
+  return(enough_samples)
+}
+
+# Main analysis function
+run_deg_analysis <- function(bulk) {
+  # Get all valid combinations that exist in the data
+  valid_combinations <- table(bulk$Final_Annotation, bulk$dataset)
+  print("Available combinations of cell types and datasets:")
+  print(valid_combinations)
+  
+  # Store results
+  all_results <- list()
+  
+  for(celltype in unique(bulk$Final_Annotation)) {
+    print(paste("\n=== Processing celltype:", celltype, "==="))
+    all_results[[celltype]] <- list()
+    
+    for(dataset_name in unique(bulk$dataset)) {
+      print(paste("\n--- Dataset:", dataset_name, "---"))
+      
+      # Check if this combination exists
+      if(valid_combinations[celltype, dataset_name] == 0) {
+        print(paste("No cells found for", celltype, "in dataset", dataset_name, "- skipping"))
+        next
+      }
+      
+      # Subset data
+      subset_bulk <- subset(bulk, 
+                           Final_Annotation == celltype & 
+                           dataset == dataset_name)
+      
+      # Check sample size
+      if(ncol(subset_bulk) < 3) {
+        print("Too few total samples, skipping")
+        next
+      }
+      
+      if(!check_sample_size(subset_bulk)) {
+        print("Unbalanced groups, skipping")
+        next
+      }
+      
+      # Run DEG analysis
+      tryCatch({
+        results <- fit_model(subset_bulk)
+        
+        # Test for DE
+        group_coef <- which(colnames(results$design) == "groupTRUE")
+        contrast <- rep(0, ncol(results$design))
+        contrast[group_coef] <- 1
+        qlf <- glmQLFTest(results$fit, contrast = contrast)
+        de_results <- topTags(qlf, n = Inf)
+        
+        # Store results
+        all_results[[celltype]][[dataset_name]] <- list(
+          de_table = de_results$table,
+          fit = results$fit,
+          dge = results$dge,
+          design = results$design
+        )
+        
+        # Create diagnostic plots
+        par(mfrow=c(2,2))
+        
+        # MDS plot
+        plotMDS(results$dge, 
+                col = ifelse(results$dge$samples$group == "TRUE", "red", "blue"),
+                main = paste("MDS Plot -", dataset_name))
+        legend("topright", 
+               legend = c("<=18m", ">18m"),
+               col = c("red", "blue"),
+               pch = 16)
+        
+        plotBCV(results$dge)
+        plotQLDisp(results$fit)
+        plotMD(qlf)
+        
+        # Print summary
+        print(paste("Number of genes tested:", nrow(de_results$table)))
+        print(paste("Genes with FDR < 0.05:", sum(de_results$table$FDR < 0.05)))
+        print(paste("Genes with FDR < 0.1:", sum(de_results$table$FDR < 0.1)))
+        
+      }, error = function(e) {
+        print(paste("Error in analysis:", e$message))
+      })
+    }
+  }
+  
+  return(all_results)
+}
+```
+
+```{r fig.height=7, fig.width=7}
+# Run the analysis
+results <- run_deg_analysis(bulk)
+```
+
+```{r}
+# Function to summarize results
+summarize_results <- function(results) {
+  summary_df <- data.frame()
+  
+  for(celltype in names(results)) {
+    for(dataset in names(results[[celltype]])) {
+      de_table <- results[[celltype]][[dataset]]$de_table
+      
+      row <- data.frame(
+        Celltype = celltype,
+        Dataset = dataset,
+        Total_Genes = nrow(de_table),
+        DE_genes_FDR05 = sum(de_table$FDR < 0.05),
+        DE_genes_FDR10 = sum(de_table$FDR < 0.1),
+        Up_regulated = sum(de_table$FDR < 0.05 & de_table$logFC > 0),
+        Down_regulated = sum(de_table$FDR < 0.05 & de_table$logFC < 0)
+      )
+      summary_df <- rbind(summary_df, row)
+    }
+  }
+  
+  return(summary_df)
+}
+
+# Print summary
+summary_table <- summarize_results(results)
+print(summary_table)
+```
+
+## Combine P-VAL
+
+```{r}
+perform_meta_analysis <- function(all_results, celltype) {
+  # Get all datasets for this celltype
+  datasets <- names(all_results[[celltype]])
+  
+  if(length(datasets) < 2) {
+    print(paste("Not enough datasets for", celltype))
+    return(NULL)
+  }
+  
+  # Get common genes across all datasets
+  gene_lists <- lapply(datasets, function(dataset) {
+    rownames(all_results[[celltype]][[dataset]]$de_table)
+  })
+  common_genes <- Reduce(intersect, gene_lists)
+  
+  print(paste("Number of common genes:", length(common_genes)))
+  
+  if(length(common_genes) == 0) {
+    print(paste("Zero common genes were found for", celltype))
+    return(NULL)
+  }
+  
+  # Create matrix to store results
+  meta_results <- data.frame(
+    gene = common_genes,
+    num_datasets = length(datasets),
+    consistent_direction = NA,
+    combined_p = NA,
+    mean_logFC = NA,
+    stringsAsFactors = FALSE
+  )
+  
+  # For each gene
+  for(gene in common_genes) {
+    # Collect logFC and p-values across datasets
+    logFCs <- numeric()
+    pvalues <- numeric()
+    sample_sizes <- numeric()
+    
+    for(dataset in datasets) {
+      res_table <- all_results[[celltype]][[dataset]]$de_table
+      logFCs <- c(logFCs, res_table[gene, "logFC"])
+      pvalues <- c(pvalues, res_table[gene, "PValue"])
+      sample_sizes <- c(sample_sizes, ncol(all_results[[celltype]][[dataset]]$dge$counts))
+    }
+    
+    # Check direction consistency
+    is_consistent <- all(logFCs > 0) || all(logFCs < 0)
+    
+    if(is_consistent) {
+      # Calculate weighted mean logFC
+      weighted_logFC <- weighted.mean(logFCs, sample_sizes)
+      
+      # Combine p-values using weighted Z-method
+      z_scores <- qnorm(pvalues/2) * sign(logFCs)  # one-sided p-values
+      weights <- sqrt(sample_sizes)
+      weighted_z <- sum(z_scores * weights) / sqrt(sum(weights^2))
+      combined_p <- 2 * pnorm(-abs(weighted_z))  # back to two-sided p-value
+      
+      # Store results
+      meta_results[meta_results$gene == gene, "consistent_direction"] <- TRUE
+      meta_results[meta_results$gene == gene, "combined_p"] <- combined_p
+      meta_results[meta_results$gene == gene, "mean_logFC"] <- weighted_logFC
+    } else {
+      meta_results[meta_results$gene == gene, "consistent_direction"] <- FALSE
+    }
+  }
+  
+  # Add FDR
+  meta_results$FDR <- p.adjust(meta_results$combined_p, method = "BH")
+  
+  # Filter for consistent direction and sort by FDR
+  final_results <- meta_results[meta_results$consistent_direction, ]
+  final_results <- final_results[order(final_results$FDR), ]
+  
+  # Print summary
+  print("Meta-analysis summary:")
+  print(paste("Total genes analyzed:", nrow(meta_results)))
+  print(paste("Genes with consistent direction:", sum(meta_results$consistent_direction, na.rm=TRUE)))
+  print(paste("Significant genes (FDR < 0.05):", sum(final_results$FDR < 0.05, na.rm=TRUE)))
+  print(paste("Significant genes (FDR < 0.1):", sum(final_results$FDR < 0.1, na.rm=TRUE)))
+  
+  return(final_results)
+}
+```
+
+```{r}
+# Run meta-analysis for each cell type
+meta_analysis_results <- list()
+for(celltype in names(results)) {
+  print(paste("\nPerforming meta-analysis for", celltype))
+  meta_analysis_results[[celltype]] <- perform_meta_analysis(results, celltype)
+}
+
+# Function to create summary visualization
+plot_meta_results <- function(meta_results, celltype) {
+  if(is.null(meta_results)) return(NULL)
+  
+  significant_genes <- meta_results[meta_results$FDR < 0.05, ]
+  
+  # Volcano plot
+  ggplot(meta_results, aes(x = mean_logFC, y = -log10(FDR))) +
+    geom_point(aes(color = FDR < 0.05)) +
+    theme_minimal() +
+    ggtitle(paste("Meta-analysis results for", celltype)) +
+    geom_hline(yintercept = -log10(0.05), linetype = "dashed") +
+    geom_vline(xintercept = 0, linetype = "dashed")
+}
+
+# Create plots for each cell type
+for(celltype in names(meta_analysis_results)) {
+  print(plot_meta_results(meta_analysis_results[[celltype]], celltype))
+}
+```
+
+
+```{r eval=FALSE, fig.height=7, fig.width=7, include=FALSE}
+rrr <- qread(paste0(PREPRDATADIR, 'DEG_ATLAS_pseudobulk_norep_results.qs'))
+for(celltype in names(rrr$meta_results)) {
+  print(EnhancedVolcano(rrr$meta_results[[celltype]],
+    lab = rep('', length(rownames(rrr$meta_results[[celltype]]))),
+    x = 'mean_logFC',
+    y = 'FDR',
+    col = c("grey30","#8FBC8BFF", "#6495EDFF", "#BA55D3FF"),
+    drawConnectors = TRUE,
+    pCutoff = 0.05, 
+    FCcutoff = 0.5,
+    max.overlaps = 100,
+    titleLabSize = 14, 
+    subtitleLabSize = 12,
+    captionLabSize = 12,
+    legendLabSize = 12,
+    legendIconSize = 3,
+    ylim = c(0, 7)
+) + labs(subtitle = "< 18 months vs > 18 months", title = celltype))
+}
+
+
+```
+
+```{r fig.height=7, fig.width=7}
+net_genes <- read.csv(paste0(DATADIR, 'net_genes.csv'))
+
+library(EnhancedVolcano)
+# Get your results data
+results_df <- rrr$meta_results$`Myeloid-cells`
+genes <- pathway_results[["Myeloid-cells"]]$reactome@result %>% 
+  dplyr::filter(ID == 'R-HSA-6798695') %>% 
+  .$core_enrichment %>% 
+  str_split('/') %>% 
+  .[[1]]
+
+# Convert ENTREZ IDs to gene symbols
+gene_symbols <- mapIds(org.Hs.eg.db, 
+                      keys = genes,
+                      column = "SYMBOL",
+                      keytype = "ENTREZID",
+                      multiVals = "first")
+# Create the label vector (same length as the data)
+label_vector <- ifelse(results_df$gene %in% c(net_genes$NETs.related.genes, 'S1008A8', 'S1008A9', gene_symbols),
+                       results_df$gene, "")
+
+# Now use it in EnhancedVolcano
+EnhancedVolcano(results_df,
+    lab = label_vector,
+    x = 'mean_logFC',
+    y = 'FDR',
+    col = c("grey30","#8FBC8BFF", "#6495EDFF", "#BA55D3FF"),
+    drawConnectors = TRUE,
+    pCutoff = 0.05, 
+    FCcutoff = 0.5,
+    max.overlaps = 100,
+    titleLabSize = 14, 
+    subtitleLabSize = 12,
+    captionLabSize = 12,
+    legendLabSize = 12,
+    legendIconSize = 3,
+    ylim = c(0, 7)
+) + labs(subtitle = "< 18 months vs > 18 months", title = 'Myeloid cells')
+```
+
+
+```{r eval=FALSE, include=FALSE}
+qsave(list(results = results,
+           meta_results = meta_analysis_results), paste0(PREPRDATADIR, 'DEG_ATLAS_pseudobulk_norep_results.qs'))
+```
+
+## Heatmaps
+
+```{r}
+create_patient_heatmap <- function(bulk, celltype, meta_results, top_n = 50) {
+  # Subset bulk object for the celltype
+  bulk_subset <- subset(bulk, Annotation == celltype)
+  
+  # Get normalized counts
+  counts <- GetAssayData(bulk_subset, slot = "data")  # normalized data
+  
+  # Get top DE genes from meta-analysis
+  if(!is.null(meta_results[[celltype]])) {
+    top_genes <- meta_results[[celltype]]$gene[1:min(top_n, nrow(meta_results[[celltype]]))]
+  } else {
+    return(NULL)
+  }
+  
+  # Subset counts matrix for top genes
+  expr_matrix <- counts[top_genes, ]
+  
+  # Get patient metadata
+  metadata <- data.frame(
+    Age_group = bulk_subset$less18M,
+    Dataset = bulk_subset$dataset,
+    row.names = colnames(bulk_subset)
+  )
+  
+  # Create annotation colors
+  ann_colors <- list(
+    Age_group = c("TRUE" = "red", "FALSE" = "blue"),
+    Dataset = rainbow(length(unique(metadata$Dataset)))
+  )
+  names(ann_colors$Dataset) <- unique(metadata$Dataset)
+  
+  # Create heatmap
+  pheatmap(expr_matrix,
+           annotation_col = metadata,
+           annotation_colors = ann_colors,
+           main = paste("Top", top_n, "DE genes in", celltype),
+           show_colnames = FALSE,
+           cluster_rows = TRUE,
+           cluster_cols = TRUE,
+           scale = "row",
+           fontsize_row = 8)
+}
+
+# Create heatmaps for each cell type
+for(celltype in names(meta_analysis_results)) {
+  print(paste("Creating patient heatmap for", celltype))
+  create_patient_heatmap(bulk, celltype, meta_analysis_results)
+}
+```
+
+### Dataset-based
+
+```{r fig.height=15, fig.width=10}
+create_patient_heatmaps <- function(bulk, meta_results, top_n = 50, min_group_size = 3) {
+  library(pheatmap)
+  
+  for(celltype in unique(bulk$Annotation)) {
+    print(paste("\nProcessing", celltype))
+    
+    valid_combos <- table(bulk$Annotation, bulk$dataset)
+    valid_datasets <- names(valid_combos[celltype,valid_combos[celltype,] > 0])
+    
+    for(dataset_name in valid_datasets) {
+      print(paste("\nChecking", dataset_name))
+      
+      # Subset data
+      subset_data <- subset(x = bulk, 
+                           subset = Annotation == celltype & dataset == dataset_name)
+      
+      # Get sample counts
+      sample_counts <- table(subset_data$less18M)
+      print(paste(dataset_name, "sample counts:", 
+                 paste(names(sample_counts), sample_counts, collapse=", ")))
+      
+      # Check sample sizes
+      if(length(sample_counts) < 2 || any(sample_counts < min_group_size)) {
+        print("Insufficient samples - skipping")
+        next
+      }
+      
+      # Get expression data
+      expr_matrix <- as.matrix(GetAssayData(subset_data, slot = "data"))
+      
+      if(!is.null(meta_results[[celltype]])) {
+        top_genes <- head(meta_results[[celltype]]$gene, top_n)
+        common_genes <- intersect(top_genes, rownames(expr_matrix))
+        
+        if(length(common_genes) > 0) {
+          # Subset and clean expression matrix
+          expr_matrix <- expr_matrix[common_genes, , drop = FALSE]
+          
+          # Remove rows with NA/Inf values
+          good_rows <- which(rowSums(is.na(expr_matrix) | is.infinite(expr_matrix)) == 0)
+          if(length(good_rows) == 0) {
+            print("No valid genes after filtering NA/Inf values")
+            next
+          }
+          expr_matrix <- expr_matrix[good_rows, ]
+          
+          # Check if we have enough variation for clustering
+          row_vars <- apply(expr_matrix, 1, var)
+          if(all(row_vars == 0)) {
+            print("No variation in expression data")
+            next
+          }
+          
+          # Create annotation
+          anno_col <- data.frame(
+            Age_group = factor(subset_data$less18M),
+            row.names = colnames(expr_matrix)
+          )
+          
+          # Create title
+          title <- paste0(celltype, " - ", dataset_name, "\n",
+                         "Total n=", ncol(subset_data), " (",
+                         "<=18m: n=", sample_counts["TRUE"], ", ",
+                         ">18m: n=", sample_counts["FALSE"], ")")
+          
+          tryCatch({
+            # Display heatmap
+            pheatmap(expr_matrix,
+                    annotation_col = anno_col,
+                    annotation_colors = list(Age_group = c("TRUE" = "red", "FALSE" = "blue")),
+                    main = title,
+                    show_colnames = FALSE,
+                    cluster_rows = TRUE,
+                    cluster_cols = TRUE,
+                    scale = "row",
+                    fontsize_row = 8)
+            
+            print(paste("Successfully plotted heatmap for", celltype, "in", dataset_name))
+          }, error = function(e) {
+            print(paste("Error plotting heatmap:", e$message))
+          })
+          
+        } else {
+          print("No common genes found")
+        }
+      } else {
+        print("No meta-analysis results available")
+      }
+    }
+  }
+}
+
+# Run with minimum 3 samples per group
+create_patient_heatmaps(bulk, meta_analysis_results, min_group_size = 3)
+```
+
+### Specific genes
+
+```{r}
+create_patient_heatmaps_genes <- function(bulk, genes) {
+  
+  for(celltype in unique(bulk$Final_Annotation)) {
+    print(paste("\nProcessing", celltype))
+    
+    valid_combos <- table(bulk$Final_Annotation, bulk$dataset)
+    valid_datasets <- names(valid_combos[celltype,valid_combos[celltype,] > 0])
+    
+    for(dataset_name in valid_datasets) {
+      print(paste("\nChecking", dataset_name))
+      
+      # Subset data
+      subset_data <- subset(x = bulk, 
+                           subset = Final_Annotation == celltype & dataset == dataset_name)
+      
+      # Get sample counts
+      sample_counts <- table(subset_data$less18M)
+      
+      # Check sample sizes
+      if(length(sample_counts) < 2) {
+        print("Insufficient samples - skipping")
+        next
+      }
+      
+      # Get expression data
+      expr_matrix <- as.matrix(GetAssayData(subset_data, slot = "data"))
+        
+        if(length(genes) > 0) {
+          # Subset and clean expression matrix
+          expr_matrix <- expr_matrix[genes, , drop = FALSE]
+          
+          # Remove rows with NA/Inf values
+          good_rows <- which(rowSums(is.na(expr_matrix) | is.infinite(expr_matrix)) == 0)
+          if(length(good_rows) == 0) {
+            print("No valid genes after filtering NA/Inf values")
+            next
+          }
+          expr_matrix <- expr_matrix[good_rows, ]
+          
+          # Check if we have enough variation for clustering
+          row_vars <- apply(expr_matrix, 1, var)
+          if(all(row_vars == 0)) {
+            print("No variation in expression data")
+            next
+          }
+          
+          # Create annotation
+          anno_col <- data.frame(
+            Age_group = factor(subset_data$less18M),
+            row.names = colnames(expr_matrix)
+          )
+          
+          # Create title
+          title <- paste0(celltype, " - ", dataset_name, "\n",
+                         "Total n=", ncol(subset_data), " (",
+                         "<=18m: n=", sample_counts["TRUE"], ", ",
+                         ">18m: n=", sample_counts["FALSE"], ")")
+          
+          tryCatch({
+            # Display heatmap
+            pheatmap(expr_matrix,
+                    annotation_col = anno_col,
+                    annotation_colors = list(Age_group = c("TRUE" = "red", "FALSE" = "blue")),
+                    main = title,
+                    show_colnames = FALSE,
+                    cluster_rows = TRUE,
+                    cluster_cols = TRUE,
+                    scale = "row",
+                    fontsize_row = 8)
+            
+            print(paste("Successfully plotted heatmap for", celltype, "in", dataset_name))
+          }, error = function(e) {
+            print(paste("Error plotting heatmap:", e$message))
+          })
+          
+        } else {
+          print("No genes are provided")
+        }
+      }
+    }
+  }
+
+# Run with minimum 3 samples per group
+create_patient_heatmaps_genes(bulk, c('S100A9', 'S100A8'))
+```
+
+## Forest plots
+
+```{r fig.height=7, fig.width=5}
+# Function to create grouped forest plot
+create_grouped_forest_plot <- function(all_results, celltype, top_n = 5) {
+  library(ggplot2)
+  library(metafor)
+  library(dplyr)
+  library(tidyr)
+  
+  # Initialize empty data frame for all genes
+  forest_data_all <- data.frame()
+  meta_results <- data.frame()
+  
+  # Get top genes from meta-analysis results
+  top_genes <- meta_analysis_results[[celltype]]$gene[1:min(top_n, nrow(meta_analysis_results[[celltype]]))]
+  
+  # Collect results for all top genes across datasets
+  datasets <- names(all_results[[celltype]])
+  
+  for(gene in top_genes) {
+    logFC <- numeric()
+    se <- numeric()
+    dataset_names <- character()
+    
+    for(dataset in datasets) {
+      res_table <- all_results[[celltype]][[dataset]]$de_table
+      if(gene %in% rownames(res_table)) {
+        logFC <- c(logFC, res_table[gene, "logFC"])
+        # Calculate SE from p-value and logFC
+        z_score <- qnorm(res_table[gene, "PValue"]/2, lower.tail = FALSE)
+        se <- c(se, abs(res_table[gene, "logFC"]/z_score))
+        dataset_names <- c(dataset_names, dataset)
+      }
+    }
+    
+    # Create temporary data frame for this gene
+    temp_data <- data.frame(
+      dataset = dataset_names,
+      gene = gene,
+      logFC = logFC,
+      se = se,
+      stringsAsFactors = FALSE
+    )
+    
+    # Calculate meta-analysis for this gene
+    if(nrow(temp_data) > 0) {
+      meta_res <- try(rma(yi = temp_data$logFC, sei = temp_data$se))
+      if(!inherits(meta_res, "try-error")) {
+        meta_results <- rbind(meta_results, 
+                            data.frame(gene = gene,
+                                     meta_effect = coef(meta_res)[1],
+                                     meta_se = sqrt(vcov(meta_res)[1,1])))
+      }
+    }
+    
+    forest_data_all <- rbind(forest_data_all, temp_data)
+  }
+  
+  # Create forest plot with facets for each gene
+  forest_plot <- ggplot(forest_data_all, aes(y = dataset, color = dataset)) +
+    geom_point(aes(x = logFC), size = 3) +
+    geom_errorbarh(aes(xmin = logFC - 1.96*se, 
+                      xmax = logFC + 1.96*se), 
+                   height = 0.2) +
+    geom_vline(xintercept = 0, linetype = "dashed") +
+    geom_vline(data = meta_results, 
+               aes(xintercept = meta_effect),
+               color = "red", 
+               linetype = "dashed") +
+    facet_wrap(~gene, scales = "free_x", ncol = 1) +
+    theme_minimal() +
+    theme(
+      strip.background = element_rect(fill = "lightgray"),
+      strip.text = element_text(face = "bold"),
+      legend.position = "right"
+    ) +
+    scale_color_brewer(palette = "Set1") +
+    labs(title = paste("Forest plots for top", top_n, "genes in", celltype),
+         x = "Log Fold Change",
+         y = "Dataset",
+         color = "Dataset")
+  
+  return(forest_plot)
+}
+
+# Usage example:
+# Loop through cell types and create plots
+for(celltype in names(meta_analysis_results)) {
+  if(!is.null(meta_analysis_results[[celltype]])) {
+    print(create_grouped_forest_plot(results, celltype))
+  }
+}
+```
+
+```{r fig.height=6, fig.width=18}
+library(gridExtra)
+library(patchwork)
+
+# Create a list to store all plots
+plot_list <- list()
+
+# Generate all plots and store them
+for(celltype in names(meta_analysis_results)) {
+  if(!is.null(meta_analysis_results[[celltype]])) {
+    # Create plot and add to list
+    plot_list[[celltype]] <- create_grouped_forest_plot(results, celltype) +
+      # Add celltype as subtitle instead of title for better grid layout
+      labs(title = NULL) +
+      NoLegend()
+  }
+}
+
+# Option 1: Using gridExtra
+# Arrange plots in a grid
+grid_plot <- do.call(grid.arrange, 
+                    c(plot_list, 
+                      ncol = 7,  # Adjust number of columns as needed
+                      top = "Forest Plots by Cell Type"))
+```
+
+```{r}
+create_forest_plot_custom <- function(all_results, celltype, gene_of_interest) {
+  forest_data <- data.frame()
+  
+  for (dataset in names(all_results[[celltype]])) {
+    res_table <- all_results[[celltype]][[dataset]]$de_table
+    
+    if (gene_of_interest %in% rownames(res_table)) {
+      logFC <- res_table[gene_of_interest, "logFC"]
+      pvalue <- res_table[gene_of_interest, "PValue"]
+      
+      if (pvalue == 0) pvalue <- .Machine$double.eps
+      
+      z_score <- qnorm(pvalue / 2, lower.tail = FALSE)
+      se <- ifelse(z_score == 0, NA, abs(logFC / z_score))
+      
+      n_samples <- ncol(all_results[[celltype]][[dataset]]$dge$counts)
+      
+      forest_data <- rbind(forest_data, 
+                           data.frame(dataset = dataset,
+                                      logFC = logFC,
+                                      se = se,
+                                      pvalue = pvalue,
+                                      n = n_samples,
+                                      stringsAsFactors = FALSE))
+    }
+  }
+  
+  forest_data <- forest_data[complete.cases(forest_data), ]
+  forest_data <- forest_data[forest_data$se > 0, ]
+  
+  if (nrow(forest_data) < 2) {
+    print(paste("Not enough data for meta-analysis for", gene_of_interest))
+    return(NULL)
+  }
+  
+  meta_res <- rma(yi = logFC, sei = se, data = forest_data)
+  
+  forest_data$dataset <- factor(forest_data$dataset, 
+                                levels = forest_data$dataset[order(forest_data$logFC)])
+  
+  p <- ggplot(forest_data, aes(y = dataset, color = dataset)) +
+    geom_point(aes(x = logFC, size = 1 / se^2)) +
+    geom_errorbarh(aes(xmin = logFC - 1.96 * se, xmax = logFC + 1.96 * se), height = 0.2) +
+    geom_vline(xintercept = 0, linetype = "dashed", color = "gray50") +
+    geom_vline(xintercept = meta_res$b[1], color = "red", linetype = "dashed") +
+    theme_minimal() +
+    theme(legend.position = "none") +
+    labs(title = paste("Forest plot for", gene_of_interest, "in", celltype),
+         subtitle = paste("Summary effect:", round(meta_res$b[1], 3), 
+                          "(95% CI:", round(meta_res$ci.lb, 3), "to", 
+                          round(meta_res$ci.ub, 3), ")"),
+         x = "Log Fold Change",
+         y = "Dataset") +
+    annotate("text", x = max(forest_data$logFC + forest_data$se) * 1.2,
+             y = forest_data$dataset,
+             label = sprintf("p = %.2e", forest_data$pvalue),
+             hjust = 0, size = 3)
+  
+  return(list(plot = p, meta_results = meta_res, data = forest_data))
+}
+
+
+f1 <- create_forest_plot_custom(results, "Neuroendocrine", "S100a8")
+print(f1$plot)
+
+# For multiple genes of interest
+genes_of_interest <- c("S100A8", 'S100A9')
+forest_plots <- lapply(genes_of_interest, function(gene) {
+  create_forest_plot_custom(results, "Myeloid-cells", gene)
+})
+
+
+create_forest_plot_custom(results, "Neuroendocrine", "FAS")
+create_forest_plot_custom(results, "Myeloid-cells", "FASLG")
+```
+
+## Enrichment analysis
+
+```{r}
+perform_pathway_analysis <- function(meta_results, celltype) {
+  if(is.null(meta_results[[celltype]])) {
+    return(NULL)
+  }
+  
+  # Create ranked gene list
+  gene_list <- meta_results[[celltype]]$mean_logFC
+  names(gene_list) <- meta_results[[celltype]]$gene
+  gene_list <- sort(gene_list, decreasing = TRUE)
+  
+  # Convert gene symbols to ENTREZ IDs
+  entrez_ids <- mapIds(org.Hs.eg.db,
+                      keys = names(gene_list),
+                      column = "ENTREZID",
+                      keytype = "SYMBOL",
+                      multiVals = "first")
+  
+  # Remove NA values
+  gene_list <- gene_list[!is.na(entrez_ids)]
+  entrez_ids <- entrez_ids[!is.na(entrez_ids)]
+  names(gene_list) <- entrez_ids
+  
+  # Run GO enrichment
+  go_results <- gseGO(geneList = gene_list,
+                      ont = "BP",
+                      OrgDb = org.Hs.eg.db,
+                      minGSSize = 10,
+                      maxGSSize = 500,
+                      pvalueCutoff = 0.05,
+                      verbose = FALSE)
+  
+  # Run KEGG pathway analysis
+  kegg_results <- gseKEGG(geneList = gene_list,
+                         organism = "hsa",
+                         minGSSize = 10,
+                         maxGSSize = 500,
+                         pvalueCutoff = 0.05,
+                         verbose = FALSE)
+  
+  # Run Reactome pathway analysis
+  reactome_results <- gsePathway(geneList = gene_list,
+                                organism = "human",
+                                minGSSize = 10,
+                                maxGSSize = 500,
+                                pvalueCutoff = 0.05,
+                                verbose = FALSE)
+  
+  # Create visualization function
+  plot_enrichment <- function(results, title) {
+    if(is.null(results) || nrow(results) == 0) {
+      return(NULL)
+    }
+    
+    dotplot(results, showCategory = 10, title = title) +
+      theme_minimal() +
+      theme(axis.text.y = element_text(size = 8))
+  }
+  
+  # Create plots
+  plots <- list(
+    go = plot_enrichment(go_results, paste("GO Biological Process -", celltype)),
+    kegg = plot_enrichment(kegg_results, paste("KEGG Pathways -", celltype)),
+    reactome = plot_enrichment(reactome_results, paste("Reactome Pathways -", celltype))
+  )
+  
+  return(list(
+    go = go_results,
+    kegg = kegg_results,
+    reactome = reactome_results,
+    plots = plots
+  ))
+}
+```
+
+```{r}
+# First, let's run pathway analysis for each cell type
+pathway_results <- list()
+for(celltype in names(meta_analysis_results)) {
+  print(paste("Analyzing pathways for", celltype))
+  pathway_results[[celltype]] <- perform_pathway_analysis(meta_analysis_results, celltype)
+}
+```
+
+```{r fig.height=5, fig.width=8}
+library(enrichplot)
+gseaplot2(pathway_results$`Myeloid-cells`$reactome, geneSetID = 4:4, title = 'Neutrophil degranulation in myeloid cells')
+```
+
+```{r}
+# Visualize pathway results for each cell type
+for(celltype in names(pathway_results)) {
+  if(!is.null(pathway_results[[celltype]])) {
+    # Plot GO results
+    print(pathway_results[[celltype]]$plots$go)
+    
+    # Plot KEGG results
+    print(pathway_results[[celltype]]$plots$kegg)
+    
+    # Plot Reactome results
+    print(pathway_results[[celltype]]$plots$reactome)
+  }
+}
+```
+
+```{r}
+summarize_pathway_results <- function(pathway_results) {
+  summary_df <- data.frame()
+  
+  for(ct in names(pathway_results)) {
+    if(!is.null(pathway_results[[ct]])) {
+      # Count significant pathways
+      n_go <- if(!is.null(pathway_results[[ct]]$go)) nrow(pathway_results[[ct]]$go@result) else 0
+      n_kegg <- if(!is.null(pathway_results[[ct]]$kegg)) nrow(pathway_results[[ct]]$kegg@result) else 0
+      n_reactome <- if(!is.null(pathway_results[[ct]]$reactome)) nrow(pathway_results[[ct]]$reactome@result) else 0
+      
+      row <- data.frame(
+        celltype = ct,
+        GO_terms = n_go,
+        KEGG_pathways = n_kegg,
+        Reactome_pathways = n_reactome,
+        stringsAsFactors = FALSE
+      )
+      summary_df <- rbind(summary_df, row)
+    }
+  }
+  
+  return(summary_df)
+}
+```
+
+```{r}
+# First, let's see a summary of pathway results
+pathway_summary <- summarize_pathway_results(pathway_results)
+print("Summary of significant pathways by cell type:")
+print(pathway_summary)
+```
+
+Negative NES: The pathway/gene set is downregulated in younger patients (<=18M) compared to older patients (>18M)
+
+```{r}
+if(!is.null(pathway_results[["Neuroendocrine"]])) {
+  # Show top GO terms
+  print("Top GO terms for Neuroendocrine cells:")
+  print(head(pathway_results[["Neuroendocrine"]]$go@result))
+  
+  # Show top KEGG pathways
+  print("Top KEGG pathways for Neuroendocrine cells:")
+  print(head(pathway_results[["Neuroendocrine"]]$kegg@result))
+  
+  # Show top KEGG pathways
+  print("Top Reactome pathways for Neuroendocrine cells:")
+  print(head(pathway_results[["Neuroendocrine"]]$reactome@result))
+}
+```
+
+```{r}
+plot_enrichment_results <- function(pathway_results, celltype, 
+                                     show_n_each = 10, 
+                                     min_fdr = 0.25) {
+  
+  if(is.null(pathway_results[[celltype]])) {
+    return(NULL)
+  }
+  
+  # Extract results for different databases
+  plot_data <- data.frame()
+  
+  # Process GO results
+  if(!is.null(pathway_results[[celltype]]$go)) {
+    go_data <- as.data.frame(pathway_results[[celltype]]$go@result)
+    if(nrow(go_data) > 0) {
+      go_data$database <- "GO"
+      plot_data <- rbind(plot_data, 
+                        go_data[, c("Description", "NES", "pvalue", "p.adjust", "database")])
+    }
+  }
+  
+  # Process KEGG results
+  if(!is.null(pathway_results[[celltype]]$kegg)) {
+    kegg_data <- as.data.frame(pathway_results[[celltype]]$kegg@result)
+    if(nrow(kegg_data) > 0) {
+      kegg_data$database <- "KEGG"
+      plot_data <- rbind(plot_data, 
+                        kegg_data[, c("Description", "NES", "pvalue", "p.adjust", "database")])
+    }
+  }
+  
+  # Process Reactome results
+  if(!is.null(pathway_results[[celltype]]$reactome)) {
+    reactome_data <- as.data.frame(pathway_results[[celltype]]$reactome@result)
+    if(nrow(reactome_data) > 0) {
+      reactome_data$database <- "Reactome"
+      plot_data <- rbind(plot_data, 
+                        reactome_data[, c("Description", "NES", "pvalue", "p.adjust", "database")])
+    }
+  }
+  
+  if(nrow(plot_data) == 0) {
+    return(NULL)
+  }
+  
+  # Filter by FDR
+  plot_data <- plot_data[plot_data$p.adjust < min_fdr, ]
+  
+  if(nrow(plot_data) == 0) {
+    return(NULL)
+  }
+  
+  # Split into positive and negative NES
+  pos_data <- plot_data[plot_data$NES > 0, ]
+  neg_data <- plot_data[plot_data$NES < 0, ]
+  
+  # Sort and take top N from each
+  pos_data <- pos_data[order(-pos_data$NES), ]
+  neg_data <- neg_data[order(neg_data$NES), ]
+  
+  pos_data <- head(pos_data, show_n_each)
+  neg_data <- head(neg_data, show_n_each)
+  
+  # Combine the data
+  plot_data <- rbind(pos_data, neg_data)
+  
+  # Add significance levels for plotting
+  plot_data$sig_level <- case_when(
+    plot_data$p.adjust < 0.001 ~ "***",
+    plot_data$p.adjust < 0.01 ~ "**",
+    plot_data$p.adjust < 0.05 ~ "*",
+    TRUE ~ ""
+  )
+  
+  # Make pathway names more readable
+  plot_data$Description <- factor(plot_data$Description, 
+                                levels = plot_data$Description[order(plot_data$NES)])
+  
+  # Calculate maximum absolute NES for symmetric plotting
+  max_abs_nes <- max(abs(plot_data$NES))
+  
+  # Create combined plot
+  p <- ggplot(plot_data, aes(x = NES, y = Description)) +
+    geom_col(aes(fill = NES)) +
+    geom_text(aes(label = sig_level), hjust = -0.5) +
+    scale_fill_gradient2(low = "blue", mid = "white", high = "red", midpoint = 0) +
+    theme_minimal() +
+    theme(
+      axis.text.y = element_text(size = 8),
+      plot.title = element_text(size = 12, face = "bold"),
+      legend.position = "right",
+      panel.grid.major.y = element_blank()
+    ) +
+    labs(
+      title = paste("Enriched Pathways in", celltype),
+      subtitle = paste0("Top ", show_n_each, " positively and negatively enriched pathways"),
+      x = "Normalized Enrichment Score (NES)",
+      y = NULL,
+      caption = "FDR significance: *** < 0.001, ** < 0.01, * < 0.05"
+    ) +
+    # Make x-axis symmetric around 0
+    xlim(-max_abs_nes * 1.2, max_abs_nes * 1.2)
+  
+  # Add database information to the data frame
+  plot_data$direction <- ifelse(plot_data$NES > 0, "Downregulated in >18M", "Upregulated in >18M")
+  
+  return(list(
+    plot = p,
+    data = plot_data
+  ))
+}
+```
+
+```{r fig.height=12, fig.width=16}
+library(dplyr)
+library(patchwork)  # for arranging multiple plots
+
+# Create a list to store all plots
+plots_list <- list()
+pathways_list <- list()
+
+# Process each cell type
+for(ct in names(pathway_results)) {
+  results <- plot_enrichment_results(pathway_results, ct, show_n_each = 10)
+  
+  if(!is.null(results)) {
+    plots_list[[ct]] <- results$plot
+    
+    # Store pathway details
+    pathways_list[[ct]] <- results$data %>%
+      as.data.frame() %>%
+      arrange(desc(NES)) %>%
+      dplyr::select(Description, NES, p.adjust, direction, database)
+  }
+}
+
+combined_plots <- wrap_plots(plots_list, ncol = 2)
+print(combined_plots)
+
+# Print pathway details for each cell type
+for(ct in names(pathways_list)) {
+  cat("\n\n==== Enriched pathways for", ct, "====\n")
+  print(pathways_list[[ct]])
+}
+```
+
+```{r}
+plots_list$`Myeloid-cells`
+```
+
+# IFN ab
+
+```{r}
+pathway_results$`Endothelial-cells`$reactome@result
+```
+
+```{r}
+genes <- pathway_results[["Endothelial-cells"]]$reactome@result %>% 
+  dplyr::filter(ID == 'R-HSA-1280215') %>% 
+  .$core_enrichment %>% 
+  str_split('/') %>% 
+  .[[1]]
+
+# Convert ENTREZ IDs to gene symbols
+gene_symbols <- mapIds(org.Hs.eg.db, 
+                      keys = genes,
+                      column = "SYMBOL",
+                      keytype = "ENTREZID",
+                      multiVals = "first")
+
+# Create forest plots for these genes
+forest_plots <- lapply(unname(gene_symbols), function(gene) {
+  plot <- create_forest_plot_custom(results, "Endothelial-cells", gene)
+  # Return the plot only if we got results
+  if(!is.null(plot)) {
+    return(plot$plot)
+  }
+  return(NULL)
+})
+
+# Remove NULL results
+forest_plots <- forest_plots[!sapply(forest_plots, is.null)]
+
+# Print the plots
+for(p in forest_plots) {
+  print(p)
+}
+```
+
+```{r}
+check_genes <- c('STAT1', 'STAT2',  'IFNA1', 'IFNA2', 'IFNB1', 'IRF7', 'MX1', 'IFIT1', 'OAS1',
+                  'CXCL10', 'CCL5', 'CSF2', 'IL15', 'ICAM1', 'VCAM1', 'VEGFA', 'VEGFB', 'TNFRSF1A',
+                 	'CXCL1', 'CXCL2', 'CCL3', 'IL10')
+for(gene in check_genes) {
+  plot_results <- create_forest_plot_custom(results, "Endothelial-cells", gene)
+  if(!is.null(plot_results)) {
+    print(plot_results$plot)
+  }
+}
+check_genes <- c('IL10')
+```
+
+```{r}
+gene_symbols <- c('IFNA1', 'IFNA2', 'IFNB1', 'IFNAR1', 'IFNAR2', 'STAT1', 'STAT2', 'IRF7',
+                  'MX1', 'OAS1', 'IFIT1')
+library(tidyverse)
+
+# Function to extract logFC and significance from results
+get_gene_stats <- function(results, dataset) {
+  de_table <- results$de_table
+  
+  data.frame(
+    gene = rownames(de_table),
+    logFC = de_table$logFC,
+    FDR = de_table$FDR,
+    dataset = dataset
+  ) %>%
+    filter(gene %in% gene_symbols)
+}
+
+# Combine data from all datasets
+plot_data <- bind_rows(
+  get_gene_stats(results$`Endothelial-cells`$grossmann, "Grossmann"),
+  get_gene_stats(results$`Endothelial-cells`$patel, "Patel")
+  # ,
+  # get_gene_stats(results$`Stromal-cells`$bonine, "Bonine"),
+  # get_gene_stats(results$`Stromal-cells`$verhoeven, "Verhoeven")
+  # ,
+  # get_gene_stats(results$`Stromal-cells`$dong, "Dong")
+)
+plot_data <- plot_data %>%
+ mutate(logFC_capped = case_when(
+   logFC > 2 ~ 2,
+   logFC < -2 ~ -2,
+   TRUE ~ logFC
+ ))
+# Create dotplot
+ggplot(plot_data, aes(x = gene, y = dataset)) +
+  geom_point(aes(color = logFC_capped), size = 5) +
+  scale_color_gradient2(low = "blue", mid = "white", high = "#FF69B4FF", midpoint = 0,
+                        limits = c(-2, 2)) +
+  geom_point(data = subset(plot_data, FDR < 0.05), 
+             shape = "*", size = 5, color = "black") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(x = "Genes", y = "Datasets", 
+       color = "Log2FC",
+       size = "-log10(FDR)") +
+  scale_size_continuous(range = c(1, 5))
+```
+
+```{r}
+check_genes <- c('IFNAR1', 'IFNAR2')
+for(gene in check_genes) {
+  plot_results <- create_forest_plot_custom(results, "Endothelial-cells", gene)
+  if(!is.null(plot_results)) {
+    print(plot_results$plot)
+  }
+}
+```
+
+## mouse
+
+```{r}
+mouse <- qread(paste0(PREPRDATADIR, 'seu_mouse_v2.qs'))
+
+Idents(mouse) <- 'age'
+```
+
+```{r fig.height=10, fig.width=14}
+genes <- c('Ifna1', 'Ifna2', 'Ifnb1', 'Ifna4', 'Ifna5', 'Ifna6', 'Ifna7', 'Ifnar1', 
+           'Ifnar2', 'Stat1', 'Stat2', 'Irf7', 'Mx1', 'Oas1a', 'Ifit3', 'Rsad2',  'Gbp2'
+           )
+VlnPlot(subset(mouse, annotation == 'fibroblasts'), features = genes, group.by = 'age', cols =c("#6495EDFF", "#FF69B4FF"))
+VlnPlot(subset(mouse, annotation == 'endothelial_cells'), features = genes, group.by = 'age', cols =c("#6495EDFF", "#FF69B4FF"))
+VlnPlot(subset(mouse, annotation == 'myeloid_cells'), features = genes, group.by = 'age', cols =c("#6495EDFF", "#FF69B4FF"))
+```
+
+```{r}
+plot_gene_module <- function(seurat_obj, gene_set, group_var = "less18M", celltype) {
+ seurat_sub <- subset(seurat_obj, Annotation == celltype)
+ seurat_sub <- AddModuleScore(seurat_sub, features = list(gene_set), name = "gene_module")
+ 
+ plot_data <- data.frame(
+   score = seurat_sub$gene_module1,
+   group = seurat_sub@meta.data[[group_var]],
+   sample = seurat_sub$SampleID,
+   dataset = seurat_sub$dataset
+ )
+ 
+ # Sort samples within each dataset by mean score
+ sample_means <- plot_data %>%
+   group_by(dataset, sample) %>%
+   summarize(mean_score = mean(score), .groups = 'drop') %>%
+   arrange(dataset, desc(mean_score))
+ 
+ plot_data$sample <- factor(plot_data$sample, levels = sample_means$sample)
+ 
+ ggplot(plot_data, aes(x = sample, y = score, fill = group)) +
+   geom_boxplot() +
+   facet_wrap(~dataset, scales = "free_x") +
+   theme_minimal() +
+   theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+   labs(x = "Sample", y = "Module Score", fill = group_var) +
+   stat_compare_means(aes(group = group), method = "wilcox.test", label = "p.signif")
+}
+
+plot_gene_module(atlas, gene_set = gene_symbols, celltype = 'Stromal_cells')
+```
+
+```{r}
+plot_gene_expression <- function(seurat_obj, gene, group_var = "less18M", celltype) {
+  # Check if the gene is in the dataset
+  if (!(gene %in% rownames(seurat_obj))) {
+    message(paste("Skipping", gene, "- not found in the expression matrix"))
+    return(NULL)
+  }
+
+  # Subset the Seurat object by cell type
+  seurat_sub <- subset(seurat_obj, Annotation == celltype)
+
+  # Extract gene expression data
+  plot_data <- data.frame(
+    expression = FetchData(seurat_sub, vars = gene)[, 1],
+    group = seurat_sub@meta.data[[group_var]],
+    sample = seurat_sub$SampleID,
+    dataset = seurat_sub$dataset
+  )
+
+  # Sort samples within each dataset by mean expression
+  sample_means <- plot_data %>%
+    group_by(dataset, sample) %>%
+    summarize(mean_expression = mean(expression), .groups = 'drop') %>%
+    arrange(dataset, desc(mean_expression))
+
+  plot_data$sample <- factor(plot_data$sample, levels = sample_means$sample)
+
+  # Plot
+  ggplot(plot_data, aes(x = sample, y = expression, fill = group)) +
+    geom_boxplot() +
+    facet_wrap(~dataset, scales = "free_x") +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+    labs(x = "Sample", y = paste("Expression of", gene), fill = group_var) +
+    stat_compare_means(aes(group = group), method = "wilcox.test", label = "p.signif")
+}
+
+# Example usage
+
+gene_symbols <- c('IFNA1', 'IFNA2', 'IFNB1', 'IFNAR1', 'IFNAR2', 'STAT1', 'STAT2', 'IRF7',
+                  'MX1', 'OAS1', 'IFIT1')
+
+for (gene in gene_symbols) {
+  print(plot_gene_expression(atlas, gene = gene, celltype = 'Endothelial_cells'))
+}
+
+```
+
+## TF - Enrichment
+
+```{r}
+perform_tf_enrichment <- function(meta_results, celltype) {
+  if(is.null(meta_results[[celltype]])) {
+    return(NULL)
+  }
+  
+  # Create ranked gene list
+  gene_list <- meta_results[[celltype]]$mean_logFC
+  names(gene_list) <- meta_results[[celltype]]$gene
+  gene_list <- sort(gene_list, decreasing = TRUE)
+  
+  # Load MSigDB TFT gene sets
+  msigdb_tft <- msigdbr(species = "Homo sapiens", 
+                        category = "C3", 
+                        subcategory = "TFT:GTRD") %>%
+    dplyr::select(gs_name, gene_symbol) %>%
+    as.data.frame()
+  
+  # Convert to list format required by GSEA
+  tf_sets <- split(msigdb_tft$gene_symbol, msigdb_tft$gs_name)
+  
+  # Run GSEA for TF targets
+  tf_gsea <- GSEA(
+    geneList = gene_list,
+    TERM2GENE = msigdb_tft,
+    minGSSize = 10,
+    maxGSSize = 500,
+    pvalueCutoff = 0.25,  # More permissive cutoff for exploration
+    verbose = FALSE
+  )
+  
+  # Create visualization function for TF enrichment
+  plot_tf_enrichment <- function(gsea_results, show_n = 15) {
+    if(is.null(gsea_results) || nrow(gsea_results@result) == 0) {
+      return(NULL)
+    }
+    
+    # Extract results
+    results_df <- as.data.frame(gsea_results@result)
+    
+    # Clean up TF names for better readability
+    results_df$ID <- gsub("TARGETS_.*_", "", results_df$ID)
+    results_df$ID <- gsub("_[0-9]+$", "", results_df$ID)
+    
+    # Split positive and negative enrichment
+    pos_results <- head(results_df[results_df$NES > 0, ], n = show_n)
+    neg_results <- head(results_df[results_df$NES < 0, ], n = show_n)
+    plot_data <- rbind(pos_results, neg_results)
+    
+    # Add significance levels
+    plot_data$sig_level <- case_when(
+      plot_data$p.adjust < 0.001 ~ "***",
+      plot_data$p.adjust < 0.01 ~ "**",
+      plot_data$p.adjust < 0.05 ~ "*",
+      TRUE ~ ""
+    )
+    
+    # Order factors for plotting
+    plot_data$ID <- factor(plot_data$ID, 
+                          levels = plot_data$ID[order(plot_data$NES)])
+    
+    # Calculate maximum absolute NES for symmetric plotting
+    max_abs_nes <- max(abs(plot_data$NES))
+    
+    # Create plot
+    p <- ggplot(plot_data, aes(x = NES, y = ID)) +
+      geom_col(aes(fill = NES)) +
+      geom_text(aes(label = sig_level), hjust = -0.5) +
+      scale_fill_gradient2(
+        low = "blue", 
+        mid = "white", 
+        high = "red", 
+        midpoint = 0,
+        limits = c(-max(abs(plot_data$NES)), max(abs(plot_data$NES))),
+        name = "NES"
+      ) +
+      theme_minimal() +
+      theme(
+        axis.text.y = element_text(size = 8),
+        plot.title = element_text(size = 12, face = "bold"),
+        panel.grid.major.y = element_blank()
+      ) +
+      labs(
+        title = paste("Transcription Factor Target Enrichment -", celltype),
+        subtitle = paste0("Top ", show_n, " positively and negatively enriched TF targets"),
+        x = "Normalized Enrichment Score (NES)",
+        y = NULL,
+        caption = "FDR significance: *** < 0.001, ** < 0.01, * < 0.05"
+      ) +
+      xlim(-max_abs_nes * 1.2, max_abs_nes * 1.2)
+    
+    return(list(
+      plot = p,
+      data = plot_data
+    ))
+  }
+  
+  # Generate plot
+  enrichment_plot <- plot_tf_enrichment(tf_gsea)
+  
+  return(list(
+    gsea_results = tf_gsea,
+    plot = enrichment_plot$plot,
+    data = enrichment_plot$data
+  ))
+}
+
+# Function to run analysis for all cell types
+run_tf_enrichment_analysis <- function(meta_analysis_results) {
+  tf_results <- list()
+  
+  for(celltype in names(meta_analysis_results)) {
+    print(paste("Analyzing TF targets for", celltype))
+    tf_results[[celltype]] <- perform_tf_enrichment(meta_analysis_results, celltype)
+  }
+  
+  return(tf_results)
+}
+
+# Function to create summary of TF enrichment
+summarize_tf_results <- function(tf_results) {
+  summary_df <- data.frame()
+  
+  for(ct in names(tf_results)) {
+    if(!is.null(tf_results[[ct]])) {
+      # Count significant TFs at different thresholds
+      result_data <- tf_results[[ct]]$data
+      
+      row <- data.frame(
+        celltype = ct,
+        total_significant = sum(result_data$p.adjust < 0.25),
+        highly_significant = sum(result_data$p.adjust < 0.05),
+        positive_nes = sum(result_data$NES > 0 & result_data$p.adjust < 0.25),
+        negative_nes = sum(result_data$NES < 0 & result_data$p.adjust < 0.25),
+        stringsAsFactors = FALSE
+      )
+      summary_df <- rbind(summary_df, row)
+    }
+  }
+  
+  return(summary_df)
+}
+```
+
+```{r fig.height=12, fig.width=12}
+# Run the analysis
+tf_enrichment_results <- run_tf_enrichment_analysis(meta_analysis_results)
+
+# Get summary statistics
+tf_summary <- summarize_tf_results(tf_enrichment_results)
+
+plots <- lapply(tf_enrichment_results, function(x) x$plot)
+plots <- plots[!sapply(plots, is.null)]
+
+plot_grid(plotlist = plots, ncol = 2)
+tf_summary
+```
+
+### Myeloid cells
+
+```{r fig.height=5, fig.width=9}
+# Extract and plot Reactome results for Myeloid cells
+if(!is.null(pathway_results[["Myeloid-cells"]]) && 
+   !is.null(pathway_results[["Myeloid-cells"]]$reactome)) {
+    
+    # Extract Reactome data
+    plot_data <- as.data.frame(pathway_results[["Myeloid-cells"]]$reactome@result)
+    
+    # Add significance levels
+    plot_data$sig_level <- case_when(
+        plot_data$p.adjust < 0.001 ~ "***",
+        plot_data$p.adjust < 0.01 ~ "**",
+        plot_data$p.adjust < 0.05 ~ "*",
+        TRUE ~ ""
+    )
+    
+    # Split and get top pathways for each direction
+    pos_data <- head(plot_data[plot_data$NES > 0,], 10)
+    neg_data <- head(plot_data[plot_data$NES < 0,], 10)
+    plot_data <- rbind(pos_data, neg_data)
+    
+    # Order pathways by NES
+    plot_data$Description <- factor(plot_data$Description, 
+                                  levels = plot_data$Description[order(plot_data$NES)])
+    
+    # Calculate maximum absolute NES for symmetric plotting
+    max_abs_nes <- max(abs(plot_data$NES))
+    
+    # Create plot
+    p <- ggplot(plot_data, aes(x = NES, y = Description)) +
+        geom_col(aes(fill = NES)) +
+        geom_text(aes(label = sig_level), hjust = -0.5) +
+        scale_fill_gradient2(low = "blue", mid = "white", high = "red", midpoint = 0) +
+        theme_minimal() +
+        theme(
+            axis.text.y = element_text(size = 10),
+            plot.title = element_text(size = 12, face = "bold"),
+            legend.position = "right",
+            panel.grid.major.y = element_blank()
+        ) +
+        labs(
+            title = "Reactome Pathways in Myeloid Cells",
+            subtitle = "Top 10 positively and negatively enriched pathways",
+            x = "Normalized Enrichment Score (NES)",
+            y = NULL,
+            caption = "FDR significance: *** < 0.001, ** < 0.01, * < 0.05"
+        ) +
+        xlim(-max_abs_nes * 1.2, max_abs_nes * 1.2)
+    
+    print(p)
+    
+    # Print detailed results
+    cat("\nDetailed pathway information:\n")
+    results_table <- plot_data %>%
+        arrange(desc(NES)) %>%
+        mutate(
+            direction = ifelse(NES > 0, "Up in <=18M", "Down in <=18M"),
+            p.adjust = signif(p.adjust, 3),
+            NES = signif(NES, 3)
+        ) %>%
+        dplyr::select(Description, NES, p.adjust, direction)
+    
+    print(results_table)
+}
+```
+
+```{r fig.height=6, fig.width=10}
+gseaplot2(pathway_results[["Myeloid-cells"]]$reactome, geneSetID = 1:5)
+```
+
+```{r}
+library(org.Hs.eg.db)
+
+# First, let's extract the genes from this pathway
+neutrophil_genes <- pathway_results[["Myeloid-cells"]]$reactome@result %>% 
+  dplyr::filter(ID == 'R-HSA-6798695') %>% 
+  .$core_enrichment %>% 
+  str_split('/') %>% 
+  .[[1]]
+
+# Convert ENTREZ IDs to gene symbols
+gene_symbols <- mapIds(org.Hs.eg.db, 
+                      keys = neutrophil_genes,
+                      column = "SYMBOL",
+                      keytype = "ENTREZID",
+                      multiVals = "first")
+
+# Create forest plots for these genes
+forest_plots <- lapply(unname(gene_symbols), function(gene) {
+  plot <- create_forest_plot_custom(results, "Myeloid-cells", gene)
+  # Return the plot only if we got results
+  if(!is.null(plot)) {
+    return(plot$plot)
+  }
+  return(NULL)
+})
+
+# Remove NULL results
+forest_plots <- forest_plots[!sapply(forest_plots, is.null)]
+
+# Print the plots
+for(p in forest_plots) {
+  print(p)
+}
+
+# Print statistics for these genes
+for(gene in gene_symbols) {
+  plot_results <- create_forest_plot_custom(results, "Myeloid-cells", gene)
+  if(!is.null(plot_results)) {
+    cat("\nStatistics for", gene, ":\n")
+    print(plot_results$meta_results)
+  }
+}
+
+# Optional: create a table showing both IDs and symbols
+gene_id_mapping <- data.frame(
+  ENTREZID = neutrophil_genes,
+  SYMBOL = gene_symbols,
+  stringsAsFactors = FALSE
+)
+print("Gene ID mapping:")
+print(gene_id_mapping)
+```
+
+```{r}
+create_patient_heatmaps_genes(bulk, gene_symbols)
+```
+
+```{r}
+library(tidyverse)
+
+# Function to extract logFC and significance from results
+get_gene_stats <- function(results, dataset) {
+  de_table <- results$de_table
+  
+  data.frame(
+    gene = rownames(de_table),
+    logFC = de_table$logFC,
+    FDR = de_table$FDR,
+    dataset = dataset
+  ) %>%
+    filter(gene %in% gene_symbols)
+}
+
+# Combine data from all datasets
+plot_data <- bind_rows(
+  get_gene_stats(results$`Myeloid-cells`$grossmann, "Grossmann"),
+  get_gene_stats(results$`Myeloid-cells`$patel, "Patel"),
+  get_gene_stats(results$`Myeloid-cells`$bonine, "Bonine"),
+  get_gene_stats(results$`Myeloid-cells`$verhoeven, "Verhoeven"),
+  get_gene_stats(results$`Myeloid-cells`$dong, "Dong")
+)
+plot_data <- plot_data %>%
+ mutate(logFC_capped = case_when(
+   logFC > 2 ~ 2,
+   logFC < -2 ~ -2,
+   TRUE ~ logFC
+ ))
+# Create dotplot
+ggplot(plot_data, aes(x = gene, y = dataset)) +
+  geom_point(aes(color = logFC_capped), size = 5) +
+  scale_color_gradient2(low = "blue", mid = "white", high = "#FF69B4FF", midpoint = 0,
+                        limits = c(-2, 2)) +
+  geom_point(data = subset(plot_data, FDR < 0.05), 
+             shape = "*", size = 5, color = "black") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(x = "Genes", y = "Datasets", 
+       color = "Log2FC",
+       size = "-log10(FDR)") +
+  scale_size_continuous(range = c(1, 5))
+```
+
+```{r}
+meta_analysis_results$`Myeloid-cells` %>% 
+  dplyr::filter(gene %in% gene_symbols) %>% 
+  dplyr::filter(FDR < 0.05)
+```
+
+```{r}
+convert_human_to_mouse <- function(gene_list) {
+    output = c()
+    mouse_human_genes = read.csv("https://www.informatics.jax.org/downloads/reports/HOM_MouseHumanSequence.rpt",sep="\t")
+
+    for(gene in gene_list) {
+          class_key = (mouse_human_genes %>% filter(Symbol == gene & Common.Organism.Name == "human"))[['DB.Class.Key']]
+          if( !identical(class_key, integer(0)) ) {
+            human_genes = (mouse_human_genes %>% filter(DB.Class.Key == class_key & Common.Organism.Name=="mouse, laboratory"))[,"Symbol"]
+            for(human_gene in human_genes) {
+                output = rbind(c(gene, human_gene), output)
+            }
+          }
+     }
+     return (output)
+}
+
+neutrophils.mouse <- convert_human_to_mouse(gene_symbols)[,2]
+```
+
+```{r fig.height=10, fig.width=6}
+mouse <- qread(paste0(PREPRDATADIR, 'seu_mouse_v2.qs'))
+
+Idents(mouse) <- 'age'
+
+
+neutrophils_mouse_test <- FindMarkers(subset(mouse, annotation == 'myeloid_cells'), ident.1 = 'young', ident.2 = 'adult')
+
+neutrophils_mouse_sig <- neutrophils_mouse_test %>% 
+  dplyr::filter(rownames(.) %in% neutrophils.mouse) %>% 
+  dplyr::filter(p_val < 0.05)
+
+VlnPlot(subset(mouse, annotation == 'myeloid_cells'), features = neutrophils_mouse_sig %>% rownames(), group.by = 'age')
+```
+
+```{r}
+VlnPlot(subset(mouse, annotation == 'malignant_cells'), features = c('Fas'), group.by = 'age')
+VlnPlot(subset(mouse, annotation == 'myeloid_cells'), features = c('Fasl'), group.by = 'age')
+```
+
+### Neuroendocrine
+
+```{r}
+meta_analysis_results$Neuroendocrine %>% 
+  dplyr::filter(FDR < 0.05) %>% 
+  dplyr::arrange(desc(abs(mean_logFC)))
+```
+
+```{r}
+check_genes <- c('INSM1', 'ALK', 'ZEB2', 'NES', 'EPAS1')
+for(gene in check_genes) {
+  plot_results <- create_forest_plot_custom(results, "Neuroendocrine", gene)
+  if(!is.null(plot_results)) {
+    print(plot_results$plot)
+  }
+}
+
+check_genes <- c('NFKB1', 'NFKB2', 'RELA', 'RELB', 'STAT3', 'STAT1', 'STAT5A', 'STAT5B', 
+  'STAT6', 'JUN', 'FOS', 'JUNB', 'FOSL1', 'FOSL2', 
+  'CEBPB', 'CEBPD', 'CEBPA', 
+  'IRF1', 'IRF2', 'IRF5', 'IRF8', 
+  'HIF1A', 'HIF2A', 
+  'SP1', 'SP3', 
+  'ATF3', 'ATF4', 'ATF6')
+for(gene in check_genes) {
+  plot_results <- create_forest_plot_custom(results, "Neuroendocrine", gene)
+  if(!is.null(plot_results)) {
+    print(plot_results$plot)
+  }
+}
+```
+
+#### Cell cycle
+
+```{r}
+# First, let's extract the genes from this pathway
+cellcycle_genes <- pathway_results[["Neuroendocrine"]]$reactome@result %>% 
+  dplyr::filter(ID == 'R-HSA-1640170') %>% 
+  .$core_enrichment %>% 
+  str_split('/') %>% 
+  .[[1]]
+
+# Convert ENTREZ IDs to gene symbols
+gene_symbols_cc <- mapIds(org.Hs.eg.db, 
+                      keys = cellcycle_genes,
+                      column = "SYMBOL",
+                      keytype = "ENTREZID",
+                      multiVals = "first")
+
+# Create forest plots for these genes
+forest_plots <- lapply(unname(gene_symbols_cc), function(gene) {
+  plot <- create_forest_plot_custom(results, "Neuroendocrine", gene)
+  # Return the plot only if we got results
+  if(!is.null(plot)) {
+    return(plot$plot)
+  }
+  return(NULL)
+})
+
+# Remove NULL results
+forest_plots <- forest_plots[!sapply(forest_plots, is.null)]
+
+# Print the plots
+for(p in forest_plots) {
+  print(p)
+}
+
+# Print statistics for these genes
+for(gene in gene_symbols_cc) {
+  plot_results <- create_forest_plot_custom(results, "Neuroendocrine", gene)
+  if(!is.null(plot_results)) {
+    cat("\nStatistics for", gene, ":\n")
+    print(plot_results$meta_results)
+  }
+}
+```
+
+## DEG in sc
+
+```{r fig.height=9, fig.width=9}
+plot_gene_module <- function(seurat_obj, gene_set, group_var = "less18M", celltype) {
+ seurat_sub <- subset(seurat_obj, Annotation == celltype)
+ seurat_sub <- AddModuleScore(seurat_sub, features = list(gene_set), name = "gene_module")
+ 
+ plot_data <- data.frame(
+   score = seurat_sub$gene_module1,
+   group = seurat_sub@meta.data[[group_var]],
+   sample = seurat_sub$SampleID,
+   dataset = seurat_sub$dataset
+ )
+ 
+ # Sort samples within each dataset by mean score
+ sample_means <- plot_data %>%
+   group_by(dataset, sample) %>%
+   summarize(mean_score = mean(score), .groups = 'drop') %>%
+   arrange(dataset, desc(mean_score))
+ 
+ plot_data$sample <- factor(plot_data$sample, levels = sample_means$sample)
+ 
+ ggplot(plot_data, aes(x = sample, y = score, fill = group)) +
+   geom_boxplot() +
+   facet_wrap(~dataset, scales = "free_x") +
+   theme_minimal() +
+   theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+   labs(x = "Sample", y = "Module Score", fill = group_var) +
+   stat_compare_means(aes(group = group), method = "wilcox.test", label = "p.signif")
+}
+
+p <- plot_gene_module(atlas, gene_set = gene_symbols, celltype = 'Myeloid_cells')
+```
+
+## gene
+
+```{r fig.height=9, fig.width=9}
+plot_gene_expression <- function(seurat_obj, gene, group_var = "less18M", celltype) {
+ seurat_sub <- subset(seurat_obj, Annotation == celltype)
+ 
+ plot_data <- data.frame(
+   expression = GetAssayData(seurat_sub, slot = "data")[gene,],
+   group = seurat_sub@meta.data[[group_var]],
+   sample = seurat_sub$SampleID,
+   dataset = seurat_sub$method
+ )
+ 
+ sample_means <- plot_data %>%
+   group_by(dataset, sample) %>%
+   summarize(mean_exp = mean(expression), .groups = 'drop') %>%
+   arrange(dataset, desc(mean_exp))
+ 
+ plot_data$sample <- factor(plot_data$sample, levels = sample_means$sample)
+ 
+ ggplot(plot_data, aes(x = sample, y = expression, fill = group)) +
+   geom_boxplot() +
+   facet_wrap(~dataset, scales = "free_x") +
+   theme_minimal() +
+   theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+   labs(x = "Sample", y = paste(gene, "Expression"), fill = group_var) +
+   stat_compare_means(aes(group = group), method = "wilcox.test", label = "p.signif")
+}
+
+plot_list <- lapply(gene_symbols[1:5], function(gene) {
+  plot_gene_module(atlas, gene, celltype = 'Myeloid_cells')})
+```
+
+## KEGG view
+
+```{r}
+library(pathview)
+gene_list <- meta_analysis_results$`Myeloid-cells`$mean_logFC
+names(gene_list) <-  meta_analysis_results$`Myeloid-cells`$gene
+
+gene_entrez <- mapIds(org.Hs.eg.db, 
+                      keys = names(gene_list), 
+                      column = "ENTREZID", 
+                      keytype = "SYMBOL",
+                      multiVals = "first")
+
+# Remove NAs (unmapped genes)
+gene_list <- gene_list[!is.na(gene_entrez)]
+names(gene_list) <- gene_entrez[!is.na(gene_entrez)]
+
+pathview(gene.data = gene_list, 
+         pathway.id = "hsa04613", 
+         species = "hsa", 
+         limit = list(gene = c(-1, 1)),
+         low = "blue", mid = "white", high = "red", 
+         kegg.native = TRUE) 
+```
+
+# Neutrophils scanvi
+
+```{r}
+de_table <- read.csv('differential_expression_by_age.csv')
+
+# Create ranked gene list: sign(log2fc) * -log10(pval)
+gene_list <- sign(de_table$log2fc) * -log10(de_table$pval)
+names(gene_list) <- de_table$gene
+gene_list <- sort(gene_list, decreasing = TRUE)
+
+# Convert gene symbols to ENTREZ IDs
+entrez_ids <- mapIds(org.Hs.eg.db,
+                    keys = names(gene_list),
+                    column = "ENTREZID",
+                    keytype = "SYMBOL",
+                    multiVals = "first")
+
+# Remove NA values
+gene_list <- gene_list[!is.na(entrez_ids)]
+entrez_ids <- entrez_ids[!is.na(entrez_ids)]
+names(gene_list) <- entrez_ids
+gene_list <- sort(gene_list, decreasing = TRUE)
+# Run GO enrichment
+go_results <- gseGO(geneList = gene_list,
+                    ont = "BP",
+                    OrgDb = org.Hs.eg.db,
+                    minGSSize = 10,
+                    maxGSSize = 500,
+                    pvalueCutoff = 0.05,
+                    verbose = FALSE)
+
+# Run KEGG pathway analysis
+kegg_results <- gseKEGG(geneList = gene_list,
+                       organism = "hsa",
+                       minGSSize = 10,
+                       maxGSSize = 500,
+                       pvalueCutoff = 0.05,
+                       verbose = FALSE)
+
+# Run Reactome pathway analysis
+reactome_results <- gsePathway(geneList = gene_list,
+                              organism = "human",
+                              minGSSize = 10,
+                              maxGSSize = 500,
+                              pvalueCutoff = 0.05,
+                              verbose = FALSE)
+
+# Create visualization function
+plot_enrichment <- function(results, title) {
+  if(is.null(results) || nrow(results) == 0) {
+    return(NULL)
+  }
+  
+  dotplot(results, showCategory = 10, title = title) +
+    theme_minimal() +
+    theme(axis.text.y = element_text(size = 8))
+}
+
+# Create plots
+plots <- list(
+  go = plot_enrichment(go_results, paste("GO Biological Process ")),
+  kegg = plot_enrichment(kegg_results, paste("KEGG Pathways ")),
+  reactome = plot_enrichment(reactome_results, paste("Reactome Pathways "))
+)
+```
+
+```{r}
+reactome_results@result
+```
+
+```{r}
+library(enrichplot)
+gseaplot2(reactome_results, geneSetID = 25:3)
+```
+
+```{r fig.height=5, fig.width=7}
+library(clusterProfiler)
+library(ReactomePA)
+library(org.Hs.eg.db)
+library(DOSE)
+
+# Load differential expression results
+de_table <- read.csv('differential_expression_by_age.csv')
+
+# Filter top upregulated genes by log2FC and p-value (adjust threshold if needed)
+top_upregulated <- subset(de_table, log2fc > 1 & padj < 0.0001)
+
+# Convert gene symbols to ENTREZ IDs
+entrez_ids <- mapIds(org.Hs.eg.db,
+                     keys = top_upregulated$gene,
+                     column = "ENTREZID",
+                     keytype = "SYMBOL",
+                     multiVals = "first")
+
+# Remove NA values
+entrez_ids <- na.omit(entrez_ids)
+
+# Run Reactome pathway over-representation analysis
+reactome_results <- enrichPathway(gene         = entrez_ids,
+                                  organism     = "human",
+                                  pvalueCutoff = 0.05,
+                                  readable     = TRUE)
+
+dotplot(reactome_results, showCategory = 15) +
+    theme_minimal() +
+    theme(axis.text.y = element_text(size = 8))
+
+library(ReactomePA)
+library(dplyr)
+
+# Convert result to data frame
+reactome_df <- as.data.frame(reactome_results)
+
+# Filter rows of interest
+filtered_df <- reactome_df %>%
+  filter(grepl("Interferon|Neutrophil", Description, ignore.case = TRUE))
+
+# Create a new enrichResult object manually
+filtered_reactome <- reactome_results
+filtered_reactome@result <- filtered_df
+
+# Now plot
+dotplot(filtered_reactome, showCategory = 5)
+```
+
+
+```{r}
+reactome_results@result
+```
+

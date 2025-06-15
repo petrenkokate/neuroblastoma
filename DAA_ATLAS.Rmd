@@ -1,0 +1,492 @@
+---
+title: "DAA_ATLAS"
+author: "Kate Petrenko"
+date: "2025-02-23"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+library(data.table)
+library(Seurat)
+library(scDblFinder)
+library(DoubletFinder)
+library(dplyr)
+library(remotes)
+# remotes::install_github("carmonalab/STACAS")
+library(STACAS)
+library(SingleR)
+# install.packages("scGate")
+library(scGate)
+library(ggplot2)
+library(BiocParallel)
+library(harmony)
+library(RColorBrewer)
+library(stringr)
+library(cowplot)
+library(scuttle)
+# install.packages("devtools")
+# BiocManager::install("Homo.sapiens")
+# BiocManager::install("jpmam1/scalop") #forked copy of a really good guy 
+# devtools::install_github("jlaffy/infercna")
+# library(infercna)
+# library(infercnv)
+library(parallel)
+library(future)
+library(clustree)
+library(dittoSeq)
+# install.packages("ggh4x")
+library(ggh4x)
+#BiocManager::install('EnhancedVolcano')
+library(EnhancedVolcano)
+library(clusterProfiler)
+library("org.Hs.eg.db")
+library(ReactomePA)
+library(msigdbr)
+# install.packages('qs')
+library(qs)
+library(DESeq2)
+library(magrittr)
+library(tibble)
+library(tidyr)
+library(pheatmap)
+# BiocManager::install('apeglm')
+# install.packages('ashr')
+library(edgeR)
+library(reticulate)
+# install.packages('anndata')
+# library(anndata)
+# devtools::install_github("cellgeni/sceasy")
+# BiocManager::install(c("LoomExperiment"))
+library(sceasy)
+library(SeuratData)
+# BiocManager::install("MAST")
+# library(MAST)
+# install.packages("metafor")
+library(metafor)
+# install.packages('UpSetR')
+library(UpSetR)
+library(ggpubr)
+# BiocManager::install("miloR")
+library(miloR)
+library(patchwork)
+library(scater)
+```
+
+```{r}
+library(BiocParallel)
+ncores = 20
+mcparam = MulticoreParam(workers = ncores)
+register(mcparam)
+```
+
+```{r global variables, include=FALSE}
+set.seed(100)
+DATADIR = '~/neuroblastoma/data/'
+WORKDIR = '~/neuroblastoma/'
+PREPRDATADIR = '~/neuroblastoma/preprocessing_data/'
+
+my_colors <- c("#6495EDFF", "#FF69B4FF", "#BA55D3FF", "#F08080FF", "#32CD32FF",  
+    "#9ACD32FF", "#4682B4FF", "#DDA0DDFF", "#FFA07AFF", "#8FBC8BFF",
+    "#40E0D0FF", "#F0E68CFF", "#5F9EA0FF", "#D2B48CFF",  
+    "#FFDAB9FF", "#87CEEBFF", "#B4A0E5", "#5BC0BE", "#773344", "#A4BEF3")
+```
+
+```{r}
+atlas <- qread(paste0(PREPRDATADIR, 'ATLAS_object.qs'))
+
+sample_metadata <- read.csv(paste0(DATADIR, 'samples_metadata_v5.csv'))
+sample_metadata[sample_metadata==""] <- NA
+
+rownames(sample_metadata) <- sample_metadata$Sample_dataset
+
+
+
+clean_sample_id <- function(id) {
+  # First remove _rep1 and _rep2
+  id <- gsub("_rep[12]$", "", id)
+  
+  # Handle the special bonine cases
+  id <- gsub("_sn$", "", id)      # Remove _sn suffix
+  id <- gsub("_[12]$", "", id)    # Remove _1 or _2 suffix
+  
+  return(id)
+}
+
+atlas$less18M <- sample_metadata[clean_sample_id(atlas$SampleID),]$less18M
+atlas$Sex <- sample_metadata[clean_sample_id(atlas$SampleID),]$Sex
+atlas$MYCN_status <- sample_metadata[clean_sample_id(atlas$SampleID),]$MYCN
+atlas$method <- sample_metadata[clean_sample_id(atlas$SampleID),]$Method
+
+```
+
+# MiloR
+
+```{r}
+seu <- atlas
+rm(atlas)
+```
+
+```{r}
+df <- read.csv("query_metadata_with_embeddings.csv", row.names = 1)
+
+# Latent space (e.g., scVI)
+scvi <- as.matrix(df[, grep("^scVI_", colnames(df))])
+
+rownames(scvi) <- rownames(df)
+scvi <- scvi[colnames(seu), ]
+
+# Create DimReduc object
+scvi_dr <- CreateDimReducObject(
+  embeddings = scvi,
+  key = "scVI_",
+  assay = DefaultAssay(seu)
+)
+
+# Add to Seurat object
+seu[["scVI"]] <- scvi_dr
+```
+
+```{r}
+milo <- Milo(as.SingleCellExperiment(seu))
+milo <- buildGraph(milo, k = 50, d = 10, reduced.dim = "SCVI")
+milo <- makeNhoods(milo, prop = 0.05, k = 50, d=10, refined = TRUE, reduced_dims = "SCVI", refinement_scheme="graph")
+plotNhoodSizeHist(milo)
+```
+
+```{r}
+milo <- countCells(milo, meta.data = as.data.frame(colData(milo)), sample="SampleID")
+head(nhoodCounts(milo))
+
+qsave(milo, paste0(PREPRDATADIR, 'milo_ATLAS.qs'))
+```
+
+```{r}
+milo <- qread(paste0(PREPRDATADIR, 'milo_ATLAS.qs'))
+```
+
+## Design
+
+```{r}
+design <- data.frame(colData(milo))[,c("SampleID", "less18M", "Study")]
+
+## Convert batch info from integer to factor
+design$less18M <- factor(design$less18M, levels = c('TRUE', 'FALSE')) 
+design$Study <- factor(design$Study)
+design <- distinct(design)
+rownames(design) <- design$SampleID
+
+design
+```
+
+```{r}
+da_results <- testNhoods(milo, design = ~ Study + less18M, design.df = design, fdr.weighting = 'graph-overlap')
+head(da_results)
+da_results %>%
+  arrange(SpatialFDR) %>%
+  head() 
+```
+
+```{r}
+ggplot(da_results, aes(PValue)) + geom_histogram(bins=50)
+```
+
+```{r}
+ggplot(da_results, aes(logFC, -log10(SpatialFDR))) + 
+  geom_point() +
+  geom_hline(yintercept = 1) ## Mark significance threshold (10% FDR)
+```
+
+## Visulaization
+
+```{r}
+milo <- buildNhoodGraph(milo)
+
+## Plot single-cell UMAP
+umap_pl <- plotReducedDim(milo, dimred = "UMAP", colour_by="less18M", text_by = "Final_Annotation", 
+                          text_size = 3, point_size=0.5) +
+  guides(fill="none")
+
+## Plot neighbourhood graph
+nh_graph_pl <- plotNhoodGraphDA(milo, da_results, layout="UMAP",alpha=0.1) 
+  
+umap_pl + nh_graph_pl +
+  plot_layout(guides="collect")
+```
+
+```{r}
+da_results <- annotateNhoods(milo, da_results, coldata_col = "Final_Annotation")
+da_results %>%
+  arrange(SpatialFDR) %>%
+  head(15) 
+```
+
+```{r}
+ggplot(da_results, aes(Annotation_fraction)) + geom_histogram(bins=50)
+```
+
+```{r}
+da_results$Final_Annotation <- ifelse(da_results$Final_Annotation_fraction < 0.9, "Mixed", da_results$Final_Annotation)
+```
+
+```{r}
+plotDAbeeswarm(da_results, group.by = "Final_Annotation")
+```
+
+# Python
+
+```{r}
+library(SeuratDisk)
+SaveH5Seurat(atlas, filename = paste0(PREPRDATADIR, "ATLAS.h5Seurat"))
+Convert(paste0(PREPRDATADIR, "ATLAS.h5Seurat"), dest = "h5ad")
+```
+
+```{r}
+SaveH5Seurat(atlas_ref, filename = paste0(PREPRDATADIR, "NBatlas.h5Seurat"))
+Convert(paste0(PREPRDATADIR, "NBatlas.h5Seurat"), dest = "h5ad")
+```
+
+```{r}
+metadata_python <- read.csv("query_metadata_with_umap.csv", row.names = 1)
+
+# Match to Seurat cells
+metadata_python <- metadata_python[colnames(seu), ]
+seu <- AddMetaData(seu, metadata = metadata_python[c("Age", "celltypist_cell_label_fine", "Final_Annotation")])
+
+# Add UMAP
+seu[['UMAP']] <- CreateDimReducObject(embeddings = as.matrix(metadata_python[, c("UMAP_1", "UMAP_2")]), key = "UMAP_", global = T, assay = "RNA")
+
+DimPlot(seu, group.by = 'Final_Annotation', cols = my_colors, reduction = 'UMAP')
+```
+
+
+
+## sc
+
+```{r}
+sc <- subset(seu, method == 'sc')
+```
+
+```{r}
+milo_sc <- Milo(as.SingleCellExperiment(sc))
+milo_sc <- buildGraph(milo_sc, k = 100, d = 10, reduced.dim = "SCVI")
+milo_sc <- makeNhoods(milo_sc, prop = 0.05, k = 100, d=10, refined = TRUE, reduced_dims = "SCVI", refinement_scheme="graph")
+plotNhoodSizeHist(milo_sc)
+```
+
+```{r}
+milo_sc <- countCells(milo_sc, meta.data = as.data.frame(colData(milo_sc)), sample="SampleID")
+head(nhoodCounts(milo_sc))
+
+qsave(milo_sc, paste0(PREPRDATADIR, 'milo_sc_ATLAS.qs'))
+```
+
+```{r}
+milo_sc <- qread(paste0(PREPRDATADIR, 'milo_sc_ATLAS.qs'))
+```
+
+## Design
+
+```{r}
+design <- data.frame(colData(milo_sc))[,c("SampleID", "less18M", "Study")]
+
+## Convert batch info from integer to factor
+design$less18M <- factor(design$less18M, levels = c('TRUE', 'FALSE')) 
+design$Study <- factor(design$Study)
+design <- distinct(design)
+rownames(design) <- design$SampleID
+
+design
+```
+
+```{r}
+da_results_sc <- testNhoods(milo_sc, design = ~ Study + less18M, design.df = design, fdr.weighting = 'graph-overlap')
+head(da_results_sc)
+da_results_sc %>%
+  arrange(SpatialFDR) %>%
+  head() 
+```
+
+```{r}
+ggplot(da_results_sc, aes(PValue)) + geom_histogram(bins=50)
+```
+
+```{r}
+ggplot(da_results_sc, aes(logFC, -log10(SpatialFDR))) + 
+  geom_point() +
+  geom_hline(yintercept = 1) ## Mark significance threshold (10% FDR)
+```
+
+## Visulaization
+
+```{r}
+milo_sc <- buildNhoodGraph(milo_sc)
+
+## Plot single-cell UMAP
+umap_pl <- plotReducedDim(milo_sc, dimred = "UMAP", colour_by="less18M", text_by = "Final_Annotation", 
+                          text_size = 3, point_size=0.5) +
+  guides(fill="none")
+
+## Plot neighbourhood graph
+nh_graph_pl <- plotNhoodGraphDA(milo_sc, da_results_sc, layout="UMAP",alpha=0.1) 
+
+umap_pl + nh_graph_pl +
+  plot_layout(guides="collect")
+```
+
+```{r}
+da_results_sc <- annotateNhoods(milo_sc, da_results_sc, coldata_col = "Final_Annotation")
+da_results_sc %>%
+  arrange(SpatialFDR) %>%
+  head(15) 
+```
+
+```{r}
+ggplot(da_results_sc, aes(Final_Annotation_fraction)) + geom_histogram(bins=50)
+```
+
+```{r}
+da_results_sc$Final_Annotation <- ifelse(da_results_sc$Final_Annotation_fraction < 0.9, "Mixed", da_results_sc$Final_Annotation)
+```
+
+```{r}
+plotDAbeeswarm(da_results_sc, group.by = "Final_Annotation")
+```
+
+
+## sn
+
+```{r}
+sn <- subset(seu, method == 'sn')
+```
+
+```{r}
+milo_sn <- Milo(as.SingleCellExperiment(sn))
+milo_sn <- buildGraph(milo_sn, k = 100, d = 10, reduced.dim = "SCVI")
+milo_sn <- makeNhoods(milo_sn, prop = 0.05, k = 100, d=10, refined = TRUE, reduced_dims = "SCVI", refinement_scheme="graph")
+plotNhoodSizeHist(milo_sn)
+```
+
+```{r}
+milo_sn <- countCells(milo_sn, meta.data = as.data.frame(colData(milo_sn)), sample="SampleID")
+head(nhoodCounts(milo_sn))
+
+qsave(milo_sn, paste0(PREPRDATADIR, 'milo_sn_ATLAS.qs'))
+```
+
+```{r}
+milo_sn <- qread(paste0(PREPRDATADIR, 'milo_sn_ATLAS.qs'))
+```
+
+## Design
+
+```{r}
+design <- data.frame(colData(milo_sn))[,c("SampleID", "less18M", "Study")]
+
+## Convert batch info from integer to factor
+design$less18M <- factor(design$less18M, levels = c('TRUE', 'FALSE')) 
+design$Study <- factor(design$Study)
+design <- distinct(design)
+rownames(design) <- design$SampleID
+
+design
+```
+
+```{r}
+da_results_sn <- testNhoods(milo_sn, design = ~ Study + less18M, design.df = design, fdr.weighting = 'graph-overlap')
+head(da_results_sn)
+da_results_sn %>%
+  arrange(SpatialFDR) %>%
+  head() 
+```
+
+```{r}
+ggplot(da_results_sn, aes(PValue)) + geom_histogram(bins=50)
+```
+
+```{r}
+ggplot(da_results_sn, aes(logFC, -log10(SpatialFDR))) + 
+  geom_point() +
+  geom_hline(yintercept = 1) ## Mark significance threshold (10% FDR)
+```
+
+## Visulaization
+
+```{r}
+milo_sn <- buildNhoodGraph(milo_sn)
+
+## Plot single-cell UMAP
+umap_pl <- plotReducedDim(milo_sn, dimred = "UMAP", colour_by="less18M", text_by = "Final_Annotation", 
+                          text_size = 3, point_size=0.5) +
+  guides(fill="none")
+
+## Plot neighbourhood graph
+nh_graph_pl <- plotNhoodGraphDA(milo_sn, da_results_sn, layout="UMAP",alpha=0.1) 
+
+umap_pl + nh_graph_pl +
+  plot_layout(guides="collect")
+```
+
+```{r}
+da_results_sn <- annotateNhoods(milo_sn, da_results_sn, coldata_col = "Final_Annotation")
+da_results_sn %>%
+  arrange(SpatialFDR) %>%
+  head(15) 
+```
+
+```{r}
+ggplot(da_results_sn, aes(Final_Annotation_fraction)) + geom_histogram(bins=50)
+```
+
+```{r}
+da_results_sn$Final_Annotation <- ifelse(da_results_sn$Final_Annotation_fraction < 0.9, "Mixed", da_results_sn$Final_Annotation)
+```
+
+```{r}
+plotDAbeeswarm(da_results_sn, group.by = "Final_Annotation")
+```
+
+# Barplots
+
+## sc
+
+```{r}
+dittoBarPlot(sc, 'Final_Annotation', group.by = 'SampleID', split.by = 'Age')
+```
+
+# Analysis by sample
+
+```{r echo=FALSE, fig.width=12}
+plot_data2 <- as.data.frame(table(sc@meta.data$SampleID, sc$Annotation))
+colnames(plot_data2) <- c("SampleID", "Cell_type", "Count")
+plot_data2 <- merge(plot_data2, sample_metadata, by.x='SampleID', by.y='Sample_dataset')
+plot_data2$less18M <- ifelse(plot_data2$less18M, '<18M', '>18M')
+
+# Calculate the percentages
+plot_data2 <- plot_data2 %>%
+  group_by(SampleID) %>%
+  mutate(Percent = Count / sum(Count))
+
+plot_data2$Cell_type <- factor(plot_data2$Cell_type, levels = c("T_cells", "Myeloid_cells", "B_cells", "Schwann_cells", "Stromal_cells", "Endothelial_cells", "Neuroendocrine"))
+
+tumor_percent <- plot_data2 %>%
+  filter(Cell_type == "Neuroendocrine") %>%
+  arrange(Percent)
+
+
+plot_data2$SampleID <- factor(plot_data2$SampleID, levels = tumor_percent$SampleID)
+
+ggplot(plot_data2, aes(x = SampleID, y = Percent, fill = Cell_type)) +
+  geom_bar(stat = "identity", position = "fill") +
+  scale_fill_manual(values = my_colors) +
+  labs(y = "Percent of cells", x = "SampleID") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  facet_grid2(~less18M, scales = "free_x", space = "free_x", switch = "x",
+              strip = strip_themed(
+                background_x = elem_list_rect(
+                  fill = c("#6495EDFF", "#32CD32FF"),
+                  color = c("#6495EDFF", "#32CD32FF")),
+                text_x = elem_list_text(size=14))) +
+  ggtitle('Age')
+```

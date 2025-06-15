@@ -1,0 +1,499 @@
+---
+title: "Neutrophils_score_ATLAS"
+author: "Kate Petrenko"
+date: "2025-05-12"
+output: html_document
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(data.table)
+library(Seurat)
+library(scDblFinder)
+library(DoubletFinder)
+library(dplyr)
+library(remotes)
+# remotes::install_github("carmonalab/STACAS")
+library(STACAS)
+library(SingleR)
+# install.packages("scGate")
+library(scGate)
+library(ggplot2)
+library(BiocParallel)
+library(harmony)
+library(RColorBrewer)
+library(stringr)
+library(cowplot)
+library(scuttle)
+# install.packages("devtools")
+# BiocManager::install("Homo.sapiens")
+# BiocManager::install("jpmam1/scalop") #forked copy of a really good guy 
+# devtools::install_github("jlaffy/infercna")
+library(infercna)
+library(infercnv)
+library(parallel)
+library(future)
+library(clustree)
+library(dittoSeq)
+# install.packages("ggh4x")
+library(ggh4x)
+#BiocManager::install('EnhancedVolcano')
+library(EnhancedVolcano)
+library(clusterProfiler)
+library("org.Hs.eg.db")
+library(ReactomePA)
+library(msigdbr)
+# install.packages('qs')
+library(qs)
+library(DESeq2)
+library(magrittr)
+library(tibble)
+library(tidyr)
+library(pheatmap)
+# BiocManager::install('apeglm')
+# install.packages('ashr')
+
+library(reticulate)
+# install.packages('anndata')
+library(anndata)
+# devtools::install_github("cellgeni/sceasy")
+# BiocManager::install(c("LoomExperiment"))
+library(sceasy)
+library(SeuratData)
+library(CellMentor)
+library(cluster)
+library(aricode)
+```
+
+```{r global variables, include=FALSE}
+set.seed(100)
+DATADIR = '~/neuroblastoma/data/'
+WORKDIR = '~/neuroblastoma/'
+PREPRDATADIR = '~/neuroblastoma/preprocessing_data/'
+
+my_colors <- c("#6495EDFF", "#FF69B4FF", "#BA55D3FF", "#A4BEF3", "#F08080FF", "#32CD32FF",  
+    "#9ACD32FF", "#4682B4FF", "#DDA0DDFF", "#FFA07AFF", "#8FBC8BFF",
+    "#40E0D0FF", "#F0E68CFF", "#5F9EA0FF", "#D2B48CFF",  
+    "#FFDAB9FF", "#87CEEBFF", "#B4A0E5", "#5BC0BE", "#773344")
+```
+
+# Data
+
+```{r}
+atlas <- qread(paste0(PREPRDATADIR, 'ATLAS_object.qs'))
+```
+
+```{r eval=FALSE, include=FALSE}
+sample_metadata <- read.csv(paste0(DATADIR, 'samples_metadata_v5.csv'))
+sample_metadata[sample_metadata==""] <- NA
+
+rownames(sample_metadata) <- sample_metadata$Sample_dataset
+
+
+
+clean_sample_id <- function(id) {
+  # First remove _rep1 and _rep2
+  id <- gsub("_rep[12]$", "", id)
+  
+  # Handle the special bonine cases
+  id <- gsub("_sn$", "", id)      # Remove _sn suffix
+  id <- gsub("_[12]$", "", id)    # Remove _1 or _2 suffix
+  
+  return(id)
+}
+
+atlas$less18M <- sample_metadata[clean_sample_id(atlas$SampleID),]$less18M
+atlas$Sex <- sample_metadata[clean_sample_id(atlas$SampleID),]$Sex
+atlas$MYCN_status <- sample_metadata[clean_sample_id(atlas$SampleID),]$MYCN
+atlas$method <- sample_metadata[clean_sample_id(atlas$SampleID),]$Method
+atlas$Survival <- sample_metadata[clean_sample_id(atlas$SampleID),]$Survival.Death
+```
+
+```{r}
+metadata <- sample_metadata[unique(clean_sample_id(atlas$SampleID)),] %>% 
+  dplyr::filter()
+
+table(metadata$less18M, metadata$Survival.Death)
+```
+
+```{r}
+metadata_python <- read.csv("~/neuroblastoma/query_metadata_with_umap.csv", row.names = 1)
+
+# Match to Seurat cells
+metadata_python <- metadata_python[colnames(atlas), ]
+atlas <- AddMetaData(atlas, metadata = metadata_python[c("Age", "celltypist_cell_label_fine", "Final_Annotation")])
+
+# Add UMAP
+atlas[['UMAP']] <- CreateDimReducObject(embeddings = as.matrix(metadata_python[, c("UMAP_1", "UMAP_2")]), key = "UMAP_", global = T, assay = "RNA")
+
+DimPlot(atlas, group.by = 'Final_Annotation', cols = my_colors, reduction = 'UMAP')
+```
+
+# DEG
+
+```{r}
+neutrophils <- subset(atlas, Final_Annotation == 'Neutrophils')
+Idents(neutrophils) <- 'Age'
+```
+
+```{r}
+# Run DE analysis between age groups within neutrophils
+neutrophil_markers <- FindMarkers(
+  object = neutrophils,
+  ident.1 = "< 18 months",
+  ident.2 = "> 18 months",
+  logfc.threshold = 0.15,        # minimum log2FC
+  min.pct = 0.1                 # minimum percent of cells expressing gene
+)
+
+# View top markers
+neutrophil_markers %>% 
+  dplyr::filter(p_val_adj < 0.05) %>% 
+  arrange(desc(avg_log2FC)) %>% 
+  mutate(gene = rownames(.)) 
+```
+
+```{r fig.height=8, fig.width=6}
+neutrophil_markers$gene <- rownames(neutrophil_markers)
+
+# Plot
+EnhancedVolcano(neutrophil_markers,
+    lab = neutrophil_markers$gene,
+    x = 'avg_log2FC',
+    y = 'p_val_adj',
+    title = 'Neutrophils: Young vs Adult',
+    subtitle = 'Differential expression analysis',
+    pCutoff = 0.05,
+    FCcutoff = 0.25,
+    pointSize = 2.5,
+    labSize = 3.5,
+    colAlpha = 0.7,
+    legendPosition = 'top',
+    legendLabSize = 12,
+    legendIconSize = 4.0)
+```
+
+```{r}
+# Add signed score column to your DE table
+neutrophil_markers <- neutrophil_markers %>%
+  mutate(
+    signed_score = sign(avg_log2FC) * -log10(p_val_adj + 1e-300)  # small offset to avoid log10(0)
+  )
+
+# Create named vector of scores
+gene_list <- neutrophil_markers$signed_score
+names(gene_list) <- rownames(neutrophil_markers)
+
+# Remove NA and sort
+gene_list <- sort(na.omit(gene_list), decreasing = TRUE)
+
+library(org.Hs.eg.db)  
+
+gene_df <- bitr(names(gene_list), fromType = "SYMBOL",
+                toType = "ENTREZID", OrgDb = org.Hs.eg.db)
+
+# Match signed scores to ENTREZ IDs
+gene_list_entrez <- gene_list[gene_df$SYMBOL]
+names(gene_list_entrez) <- gene_df$ENTREZID
+```
+
+```{r}
+gsea_reactome <- gsePathway(
+  geneList = gene_list_entrez,
+  organism = "human",  
+  pvalueCutoff = 0.05,
+  pAdjustMethod = "BH",
+  verbose = TRUE,
+  minGSSize = 10,
+  maxGSSize = 500
+)
+```
+```{r}
+library(enrichplot)
+dotplot(gsea_reactome, showCategory = 20)
+gseaplot2(gsea_reactome, geneSetID = gsea_reactome@result$ID[1:5])
+```
+
+```{r}
+gsea_reactome %>% as.data.frame()
+```
+
+# Score
+
+```{r}
+neutrophil_genes <- c(
+  "S100A8", "S100A9", "IL1B", "CXCL8", "TNF", "IL6", "NAMPT",
+  "NFKBIA", "NFKBIZ", "TNFAIP3", "FCGR3B", "SELL", "CXCR1",
+  "CXCR2", "CEACAM8", "ELANE", "MPO", "LTF", "IFITM1", "ISG15"
+)
+
+neutrophils <- AddModuleScore(
+  object = neutrophils,
+  features = list(neutrophil_genes),
+  name = "Neutrophil_Score"
+)
+
+neutrophils@meta.data$SampleID <- as.factor(neutrophils@meta.data$SampleID)
+
+neutrophil_scores_by_patient <- neutrophils@meta.data %>%
+  group_by(SampleID, Age) %>%
+  summarise(mean_score = mean(Neutrophil_Score1), .groups = 'drop')
+```
+
+```{r}
+ggplot(neutrophil_scores_by_patient, aes(x = Age, y = mean_score)) +
+  geom_boxplot(outlier.shape = NA, fill = "lightgray") +
+  geom_jitter(width = 0.2, size = 2, aes(color = Age)) +
+  theme_minimal() +
+  labs(
+    title = "Average Neutrophil Score per Patient by Age Group",
+    y = "Mean Neutrophil Module Score",
+    x = "Age Group"
+  )
+```
+
+```{r}
+young_up_genes <- neutrophil_markers %>%
+  dplyr::filter(p_val_adj < 0.05, avg_log2FC > 0.25) %>% 
+  dplyr::filter(pct.1 > 0.5) %>% 
+  arrange(desc(avg_log2FC))
+
+neutrophils <- AddModuleScore(
+  neutrophils,
+  # features = list(young_up_genes$gene),
+  features = neutrophil_genes,
+  name = "Young_Neutro_Score"
+)
+
+neutro_patient_score <- neutrophils@meta.data %>%
+  group_by(SampleID, Age) %>%
+  summarise(mean_score = mean(Young_Neutro_Score1), .groups = "drop")
+
+ggplot(neutro_patient_score, aes(x = Age, y = mean_score)) +
+  geom_boxplot(outlier.shape = NA, fill = "lightblue") +
+  geom_jitter(width = 0.15, size = 2, aes(color = Age)) +
+  theme_minimal() +
+  labs(
+    title = "Young-Neutrophil Module Score per Patient",
+    y = "Module Score",
+    x = "Age Group"
+  )
+
+wilcox.test(mean_score ~ Age, data = neutro_patient_score)
+```
+
+```{r}
+myeloid <- subset(atlas, Annotation == 'Myeloid_cells')
+```
+
+```{r}
+young_up_genes <- neutrophil_markers %>%
+  dplyr::filter(p_val_adj < 0.05, avg_log2FC > 0.25) %>% 
+  dplyr::filter(pct.1 > 0.5) %>% 
+  arrange(desc(avg_log2FC))
+
+myeloid <- AddModuleScore(
+  myeloid,
+  # features = list(young_up_genes$gene),
+  features = neutrophil_genes,
+  name = "Young_Neutro_Score"
+)
+
+neutro_patient_score <- myeloid@meta.data %>%
+  group_by(SampleID, Age) %>%
+  summarise(mean_score = mean(Young_Neutro_Score1), .groups = "drop")
+
+ggplot(neutro_patient_score, aes(x = Age, y = mean_score)) +
+  geom_boxplot(outlier.shape = NA, fill = "lightblue") +
+  geom_jitter(width = 0.15, size = 2, aes(color = Age)) +
+  theme_minimal() +
+  labs(
+    title = "Young-Neutrophil Module Score per Patient",
+    y = "Module Score",
+    x = "Age Group"
+  )
+
+wilcox.test(mean_score ~ Age, data = neutro_patient_score)
+```
+
+# Pseudobulk - AliveVSDeath
+
+```{r}
+# seu <- subset(atlas, Annotation == 'Myeloid_cells' & Age == '< 18 months' & Survival %in% c('Death', 'Survival') & Study != 'patel')
+seu <- subset(atlas, Annotation == 'Myeloid_cells' & Age == '< 18 months' & MYCN_status %in% c('amplified', 'not amplified'))
+# seu <- subset(atlas, Age == '< 18 months' & Survival %in% c('Death', 'Survival') & Study != 'patel')
+# seu <- subset(atlas, Age == '< 18 months' & Survival %in% c('Death', 'Survival'))
+
+table(seu$SampleID, seu$MYCN_status, useNA = 'ifany')
+```
+
+```{r}
+# Load required libraries
+library(Seurat)
+library(DESeq2)
+library(dplyr)
+library(tibble)
+
+# Step 1: Create pseudobulk using Seurat's AggregateExpression
+# This function automatically sums counts for each gene within each sample
+pseudobulk_data <- AggregateExpression(
+  seu, 
+  group.by = c("SampleID", "MYCN_status", "Study"),
+  assays = "RNA",
+  slot = "counts",
+  return.seurat = TRUE
+)
+
+Idents(pseudobulk_data) <- "MYCN_status"
+```
+
+```{r fig.height=4, fig.width=12}
+# First normalize the data if not already done
+bulk <- NormalizeData(pseudobulk_data)
+
+# Find variable features
+bulk <- FindVariableFeatures(bulk, selection.method = "vst")
+
+# Scale the data
+bulk <- ScaleData(bulk)
+
+# Run PCA
+bulk <- RunPCA(bulk, features = VariableFeatures(object = bulk), npcs = 5)
+
+# Visualize PCA
+# Basic PCA plot
+PCAPlot(bulk)
+
+# By dataset
+DimPlot(bulk, reduction = "pca", group.by = "Study") + 
+    ggtitle("PCA colored by Dataset")
+```
+
+```{r}
+counts <- GetAssayData(bulk, slot = "counts")
+  
+# Create base metadata
+metadata <- data.frame(
+  group = as.factor(bulk$MYCN_status),
+  Study = bulk$Study,
+  SampleID = bulk$SampleID
+)
+rownames(metadata) <- colnames(bulk)
+
+design_formula <- '~ Study + group'
+# design_formula <- '~ group'
+design <- model.matrix(as.formula(design_formula), data = metadata)
+dge <- DGEList(counts = counts,
+                 samples = metadata)
+  
+# Filter and normalize
+print("Dimensions before subsetting:")
+print(dim(dge))
+keep <- filterByExpr(dge)
+dge <- dge[keep, , keep.lib.sizes=FALSE]
+print("Dimensions after subsetting:")
+print(dim(dge))
+
+dge <- calcNormFactors(dge)
+
+# Estimate dispersion and fit model
+dge <- estimateDisp(dge, design, robust = TRUE)
+fit <- glmQLFit(dge, design, robust = TRUE)
+        
+# Test for DE
+group_coef <- which(colnames(design) == "groupnot amplified")
+contrast <- rep(0, ncol(design))
+contrast[group_coef] <- 1
+qlf <- glmQLFTest(fit, contrast = contrast)
+de_results <- topTags(qlf, n = Inf)
+
+de_results$table %>% 
+  mutate(gene = rownames(.)) %>% 
+  dplyr::filter(gene %in% c("S100A8", "S100A9"))
+
+de_results$table %>% summary()
+
+de_results$table %>%
+  dplyr::filter(FDR < 0.05)
+```
+
+# NicheNet score
+
+```{r}
+targets_young = read.csv("nichenet_targets_young.csv", header = T)
+lt = read.csv("nichenet_ligand_target_prioritization.csv", header = T)
+
+lt %>% 
+  dplyr::filter(sender == 'Neutrophils_young')
+```
+
+
+```{r}
+library(clusterProfiler)
+library(org.Hs.eg.db)
+library(ReactomePA)
+library(msigdbr)
+library(enrichplot)
+library(DOSE)
+
+# Assume your gene list is in a data frame called targets_young with column 'gene'
+gene_symbols <- targets_young$gene
+
+# Convert gene symbols to Entrez IDs
+gene_entrez <- bitr(gene_symbols, fromType = "SYMBOL",
+                    toType = "ENTREZID", OrgDb = org.Hs.eg.db)
+
+# Drop duplicates and NA
+gene_entrez_ids <- unique(na.omit(gene_entrez$ENTREZID))
+```
+
+```{r}
+ego_bp <- enrichGO(gene         = gene_entrez_ids,
+                   OrgDb        = org.Hs.eg.db,
+                   ont          = "BP",   # biological process
+                   pAdjustMethod= "BH",
+                   qvalueCutoff = 0.05,
+                   readable     = TRUE)
+
+ego_cc <- enrichGO(gene = gene_entrez_ids, OrgDb = org.Hs.eg.db, ont = "CC", pAdjustMethod = "BH", qvalueCutoff = 0.05, readable = TRUE)
+ego_mf <- enrichGO(gene = gene_entrez_ids, OrgDb = org.Hs.eg.db, ont = "MF", pAdjustMethod = "BH", qvalueCutoff = 0.05, readable = TRUE)
+```
+
+```{r}
+ekegg <- enrichKEGG(gene         = gene_entrez_ids,
+                    organism     = 'hsa',
+                    pAdjustMethod= "BH",
+                    qvalueCutoff = 0.05)
+
+# Convert to readable form (gene symbols)
+ekegg <- setReadable(ekegg, OrgDb = org.Hs.eg.db, keyType = "ENTREZID")
+```
+
+```{r}
+ereactome <- enrichPathway(gene = gene_entrez_ids,
+                           organism = "human",
+                           pvalueCutoff = 0.05,
+                           pAdjustMethod = "BH",
+                           qvalueCutoff = 0.05,
+                           readable = TRUE)
+```
+
+```{r}
+msig_h <- msigdbr(species = "Homo sapiens", category = "H")  # H = hallmark
+
+emsig <- enricher(gene_entrez_ids,
+                  TERM2GENE = msig_h[, c("gs_name", "entrez_gene")],
+                  pAdjustMethod = "BH",
+                  qvalueCutoff = 0.05)
+```
+
+```{r}
+dotplot(ego_bp, showCategory = 10) + ggtitle("GO BP Enrichment")
+dotplot(ekegg, showCategory = 10) + ggtitle("KEGG Pathways")
+dotplot(ereactome, showCategory = 10) + ggtitle("Reactome Pathways")
+dotplot(emsig, showCategory = 10) + ggtitle("MSigDB Hallmark")
+```
+
+```{r}
+ereactome@result
+```
+

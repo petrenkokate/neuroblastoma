@@ -304,6 +304,27 @@ plotExprHeatmap(sce_fs2, features = "type",
     bars = TRUE, perc = TRUE)
 ```
 
+```{r fig.height=6, fig.width=10}
+# 1. Get all type markers
+type_markers <- type_markers(sce_fs2)
+
+# 2. Reorder them as you wish (example)
+my_ordered_markers <- c("CD45", "CD44", "CD43", "PD-L1", "Sca-1", "CD127", 
+                        "CD5", "CD3", "CD62L", "CD8", "CD4", "Ia-Ie", "CD45R",
+                        "CD19", "CD21", "IgM", "CD79b", "IgD", "CD24", "Ly6c",
+                        "CD138", "TCRyd", "CD11b", "Ly6g", "CD64", "F4/80",
+                        "CD69", "NK1.1", "IFN-gr", "SiglecF", "CD115", "CD25", "PDL2",
+                        "CD48", "CD28", "CCR4", "CD93", "CD11c", "CD117")  # <- your preferred order
+
+# 3. Plot with explicit feature order and disable column clustering
+plotExprHeatmap(sce_fs2,
+    features = my_ordered_markers,
+    by = "cluster_id", 
+    k = "meta30", 
+    col_clust = FALSE,   # disables automatic column reordering
+    bars = TRUE, 
+    perc = TRUE)
+```
 
 ```{r echo=FALSE}
 sce_fs2 <- runDR(sce_fs2, "UMAP", cells = 1e3, features = "type")
@@ -318,36 +339,36 @@ plotDR(sce_fs2, "UMAP", color_by = "meta30", facet_by = "tissue")
 ```{r include=FALSE}
 merging_table <- data.frame(
   original_cluster = seq(1, 30),
-  new_cluster = c('Activated B cells', # 1
-                  'Activated B cells',
-                  'T helper cells (CD4)',
-                  'T helper cells (CD4)',
-                  'Plasmablast', # 5
-                  'Unknown',
-                  'Myeloid cells',
-                  'Plasmablast',
-                  'T helper cells (CD4)',
-                  'Myeloid cells', # 10
-                  'Unknown',
-                  'Non-immune cells',
-                  'HSC',
+  new_cluster = c('Cytotoxic T-cells (CD8)', # 1
                   'Plasmacytoid DCs',
+                  'Unknown',
+                  'Unknown',
+                  'Myeloid cells', # 5 Plasmablast
+                  'Unknown',
+                  'Unknown',
+                  'Myeloid cells',
+                  'T helper cells (CD4)',
+                  'T helper cells (CD4)', # 10
+                  'Plasmacytoid DCs',
+                  'Unknown',
+                  'Unknown', # HSC
+                  'Myeloid cells',
                   'Unknown', # 15
-                  'Cytotoxic T-cells (CD8)',
-                  'Myeloid cells',
                   'Unknown',
-                  'Unknown',
-                  'gd T cells', # 20
-                  'NK',
-                  'Cytotoxic T-cells (CD8)',
-                  'Unknown',
-                  'Unknown',
-                  'Myeloid cells', # 25
-                  'Unknown',
-                  'Myeloid cells',
                   'LS-K',
+                  'Unknown',
                   'Myeloid cells',
-                  'Plasmacytoid DCs' # 30
+                  'T helper cells (CD4)', # 20 
+                  'Activated B cells', # NK
+                  'Cytotoxic T-cells (CD8)',
+                  'Myeloid cells',
+                  'Activated B cells',
+                  'Unknown', # 25
+                  'Unknown',
+                  'NK',
+                  'gd T cells', #
+                  'Activated B cells',
+                  'Activated B cells' # 30 
                   )
 )
 
@@ -380,6 +401,10 @@ plotExprHeatmap(sce_fs2, features = "type",
 ## Analysis
 
 ### Differential Abundances Analysis
+
+```{r}
+qsave(sce_fs2, paste0(PREPRDATADIR, 'cytof_naive.qs'))
+```
 
 ```{r echo=FALSE}
 plotAbundances(sce_fs2, k = "merging1", by = "sample_id", group_by = 'tissue')

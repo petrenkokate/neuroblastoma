@@ -1,0 +1,427 @@
+---
+title: "Neutrophils_ATLAS"
+author: "Kate Petrenko"
+date: "2025-01-30"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+library(data.table)
+library(Seurat)
+library(scDblFinder)
+library(DoubletFinder)
+library(dplyr)
+library(remotes)
+# remotes::install_github("carmonalab/STACAS")
+library(STACAS)
+library(SingleR)
+# install.packages("scGate")
+library(scGate)
+library(ggplot2)
+library(BiocParallel)
+library(harmony)
+library(RColorBrewer)
+library(stringr)
+library(cowplot)
+library(scuttle)
+# install.packages("devtools")
+# BiocManager::install("Homo.sapiens")
+# BiocManager::install("jpmam1/scalop") #forked copy of a really good guy 
+# devtools::install_github("jlaffy/infercna")
+# library(infercna)
+# library(infercnv)
+library(parallel)
+library(future)
+library(clustree)
+library(dittoSeq)
+# install.packages("ggh4x")
+library(ggh4x)
+#BiocManager::install('EnhancedVolcano')
+library(EnhancedVolcano)
+library(clusterProfiler)
+library("org.Hs.eg.db")
+library(ReactomePA)
+library(msigdbr)
+# install.packages('qs')
+library(qs)
+library(DESeq2)
+library(magrittr)
+library(tibble)
+library(tidyr)
+library(pheatmap)
+# BiocManager::install('apeglm')
+# install.packages('ashr')
+library(edgeR)
+library(reticulate)
+# install.packages('anndata')
+# library(anndata)
+# devtools::install_github("cellgeni/sceasy")
+# BiocManager::install(c("LoomExperiment"))
+library(sceasy)
+library(SeuratData)
+# BiocManager::install("MAST")
+# library(MAST)
+# install.packages("metafor")
+library(metafor)
+# install.packages('UpSetR')
+library(UpSetR)
+library(ggpubr)
+```
+
+```{r global variables, include=FALSE}
+set.seed(100)
+DATADIR = '~/neuroblastoma/data/'
+WORKDIR = '~/neuroblastoma/'
+PREPRDATADIR = '~/neuroblastoma/preprocessing_data/'
+
+my_colors <- c("#9ACD32FF", "#4682B4FF",  "#DDA0DDFF", "#FFA07AFF", "#8FBC8BFF",
+               "#40E0D0FF",  "#F0E68CFF", "#5F9EA0FF", "#D2B48CFF",  
+               "#6495EDFF", "#FF69B4FF", "#BA55D3FF",  "#F08080FF", "#32CD32FF",  
+               "#FFDAB9FF",  "#87CEEBFF")
+```
+
+```{r}
+atlas <- qread(paste0(PREPRDATADIR, 'ATLAS_object.qs'))
+
+sample_metadata <- read.csv(paste0(DATADIR, 'samples_metadata_v5.csv'))
+sample_metadata[sample_metadata==""] <- NA
+
+rownames(sample_metadata) <- sample_metadata$Sample_dataset
+
+
+
+clean_sample_id <- function(id) {
+  # First remove _rep1 and _rep2
+  id <- gsub("_rep[12]$", "", id)
+  
+  # Handle the special bonine cases
+  id <- gsub("_sn$", "", id)      # Remove _sn suffix
+  id <- gsub("_[12]$", "", id)    # Remove _1 or _2 suffix
+  
+  return(id)
+}
+
+atlas$less18M <- sample_metadata[clean_sample_id(atlas$SampleID),]$less18M
+atlas$Sex <- sample_metadata[clean_sample_id(atlas$SampleID),]$Sex
+atlas$MYCN_status <- sample_metadata[clean_sample_id(atlas$SampleID),]$MYCN
+atlas$method <- sample_metadata[clean_sample_id(atlas$SampleID),]$Method
+
+```
+
+# Myeloid cells
+
+## Patel
+
+```{r}
+myeloid_patel <- subset(atlas, Annotation == 'Myeloid_cells' & Study == 'patel')
+
+myeloid_patel <- myeloid_patel %>% 
+  NormalizeData() %>% 
+  FindVariableFeatures() %>% 
+  ScaleData() %>% 
+  RunPCA(verbose=FALSE) %>% 
+  RunHarmony(., 'SampleID',
+       lambda = 1, verbose = FALSE) %>% 
+  RunUMAP(reduction = "harmony", dims = 1:30, verbose=F, return.model=TRUE)
+```
+
+```{r fig.height=4, fig.width=12}
+plot_grid(DimPlot(myeloid_patel, group.by='celltype_humatlas_main') + 
+ scale_color_manual(values = c(setNames(rep("grey", length(unique(myeloid_patel$celltype_humatlas_main))), 
+                              unique(myeloid_patel$celltype_humatlas_main)) %>%
+                    replace("Neutrophils", "red"))) + NoLegend(),  DimPlot(myeloid_patel, group.by='is.pure_Neutrophils', cols = my_colors))
+```
+
+```{r fig.height=9, fig.width=12}
+FeaturePlot(myeloid_patel, c('S100A9', 'S100A8',
+                             'CSF3R', 'FPR1', 'FCGR3B', 'NAMPT', 'MNDA', 
+                             'CXCR2', 'IL1R2', 'CD177', 'MMP9',
+                             'ITGAM', 'FCN1', 'CAMP', 'CYBB', 'CST3'))
+```
+
+### Clustering
+
+```{r fig.height=4, fig.width=14}
+myeloid_patel <- myeloid_patel %>%
+    FindNeighbors(dims = 1:20, reduction = 'harmony') %>%
+    FindClusters(resolution = seq(0.1, 0.7, 0.1))
+Idents(myeloid_patel) <- 'RNA_snn_res.0.1'
+markers_myeloid_patel <- FindAllMarkers(myeloid_patel, only.pos = T, min.pct = 0.25)
+
+top10 <- markers_myeloid_patel %>%
+  group_by(cluster) %>% 
+  dplyr::filter(p_val < 0.05) %>% 
+  top_n(n = 7, wt = avg_log2FC)
+
+DotPlot(myeloid_patel, top10$gene, cols = c('lightgrey', "#BA55D3FF")) +
+  RotatedAxis()
+```
+
+```{r}
+DimPlot(myeloid_patel, group.by = 'RNA_snn_res.0.1')
+```
+
+## Verhoeven
+
+```{r}
+myeloid_verh <- subset(atlas, Annotation == 'Myeloid_cells' & Study == 'verhoeven')
+
+myeloid_verh <- myeloid_verh %>% 
+  NormalizeData() %>% 
+  FindVariableFeatures() %>% 
+  ScaleData() %>% 
+  RunPCA(verbose=FALSE) %>% 
+  RunHarmony(., 'SampleID',
+       lambda = 1, verbose = FALSE) %>% 
+  RunUMAP(reduction = "harmony", dims = 1:30, verbose=F, return.model=TRUE)
+```
+
+```{r fig.height=4, fig.width=12}
+plot_grid(DimPlot(myeloid_verh, group.by='celltype_humatlas_main') + 
+ scale_color_manual(values = c(setNames(rep("grey", length(unique(myeloid_verh$celltype_humatlas_main))), 
+                              unique(myeloid_verh$celltype_humatlas_main)) %>%
+                    replace("Neutrophils", "red"))) + NoLegend(),  DimPlot(myeloid_verh, group.by='is.pure_Neutrophils', cols = my_colors))
+```
+
+```{r fig.height=9, fig.width=12}
+FeaturePlot(myeloid_verh, c('S100A9', 'S100A8',
+                             'CSF3R', 'FPR1', 'FCGR3B', 'NAMPT', 'MNDA', 
+                             'CXCR2', 'IL1R2', 'CD177', 'MMP9',
+                             'ITGAM', 'FCN1', 'CAMP', 'CYBB', 'CST3'))
+```
+
+### Clustering
+
+```{r fig.height=4, fig.width=14}
+myeloid_verh <- myeloid_verh %>%
+    FindNeighbors(dims = 1:20, reduction = 'harmony') %>%
+    FindClusters(resolution = seq(0.1, 0.7, 0.1))
+Idents(myeloid_verh) <- 'RNA_snn_res.0.2'
+markers_myeloid_verh <- FindAllMarkers(myeloid_verh, only.pos = T, min.pct = 0.25)
+
+top10 <- markers_myeloid_verh %>%
+  group_by(cluster) %>% 
+  dplyr::filter(p_val < 0.05) %>% 
+  top_n(n = 7, wt = avg_log2FC)
+
+DotPlot(myeloid_verh, top10$gene, cols = c('lightgrey', "#BA55D3FF")) +
+  RotatedAxis()
+```
+
+```{r}
+DimPlot(myeloid_verh, group.by = 'RNA_snn_res.0.2')
+```
+
+# Neutrophils analysis
+
+```{r}
+atlas$Annotation_neutrophils <- atlas$Annotation
+atlas$Annotation_neutrophils[atlas$is.pure_Neutrophils == "Pure" | atlas$celltype_humatlas_main == "Neutrophils"] <- "Neutrophils"
+```
+
+```{r}
+DimPlot(atlas, group.by = 'Annotation_neutrophils', cols = my_colors)
+```
+
+```{r}
+neutrophils <- subset(atlas, Annotation_neutrophils == 'Neutrophils')
+
+neutrophils <- neutrophils %>% 
+  NormalizeData() %>% 
+  FindVariableFeatures() %>% 
+  ScaleData() %>% 
+  RunPCA(verbose=FALSE) %>% 
+  RunHarmony(., 'Study',
+       lambda = 1, verbose = FALSE) %>% 
+  RunUMAP(reduction = "harmony", dims = 1:5, verbose=F, return.model=TRUE) %>% 
+  FindNeighbors(dims = 1:5, reduction = 'harmony') %>%
+  FindClusters(resolution = seq(0.1, 0.7, 0.1))
+
+DimPlot(neutrophils, cols = my_colors, group.by = 'Study')
+DimPlot(neutrophils, group.by = 'SampleID')
+DimPlot(neutrophils, group.by = 'less18M')
+```
+
+```{r fig.height=12, fig.width=10}
+neutrophil_polarization_genes <- c(
+  # NOX complex (ROS production)
+  "NCF1",    # p47phox
+  "NCF2",    # p67phox
+  "NCF4",    # p40phox
+  "CYBB",    # gp91phox, NOX2
+  "CYBA",    # p22phox
+  "RAC1",    # Regulatory subunit
+  "RAC2",    # Regulatory subunit
+  
+  # NO production and regulation
+  "NOS2",    # iNOS
+  "NOS3",    # eNOS
+  "ARG1",    # Arginase 1 (competes with NOS for L-arginine)
+  
+  # Activation markers
+  "CD11B",   # ITGAM, activation marker
+  "MPO",     # Myeloperoxidase
+  "ELANE",   # Neutrophil elastase
+  
+  # Oxidative stress response
+  "SOD2",    # Superoxide dismutase 2
+  "CAT",     # Catalase
+  "GPX1",    # Glutathione peroxidase 1
+  
+  # Inflammatory mediators
+  "TNF",     # TNF-alpha
+  "IL1B",    # IL-1beta
+  "CXCR2"    # IL-8 receptor
+)
+
+VlnPlot(neutrophils, neutrophil_polarization_genes, group.by = 'less18M')
+FeaturePlot(neutrophils, neutrophil_polarization_genes)
+```
+
+```{r fig.height=10, fig.width=15}
+neutrophils$less18M <- factor(neutrophils$less18M, levels = c("TRUE", "FALSE"))
+# Extract the data and calculate means for sorting
+plot_data_n <- FetchData(neutrophils, 
+                      vars = c("SampleID", "less18M", ros_no_response_genes))
+
+# Reshape to long format
+plot_data_long <- plot_data_n %>%
+  pivot_longer(cols = all_of(ros_no_response_genes[ros_no_response_genes %in% colnames(plot_data)]),
+              names_to = "gene",
+              values_to = "Expression")
+
+sample_means <- plot_data_long %>%
+  group_by(SampleID) %>%
+  summarize(
+    # Choose one:
+    median_exp = median(Expression, na.rm = TRUE),  # Option 1
+    pct_expressing = sum(Expression > 0) / n(),     # Option 2
+    mean_expressing = mean(Expression[Expression > 0], na.rm = TRUE),  # Option 3
+    q3_exp = quantile(Expression, probs = 0.75, na.rm = TRUE)  # Option 4
+  ) %>%
+  arrange(desc(median_exp)) 
+
+# Order sampleID factor based on means
+plot_data_long$SampleID <- factor(plot_data_long$SampleID, 
+                                 levels = sample_means$SampleID)
+
+# Create the plot with ordered samples
+plot <- ggplot(plot_data_long, aes(x = SampleID, y = Expression, fill = less18M)) +
+  geom_boxplot() +
+  facet_wrap(~gene, scales = "free_y", ncol = 4) +
+  theme_bw() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    strip.background = element_rect(fill = "white"),
+    panel.grid.minor = element_blank()
+  ) +
+  scale_fill_manual(values = c("TRUE" = "#FF69B4FF", "FALSE" = "#6495EDFF")) +
+  labs(x = "Sample ID", y = "Expression Level", fill = "Age < 18M")
+
+print(plot)
+```
+
+```{r}
+tumor <- subset(atlas, Annotation_neutrophils == 'Neuroendocrine')
+
+tumor <- tumor %>% 
+  NormalizeData() %>% 
+  FindVariableFeatures() %>% 
+  ScaleData() %>% 
+  RunPCA(verbose=FALSE) %>% 
+  RunHarmony(., 'SampleID',
+       lambda = 1, verbose = FALSE) %>% 
+  RunUMAP(reduction = "harmony", dims = 1:30, verbose=F, return.model=TRUE) %>% 
+  FindNeighbors(dims = 1:30, reduction = 'harmony') %>%
+  FindClusters(resolution = seq(0.1, 0.7, 0.1))
+
+DimPlot(tumor, cols = my_colors, group.by = 'Study')
+DimPlot(tumor, group.by = 'SampleID')
+DimPlot(tumor, group.by = 'less18M')
+```
+
+```{r fig.height=10, fig.width=10}
+ros_no_response_genes <- c(
+  # NRF2 pathway (major ROS response)
+  "NFE2L2",  # NRF2 itself
+  "HMOX1",   # Heme oxygenase 1
+  "NQO1",    # NAD(P)H quinone dehydrogenase 1
+  "GCLC",    # Glutamate-cysteine ligase catalytic subunit
+  "GCLM",    # Glutamate-cysteine ligase modifier subunit
+  
+  # HIF pathway (responds to both ROS and NO)
+  "HIF1A",   # Hypoxia inducible factor 1 alpha
+  "VEGFA",   # Vascular endothelial growth factor A
+  "SLC2A1",  # GLUT1, glucose transporter
+  "PDK1",    # Pyruvate dehydrogenase kinase 1
+  
+  # NO response genes
+  "PTGS2",   # COX2, cyclooxygenase 2
+  "SOCS3",   # Suppressor of cytokine signaling 3
+  "BCL2",    # Anti-apoptotic protein
+  
+  # Oxidative stress response
+  "SOD1",    # Superoxide dismutase 1
+  "TXN",     # Thioredoxin
+  "TXNRD1",  # Thioredoxin reductase 1
+  "GPX4",    # Glutathione peroxidase 4
+  
+  # Cell survival/death regulators
+  "TP53",    # p53
+  "CDKN1A",  # p21
+  "JUN",     # c-Jun
+  "FOS"      # c-Fos
+)
+
+VlnPlot(tumor, ros_no_response_genes, group.by = 'less18M')
+FeaturePlot(tumor, ros_no_response_genes)
+```
+
+```{r fig.height=15, fig.width=20}
+tumor$less18M <- factor(tumor$less18M, levels = c("TRUE", "FALSE"))
+# Extract the data and calculate means for sorting
+plot_data <- FetchData(tumor, 
+                      vars = c("SampleID", "less18M", ros_no_response_genes))
+
+# Reshape to long format
+plot_data_long <- plot_data %>%
+  pivot_longer(cols = all_of(ros_no_response_genes[ros_no_response_genes %in% colnames(plot_data)]),
+              names_to = "gene",
+              values_to = "Expression")
+
+sample_means <- plot_data_long %>%
+  group_by(SampleID) %>%
+  summarize(
+    # Choose one:
+    median_exp = median(Expression, na.rm = TRUE),  # Option 1
+    pct_expressing = sum(Expression > 0) / n(),     # Option 2
+    mean_expressing = mean(Expression[Expression > 0], na.rm = TRUE),  # Option 3
+    q3_exp = quantile(Expression, probs = 0.75, na.rm = TRUE)  # Option 4
+  ) %>%
+  arrange(desc(pct_expressing)) 
+
+# Order sampleID factor based on means
+plot_data_long$SampleID <- factor(plot_data_long$SampleID, 
+                                 levels = sample_means$SampleID)
+
+# Create the plot with ordered samples
+plot <- ggplot(plot_data_long, aes(x = SampleID, y = Expression, fill = less18M)) +
+  geom_boxplot() +
+  facet_wrap(~gene, scales = "free_y", ncol = 4) +
+  theme_bw() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    strip.background = element_rect(fill = "white"),
+    panel.grid.minor = element_blank()
+  ) +
+  scale_fill_manual(values = c("TRUE" = "#FF69B4FF", "FALSE" = "#6495EDFF")) +
+  labs(x = "Sample ID", y = "Expression Level", fill = "Age < 18M")
+
+print(plot)
+```
+
+```{r}
+plot_data
+```
+

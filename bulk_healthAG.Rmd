@@ -437,6 +437,10 @@ pheatmap(mat,
          fontsize_row = 8)
 ```
 
+```{r eval=FALSE, include=FALSE}
+qsave(vsd_mat, paste0(PREPRDATADIR, 'bulk_healthAG_vsd.qs'))
+```
+
 # Distance plot
 
 ```{r}
@@ -1066,5 +1070,20 @@ plot_grid(plot_gene_expression_points("S100a8", vsd_mat, metadata, resLFC),
           plot_gene_expression_points("Grb2", vsd_mat, metadata, resLFC),
           plot_gene_expression_points("Tlr4", vsd_mat, metadata, resLFC),
           plot_gene_expression_points("Trp53bp2", vsd_mat, metadata, resLFC), ncol = 5)
+```
+
+```{r}
+genes <- c(
+  'Ifna1', 'Ifna2', 'Ifnb1', 'Ifna4', 'Ifna5', 'Ifna6', 'Ifna7', 'Ifnar1',
+           'Ifnar2', 'Stat1', 'Stat2', 'Irf7', 'Mx1', 'Oas1a', 'Ifit3', 'Rsad2',  'Gbp2',
+  'Il6', 'Ccl5', 'Tnf'
+           )
+for (gene in genes) {
+  if (!(gene %in% rownames(vsd_mat))) {
+    message(paste("Skipping", gene, "- not found in the expression matrix"))
+    next
+  }
+  print(plot_gene_expression_points(gene, vsd_mat, metadata, resLFC))
+}
 ```
 

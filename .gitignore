@@ -1,0 +1,15 @@
+# Ignore everything by default
+*
+
+# But NOT these script types
+!*.R
+!*.Rmd
+!*.sh
+!*.py
+!*.ipynb
+
+# Keep the .gitignore file itself
+!.gitignore
+
+# Optional: allow specific folders containing scripts
+!scripts/
