@@ -375,7 +375,8 @@ prioritized_tbl_oi = prioritization_tables$prioritization_tbl_ligand_receptor %>
 
 colors_sender = brewer.pal(n = prioritized_tbl_oi$sender %>% unique() %>% sort() %>% length(), name = 'Spectral') %>% magrittr::set_names(prioritized_tbl_oi$sender %>% unique() %>% sort())
 colors_receiver = c("lavender")  %>% magrittr::set_names(prioritized_tbl_oi$receiver %>% unique() %>% sort())
-
+colors_sender[1] <- '#BA55D3FF'
+colors_receiver[1] <- '#A4BEF3'
 circos_output = make_circos_lr(prioritized_tbl_oi, colors_sender, colors_receiver, separate_legend = F)
 ```
 
@@ -426,6 +427,8 @@ prioritized_tbl_oi = prioritization_tables$prioritization_tbl_ligand_receptor %>
 colors_sender = brewer.pal(n = prioritized_tbl_oi$sender %>% unique() %>% sort() %>% length(), name = 'Spectral') %>% magrittr::set_names(prioritized_tbl_oi$sender %>% unique() %>% sort())
 colors_receiver = c("lavender")  %>% magrittr::set_names(prioritized_tbl_oi$receiver %>% unique() %>% sort())
 
+colors_sender[1] <- '#F08080FF'
+colors_receiver[1] <- '#32CD32FF'
 circos_output = make_circos_lr(prioritized_tbl_oi, colors_sender, colors_receiver)
 ```
 
@@ -561,4 +564,2378 @@ cat("4. nichenet_ligand_target_prioritization.csv - All L-T relationships\n")
 ```
 
 
+```{r}
+# 1. Number of differentially expressed ligands and receptors
+n_de_ligands_young <- DE_sender %>% filter(sender == "Neutrophils_young", p_val_adj < 0.05) %>% nrow()
+n_de_ligands_adult <- DE_sender %>% filter(sender == "Neutrophils_adult", p_val_adj < 0.05) %>% nrow()
+
+n_de_receptors_young <- DE_receiver %>% filter(receiver == "Neuroendocrine_young", p_val_adj < 0.05) %>% nrow()
+n_de_receptors_adult <- DE_receiver %>% filter(receiver == "Neuroendocrine_adult", p_val_adj < 0.05) %>% nrow()
+
+# 2. Number of significantly upregulated target genes
+n_targets_young <- length(geneset_NEyoung)
+n_targets_adult <- length(geneset_NEadult)
+
+# 3. Number of ligand-receptor pairs with high prioritization scores
+lr_top_young <- prioritization_tables$prioritization_tbl_ligand_receptor %>%
+  filter(receiver == "Neuroendocrine_young", prioritization_score > 0.4) %>% nrow()
+lr_top_adult <- prioritization_tables$prioritization_tbl_ligand_receptor %>%
+  filter(receiver == "Neuroendocrine_adult", prioritization_score > 0.4) %>% nrow()
+
+# 4. Number of unique ligands prioritized per niche
+n_unique_ligands_young <- prioritization_tables$prioritization_tbl_ligand_receptor %>%
+  filter(receiver == "Neuroendocrine_young") %>%
+  pull(ligand) %>% unique() %>% length()
+
+n_unique_ligands_adult <- prioritization_tables$prioritization_tbl_ligand_receptor %>%
+  filter(receiver == "Neuroendocrine_adult") %>%
+  pull(ligand) %>% unique() %>% length()
+
+# 5. Top ligand names (for discussion)
+top_ligands_young <- prioritization_tables$prioritization_tbl_ligand_receptor %>%
+  filter(receiver == "Neuroendocrine_young") %>%
+  arrange(desc(prioritization_score)) %>%
+  slice_head(n = 5) %>%
+  pull(ligand) %>% unique()
+
+top_ligands_adult <- prioritization_tables$prioritization_tbl_ligand_receptor %>%
+  filter(receiver == "Neuroendocrine_adult") %>%
+  arrange(desc(prioritization_score)) %>%
+  slice_head(n = 5) %>%
+  pull(ligand) %>% unique()
+
+# Output for thesis
+cat("\nNicheNet Summary:\n")
+cat("- Young niche: ", n_de_ligands_young, "DE ligands, ", n_de_receptors_young, "DE receptors, ", n_targets_young, "target genes\n")
+cat("- Adult niche: ", n_de_ligands_adult, "DE ligands, ", n_de_receptors_adult, "DE receptors, ", n_targets_adult, "target genes\n")
+cat("- Ligand-Receptor pairs with score > 0.4: ", lr_top_young, " (young), ", lr_top_adult, " (adult)\n")
+cat("- Unique prioritized ligands: ", n_unique_ligands_young, " (young), ", n_unique_ligands_adult, " (adult)\n")
+cat("- Top ligands (young): ", paste(top_ligands_young, collapse = ", "), "\n")
+cat("- Top ligands (adult): ", paste(top_ligands_adult, collapse = ", "), "\n")
+```
+
+```{r}
+# ===============================================================
+# NICHENET ANALYSIS RESULTS QUANTIFICATION FOR THESIS
+# ===============================================================
+
+# Load required libraries
+library(tidyverse)
+library(knitr)
+
+# ===============================================================
+# 1. TARGET GENE ANALYSIS
+# ===============================================================
+
+# Basic target gene statistics
+cat("=== TARGET GENE ANALYSIS ===\n")
+cat("Young niche target genes:", length(geneset_NEyoung), "\n")
+cat("Adult niche target genes:", length(geneset_NEadult), "\n")
+
+# Overlap analysis
+target_overlap <- intersect(geneset_NEyoung, geneset_NEadult)
+target_young_specific <- setdiff(geneset_NEyoung, geneset_NEadult)
+target_adult_specific <- setdiff(geneset_NEadult, geneset_NEyoung)
+
+cat("Overlapping target genes:", length(target_overlap), "\n")
+cat("Young-specific target genes:", length(target_young_specific), "\n")
+cat("Adult-specific target genes:", length(target_adult_specific), "\n")
+cat("Percent overlap (young):", round(length(target_overlap)/length(geneset_NEyoung)*100, 1), "%\n")
+cat("Percent overlap (adult):", round(length(target_overlap)/length(geneset_NEadult)*100, 1), "%\n")
+
+# ===============================================================
+# 2. LIGAND-RECEPTOR PAIR ANALYSIS
+# ===============================================================
+
+cat("\n=== LIGAND-RECEPTOR PAIR ANALYSIS ===\n")
+
+# Total L-R pairs identified
+total_lr_pairs <- nrow(prioritization_tables$prioritization_tbl_ligand_receptor)
+cat("Total ligand-receptor pairs analyzed:", total_lr_pairs, "\n")
+
+# High-priority pairs by niche (top quartile)
+# First check for missing values
+cat("Missing values in prioritization scores:", sum(is.na(prioritization_tables$prioritization_tbl_ligand_receptor$prioritization_score)), "\n")
+
+# Remove missing values for threshold calculation
+valid_scores <- prioritization_tables$prioritization_tbl_ligand_receptor$prioritization_score[!is.na(prioritization_tables$prioritization_tbl_ligand_receptor$prioritization_score)]
+high_priority_threshold <- quantile(valid_scores, 0.75)
+
+cat("High priority threshold (75th percentile):", round(high_priority_threshold, 3), "\n")
+
+young_high_priority <- prioritization_tables$prioritization_tbl_ligand_receptor %>%
+  filter(niche == "young_niche", !is.na(prioritization_score), prioritization_score >= high_priority_threshold) %>%
+  nrow()
+
+adult_high_priority <- prioritization_tables$prioritization_tbl_ligand_receptor %>%
+  filter(niche == "old_niche", !is.na(prioritization_score), prioritization_score >= high_priority_threshold) %>%
+  nrow()
+
+cat("High-priority L-R pairs (young niche):", young_high_priority, "\n")
+cat("High-priority L-R pairs (adult niche):", adult_high_priority, "\n")
+
+# Top ligands per niche
+top_n_show <- 10
+young_top_ligands <- prioritization_tables$prioritization_tbl_ligand_receptor %>%
+  filter(niche == "young_niche", !is.na(prioritization_score)) %>%
+  group_by(ligand) %>%
+  summarise(max_score = max(prioritization_score, na.rm = TRUE), .groups = 'drop') %>%
+  top_n(top_n_show, max_score) %>%
+  arrange(desc(max_score))
+
+adult_top_ligands <- prioritization_tables$prioritization_tbl_ligand_receptor %>%
+  filter(niche == "old_niche", !is.na(prioritization_score)) %>%
+  group_by(ligand) %>%
+  summarise(max_score = max(prioritization_score, na.rm = TRUE), .groups = 'drop') %>%
+  top_n(top_n_show, max_score) %>%
+  arrange(desc(max_score))
+
+cat("\nTop", top_n_show, "ligands in young niche:\n")
+print(young_top_ligands)
+
+cat("\nTop", top_n_show, "ligands in adult niche:\n")
+print(adult_top_ligands)
+
+# Unique ligands per niche
+young_ligands <- prioritization_tables$prioritization_tbl_ligand_receptor %>%
+  filter(niche == "young_niche") %>%
+  pull(ligand) %>%
+  unique()
+
+adult_ligands <- prioritization_tables$prioritization_tbl_ligand_receptor %>%
+  filter(niche == "old_niche") %>%
+  pull(ligand) %>%
+  unique()
+
+ligand_overlap <- intersect(young_ligands, adult_ligands)
+young_specific_ligands <- setdiff(young_ligands, adult_ligands)
+adult_specific_ligands <- setdiff(adult_ligands, young_ligands)
+
+cat("\nUnique ligands in young niche:", length(young_ligands), "\n")
+cat("Unique ligands in adult niche:", length(adult_ligands), "\n")
+cat("Overlapping ligands:", length(ligand_overlap), "\n")
+cat("Young-specific ligands:", length(young_specific_ligands), "\n")
+cat("Adult-specific ligands:", length(adult_specific_ligands), "\n")
+
+# ===============================================================
+# 3. LIGAND ACTIVITY ANALYSIS
+# ===============================================================
+
+cat("\n=== LIGAND ACTIVITY ANALYSIS ===\n")
+
+# Ligand activity statistics
+young_activities <- prioritization_tables$prioritization_tbl_ligand_target %>%
+  filter(niche == "young_niche") %>%
+  select(ligand, activity) %>%
+  distinct()
+
+adult_activities <- prioritization_tables$prioritization_tbl_ligand_target %>%
+  filter(niche == "old_niche") %>%
+  select(ligand, activity) %>%
+  distinct()
+
+cat("Ligands with activity scores (young):", nrow(young_activities), "\n")
+cat("Ligands with activity scores (adult):", nrow(adult_activities), "\n")
+cat("Mean activity score (young):", round(mean(young_activities$activity, na.rm=T), 3), "\n")
+cat("Mean activity score (adult):", round(mean(adult_activities$activity, na.rm=T), 3), "\n")
+
+# High-activity ligands (top 25%)
+young_high_activity <- young_activities %>%
+  filter(activity >= quantile(activity, 0.75, na.rm=T)) %>%
+  nrow()
+
+adult_high_activity <- adult_activities %>%
+  filter(activity >= quantile(activity, 0.75, na.rm=T)) %>%
+  nrow()
+
+cat("High-activity ligands (young):", young_high_activity, "\n")
+cat("High-activity ligands (adult):", adult_high_activity, "\n")
+
+# ===============================================================
+# 4. SENDER-RECEIVER ANALYSIS
+# ===============================================================
+
+cat("\n=== SENDER-RECEIVER ANALYSIS ===\n")
+
+# Sender cell type analysis
+sender_summary <- prioritization_tables$prioritization_tbl_ligand_receptor %>%
+  group_by(niche, sender) %>%
+  summarise(
+    n_ligands = n_distinct(ligand),
+    n_receptors = n_distinct(receptor),
+    n_lr_pairs = n(),
+    mean_score = mean(prioritization_score, na.rm=T),
+    .groups = 'drop'
+  )
+
+print(sender_summary)
+
+# Receiver analysis
+receiver_summary <- prioritization_tables$prioritization_tbl_ligand_receptor %>%
+  group_by(niche, receiver) %>%
+  summarise(
+    n_ligands = n_distinct(ligand),
+    n_receptors = n_distinct(receptor),
+    n_lr_pairs = n(),
+    mean_score = mean(prioritization_score, na.rm=T),
+    .groups = 'drop'
+  )
+
+print(receiver_summary)
+
+# ===============================================================
+# 5. KEY S100A8/S100A9 ANALYSIS
+# ===============================================================
+
+cat("\n=== S100A8/S100A9 SPECIFIC ANALYSIS ===\n")
+
+# Check if S100A8/A9 are in the results
+s100_genes <- c("S100A8", "S100A9")
+s100_in_ligands <- s100_genes[s100_genes %in% prioritization_tables$prioritization_tbl_ligand_receptor$ligand]
+
+if(length(s100_in_ligands) > 0) {
+  s100_results <- prioritization_tables$prioritization_tbl_ligand_receptor %>%
+    filter(ligand %in% s100_in_ligands)
+  
+  cat("S100A8/A9 ligands found in results:", paste(s100_in_ligands, collapse=", "), "\n")
+  cat("Number of S100A8/A9 L-R pairs:", nrow(s100_results), "\n")
+  
+  # Show S100 results by niche
+  s100_summary <- s100_results %>%
+    group_by(niche, ligand) %>%
+    summarise(
+      n_receptors = n(),
+      max_score = max(prioritization_score),
+      mean_score = mean(prioritization_score),
+      .groups = 'drop'
+    )
+  
+  print(s100_summary)
+} else {
+  cat("S100A8/A9 not found in ligand-receptor results\n")
+}
+
+# ===============================================================
+# 6. DIFFERENTIAL EXPRESSION CONTEXT
+# ===============================================================
+
+cat("\n=== DIFFERENTIAL EXPRESSION CONTEXT ===\n")
+
+# DE sender analysis
+de_sender_sig <- DE_sender %>%
+  filter(p_val_adj < 0.05)
+
+cat("Significantly DE ligands in senders:", nrow(de_sender_sig), "\n")
+
+# By sender type
+de_by_sender <- de_sender_sig %>%
+  group_by(sender) %>%
+  summarise(
+    n_de_ligands = n(),
+    n_upregulated = sum(avg_log2FC > 0),
+    n_downregulated = sum(avg_log2FC < 0),
+    .groups = 'drop'
+  )
+
+print(de_by_sender)
+
+# DE receiver analysis
+de_receiver_sig <- DE_receiver %>%
+  filter(p_val_adj < 0.05)
+
+cat("\nSignificantly DE receptors in receivers:", nrow(de_receiver_sig), "\n")
+
+# By receiver type
+de_by_receiver <- de_receiver_sig %>%
+  group_by(receiver) %>%
+  summarise(
+    n_de_receptors = n(),
+    n_upregulated = sum(avg_log2FC > 0),
+    n_downregulated = sum(avg_log2FC < 0),
+    .groups = 'drop'
+  )
+
+print(de_by_receiver)
+
+# ===============================================================
+# 7. CREATE SUMMARY TABLE FOR THESIS
+# ===============================================================
+
+# Create a comprehensive summary table
+summary_stats <- data.frame(
+  Metric = c(
+    "Target genes (young niche)",
+    "Target genes (adult niche)",
+    "Overlapping target genes",
+    "Total L-R pairs analyzed",
+    "High-priority L-R pairs (young)",
+    "High-priority L-R pairs (adult)",
+    "Unique ligands (young)",
+    "Unique ligands (adult)",
+    "Ligands with activity scores (young)",
+    "Ligands with activity scores (adult)",
+    "Significantly DE ligands",
+    "Significantly DE receptors"
+  ),
+  Value = c(
+    length(geneset_NEyoung),
+    length(geneset_NEadult),
+    length(target_overlap),
+    total_lr_pairs,
+    young_high_priority,
+    adult_high_priority,
+    length(young_ligands),
+    length(adult_ligands),
+    nrow(young_activities),
+    nrow(adult_activities),
+    nrow(de_sender_sig),
+    nrow(de_receiver_sig)
+  )
+)
+
+cat("\n=== SUMMARY TABLE FOR THESIS ===\n")
+print(kable(summary_stats, format = "markdown"))
+
+# ===============================================================
+# 8. TOP FINDINGS FOR THESIS WRITING
+# ===============================================================
+
+cat("\n=== KEY FINDINGS FOR THESIS ===\n")
+cat("1. Young niche shows", length(geneset_NEyoung), "target genes vs", length(geneset_NEadult), "in adult niche\n")
+cat("2. ", round(length(target_overlap)/min(length(geneset_NEyoung), length(geneset_NEadult))*100, 1), "% target gene overlap between niches\n")
+cat("3. ", total_lr_pairs, "total ligand-receptor pairs analyzed across both niches\n")
+cat("4. Top young ligand:", young_top_ligands$ligand[1], "(score:", round(young_top_ligands$max_score[1], 3), ")\n")
+cat("5. Top adult ligand:", adult_top_ligands$ligand[1], "(score:", round(adult_top_ligands$max_score[1], 3), ")\n")
+if(length(s100_in_ligands) > 0) {
+  cat("6. S100A8/A9 identified as active ligands in the analysis\n")
+}
+
+# # Save results for later use
+# write.csv(summary_stats, "nichenet_summary_stats.csv", row.names = FALSE)
+# write.csv(young_top_ligands, "nichenet_top_ligands_young.csv", row.names = FALSE)
+# write.csv(adult_top_ligands, "nichenet_top_ligands_adult.csv", row.names = FALSE)
+```
+
+```{r}
+# ===============================================================
+# ADDITIONAL NICHENET ANALYSIS FOR DETAILED THESIS WRITING
+# ===============================================================
+
+# Get the top 5 ligands for each niche (for text insertion)
+cat("=== TOP LIGANDS FOR THESIS TEXT ===\n")
+
+# Young niche top ligands
+young_top_5 <- prioritization_tables$prioritization_tbl_ligand_receptor %>%
+  filter(niche == "young_niche", !is.na(prioritization_score)) %>%
+  group_by(ligand) %>%
+  summarise(max_score = max(prioritization_score, na.rm = TRUE), .groups = 'drop') %>%
+  top_n(5, max_score) %>%
+  arrange(desc(max_score))
+
+cat("Top 5 young niche ligands:\n")
+for(i in 1:nrow(young_top_5)) {
+  cat(paste0(i, ". ", young_top_5$ligand[i], " (score: ", round(young_top_5$max_score[i], 3), ")\n"))
+}
+
+# Adult niche top ligands  
+adult_top_5 <- prioritization_tables$prioritization_tbl_ligand_receptor %>%
+  filter(niche == "old_niche", !is.na(prioritization_score)) %>%
+  group_by(ligand) %>%
+  summarise(max_score = max(prioritization_score, na.rm = TRUE), .groups = 'drop') %>%
+  top_n(5, max_score) %>%
+  arrange(desc(max_score))
+
+cat("\nTop 5 adult niche ligands:\n")
+for(i in 1:nrow(adult_top_5)) {
+  cat(paste0(i, ". ", adult_top_5$ligand[i], " (score: ", round(adult_top_5$max_score[i], 3), ")\n"))
+}
+
+# ===============================================================
+# S100A8/A9 DETAILED ANALYSIS
+# ===============================================================
+
+cat("\n=== S100A8/A9 DETAILED ANALYSIS ===\n")
+
+s100_detailed <- prioritization_tables$prioritization_tbl_ligand_receptor %>%
+  filter(ligand %in% c("S100A8", "S100A9")) %>%
+  select(niche, sender, receiver, ligand, receptor, prioritization_score) %>%
+  arrange(desc(prioritization_score))
+
+cat("S100A8/A9 ligand-receptor pairs:\n")
+print(s100_detailed)
+
+# S100A8/A9 receptors
+s100_receptors <- s100_detailed %>%
+  pull(receptor) %>%
+  unique()
+
+cat("\nReceptors for S100A8/A9:", paste(s100_receptors, collapse = ", "), "\n")
+
+# S100A8/A9 by niche
+s100_by_niche <- s100_detailed %>%
+  group_by(niche, ligand) %>%
+  summarise(
+    n_receptors = n(),
+    max_score = max(prioritization_score, na.rm = TRUE),
+    mean_score = mean(prioritization_score, na.rm = TRUE),
+    .groups = 'drop'
+  )
+
+print(s100_by_niche)
+
+# ===============================================================
+# LIGAND COMPARISON BETWEEN NICHES
+# ===============================================================
+
+cat("\n=== LIGAND COMPARISON ANALYSIS ===\n")
+
+# Compare ligand rankings between niches
+young_ligand_ranks <- prioritization_tables$prioritization_tbl_ligand_receptor %>%
+  filter(niche == "young_niche", !is.na(prioritization_score)) %>%
+  group_by(ligand) %>%
+  summarise(young_max_score = max(prioritization_score, na.rm = TRUE), .groups = 'drop') %>%
+  mutate(young_rank = rank(-young_max_score))
+
+adult_ligand_ranks <- prioritization_tables$prioritization_tbl_ligand_receptor %>%
+  filter(niche == "old_niche", !is.na(prioritization_score)) %>%
+  group_by(ligand) %>%
+  summarise(adult_max_score = max(prioritization_score, na.rm = TRUE), .groups = 'drop') %>%
+  mutate(adult_rank = rank(-adult_max_score))
+
+# Merge and find ligands with biggest ranking differences
+ligand_rank_comparison <- young_ligand_ranks %>%
+  full_join(adult_ligand_ranks, by = "ligand") %>%
+  mutate(
+    young_max_score = ifelse(is.na(young_max_score), 0, young_max_score),
+    adult_max_score = ifelse(is.na(adult_max_score), 0, adult_max_score),
+    young_rank = ifelse(is.na(young_rank), max(young_rank, na.rm = TRUE) + 1, young_rank),
+    adult_rank = ifelse(is.na(adult_rank), max(adult_rank, na.rm = TRUE) + 1, adult_rank),
+    rank_difference = young_rank - adult_rank,
+    score_difference = young_max_score - adult_max_score
+  )
+
+# Ligands much higher in young niche
+young_enriched <- ligand_rank_comparison %>%
+  filter(rank_difference < -50) %>%  # Much better rank in young
+  arrange(rank_difference) %>%
+  head(10)
+
+cat("Ligands enriched in young niche (better ranking):\n")
+print(young_enriched %>% select(ligand, young_rank, adult_rank, rank_difference))
+
+# Ligands much higher in adult niche  
+adult_enriched <- ligand_rank_comparison %>%
+  filter(rank_difference > 50) %>%  # Much better rank in adult
+  arrange(desc(rank_difference)) %>%
+  head(10)
+
+cat("\nLigands enriched in adult niche (better ranking):\n")
+print(adult_enriched %>% select(ligand, young_rank, adult_rank, rank_difference))
+
+# ===============================================================
+# TARGET GENE ANALYSIS
+# ===============================================================
+
+cat("\n=== TARGET GENE OVERLAP ANALYSIS ===\n")
+
+# Age-specific target genes
+young_specific_targets <- setdiff(geneset_NEyoung, geneset_NEadult)
+adult_specific_targets <- setdiff(geneset_NEadult, geneset_NEyoung)
+shared_targets <- intersect(geneset_NEyoung, geneset_NEadult)
+
+cat("Young-specific targets (first 10):", paste(head(young_specific_targets, 10), collapse = ", "), "\n")
+cat("Adult-specific targets (first 10):", paste(head(adult_specific_targets, 10), collapse = ", "), "\n")
+cat("Shared targets (first 10):", paste(head(shared_targets, 10), collapse = ", "), "\n")
+
+# Save gene lists for pathway analysis
+write.csv(data.frame(gene = young_specific_targets), "young_specific_targets.csv", row.names = FALSE)
+write.csv(data.frame(gene = adult_specific_targets), "adult_specific_targets.csv", row.names = FALSE)
+write.csv(data.frame(gene = shared_targets), "shared_targets.csv", row.names = FALSE)
+
+# ===============================================================
+# CREATE TEXT SNIPPETS FOR THESIS
+# ===============================================================
+
+cat("\n=== TEXT SNIPPETS FOR THESIS ===\n")
+
+# Create formatted text for top ligands
+young_ligand_text <- paste0(young_top_5$ligand[2:4], collapse = ", ")
+adult_ligand_text <- paste0(adult_top_5$ligand[2:4], collapse = ", ")
+
+cat("For 'Additional highly-ranked ligands' in young niche:", young_ligand_text, "\n")
+cat("For 'Additional top-ranking ligands' in adult niche:", adult_ligand_text, "\n")
+
+# Summary statistics formatted for text
+cat("\nFormatted statistics for thesis:\n")
+cat("- Target gene overlap: 756 out of", min(length(geneset_NEyoung), length(geneset_NEadult)), "genes (82.6%)\n")
+cat("- Young-specific targets:", length(young_specific_targets), "genes\n") 
+cat("- Adult-specific targets:", length(adult_specific_targets), "genes\n")
+cat("- Total L-R pairs analyzed: 9,710\n")
+cat("- High-priority pairs (young): 1,082\n")
+cat("- High-priority pairs (adult): 1,330\n")
+cat("- S100A8/A9 receptor targets:", paste(s100_receptors, collapse = ", "), "\n")
+```
+
+```{r}
+# ===============================================================
+# PUBLICATION-READY TABLES FOR NICHENET RESULTS
+# ===============================================================
+
+library(knitr)
+library(kableExtra)
+
+# ===============================================================
+# TABLE 1: TOP LIGANDS BY NICHE
+# ===============================================================
+
+# Create comprehensive top ligands table
+top_ligands_table <- rbind(
+  young_top_5 %>% mutate(Niche = "Young") %>% 
+    select(Niche, Ligand = ligand, Score = max_score),
+  adult_top_5 %>% mutate(Niche = "Adult") %>% 
+    select(Niche, Ligand = ligand, Score = max_score)
+) %>%
+  mutate(Score = round(Score, 3)) %>%
+  arrange(Niche, desc(Score))
+
+cat("=== TABLE 1: TOP LIGANDS BY NICHE ===\n")
+print(kable(top_ligands_table, format = "markdown", 
+            caption = "Top 5 prioritized ligands in neutrophil-neuroendocrine communication by age niche"))
+
+# ===============================================================
+# TABLE 2: S100A8/A9 ANALYSIS SUMMARY
+# ===============================================================
+
+s100_summary_table <- s100_by_niche %>%
+  mutate(
+    Niche = case_when(
+      niche == "young_niche" ~ "Young",
+      niche == "old_niche" ~ "Adult"
+    ),
+    Ligand = ligand,
+    `Receptor Pairs` = n_receptors,
+    `Max Score` = round(max_score, 3),
+    `Mean Score` = round(mean_score, 3)
+  ) %>%
+  select(Niche, Ligand, `Receptor Pairs`, `Max Score`, `Mean Score`)
+
+cat("\n=== TABLE 2: S100A8/A9 ANALYSIS SUMMARY ===\n")
+print(kable(s100_summary_table, format = "markdown",
+            caption = "S100A8/A9 ligand activity by age niche"))
+
+# ===============================================================
+# TABLE 3: TARGET GENE SUMMARY
+# ===============================================================
+
+target_summary_table <- data.frame(
+  Category = c("Young-specific targets", "Adult-specific targets", "Shared targets", "Total young targets", "Total adult targets"),
+  Count = c(length(young_specific_targets), length(adult_specific_targets), 
+            length(shared_targets), length(geneset_NEyoung), length(geneset_NEadult)),
+  Percentage = c(
+    round(length(young_specific_targets)/length(geneset_NEyoung)*100, 1),
+    round(length(adult_specific_targets)/length(geneset_NEadult)*100, 1),
+    round(length(shared_targets)/min(length(geneset_NEyoung), length(geneset_NEadult))*100, 1),
+    100, 100
+  )
+)
+
+cat("\n=== TABLE 3: TARGET GENE SUMMARY ===\n")
+print(kable(target_summary_table, format = "markdown",
+            caption = "Target gene distribution by age niche"))
+
+# ===============================================================
+# TABLE 4: DIFFERENTIAL EXPRESSION SUMMARY
+# ===============================================================
+
+de_summary_table <- rbind(
+  de_by_sender %>% mutate(Cell_Type = paste0(sender, " (Sender)")) %>%
+    select(Cell_Type, `Total DE` = n_de_ligands, Upregulated = n_upregulated, Downregulated = n_downregulated),
+  de_by_receiver %>% mutate(Cell_Type = paste0(receiver, " (Receiver)")) %>%
+    select(Cell_Type, `Total DE` = n_de_receptors, Upregulated = n_upregulated, Downregulated = n_downregulated)
+)
+
+cat("\n=== TABLE 4: DIFFERENTIAL EXPRESSION SUMMARY ===\n")
+print(kable(de_summary_table, format = "markdown",
+            caption = "Differential expression of ligands and receptors by cell type and age"))
+
+# ===============================================================
+# TABLE 5: LIGAND ENRICHMENT EXTREMES
+# ===============================================================
+
+# Create table of most enriched ligands in each niche
+enrichment_table <- rbind(
+  young_enriched %>% head(5) %>% mutate(Enriched_In = "Young") %>%
+    select(Enriched_In, Ligand = ligand, `Young Rank` = young_rank, `Adult Rank` = adult_rank, `Rank Difference` = rank_difference),
+  adult_enriched %>% head(5) %>% mutate(Enriched_In = "Adult") %>%
+    select(Enriched_In, Ligand = ligand, `Young Rank` = young_rank, `Adult Rank` = adult_rank, `Rank Difference` = rank_difference)
+) %>%
+  mutate(
+    `Young Rank` = as.integer(`Young Rank`),
+    `Adult Rank` = as.integer(`Adult Rank`),
+    `Rank Difference` = as.integer(`Rank Difference`)
+  )
+
+cat("\n=== TABLE 5: MOST AGE-ENRICHED LIGANDS ===\n")
+print(kable(enrichment_table, format = "markdown",
+            caption = "Ligands showing strongest age-specific enrichment (top 5 per niche)"))
+
+# ===============================================================
+# FIGURE LEGENDS
+# ===============================================================
+
+cat("\n=== SUGGESTED FIGURE LEGENDS ===\n")
+
+cat("Figure X: Age-dependent ligand-receptor communication networks in neuroblastoma\n")
+cat("(A) Circos plot showing top 15 ligand-receptor pairs in young niche. ")
+cat("(B) Circos plot showing top 15 ligand-receptor pairs in adult niche. ")
+cat("Ribbon thickness indicates prioritization score strength. ")
+cat("Colors represent sender (neutrophils) and receiver (neuroendocrine) cell types.\n\n")
+
+cat("Figure Y: S100A8/A9 validation in human neuroblastoma\n")
+cat("(A) Prioritization scores for S100A8/A9-receptor pairs by age niche. ")
+cat("(B) Expression levels of S100A8/A9 receptors in neuroendocrine cells. ")
+cat("(C) Pathway analysis of S100A8/A9 target genes. ")
+cat("Statistical significance: *p<0.05, **p<0.01, ***p<0.001.\n\n")
+
+cat("Figure Z: Age-specific target gene signatures\n")
+cat("(A) Heatmap of young-specific target genes across samples. ")
+cat("(B) Heatmap of adult-specific target genes. ")
+cat("(C) Pathway enrichment analysis comparing young vs adult signatures. ")
+cat("Genes clustered by expression pattern, samples ordered by age group.\n\n")
+
+# ===============================================================
+# EXPORT TABLES FOR MANUSCRIPT
+# ===============================================================
+
+# Save as CSV files for easy import into manuscripts
+write.csv(top_ligands_table, "Table1_Top_Ligands_By_Niche.csv", row.names = FALSE)
+write.csv(s100_summary_table, "Table2_S100A8A9_Summary.csv", row.names = FALSE)
+write.csv(target_summary_table, "Table3_Target_Gene_Summary.csv", row.names = FALSE)
+write.csv(de_summary_table, "Table4_DE_Summary.csv", row.names = FALSE)
+write.csv(enrichment_table, "Table5_Age_Enriched_Ligands.csv", row.names = FALSE)
+
+# Save detailed results for supplementary material
+write.csv(young_enriched, "Supplementary_Young_Enriched_Ligands.csv", row.names = FALSE)
+write.csv(adult_enriched, "Supplementary_Adult_Enriched_Ligands.csv", row.names = FALSE)
+write.csv(s100_detailed, "Supplementary_S100A8A9_Detailed.csv", row.names = FALSE)
+
+cat("\n=== FILES EXPORTED ===\n")
+cat("Main tables: Table1-5 saved as CSV files\n")
+cat("Supplementary data: Detailed ligand rankings and S100A8/A9 analysis\n")
+cat("Target gene lists: young_specific_targets.csv, adult_specific_targets.csv, shared_targets.csv\n")
+
+# ===============================================================
+# STATISTICAL SUMMARY FOR RESULTS TEXT
+# ===============================================================
+
+cat("\n=== STATISTICAL SUMMARY FOR RESULTS SECTION ===\n")
+cat("Use these exact numbers in your thesis:\n\n")
+
+cat("• NicheNet identified", length(geneset_NEyoung), "target genes in young niche and", 
+    length(geneset_NEadult), "in adult niche\n")
+cat("• Target gene overlap:", length(shared_targets), "genes (", 
+    round(length(shared_targets)/min(length(geneset_NEyoung), length(geneset_NEadult))*100, 1), "%)\n")
+cat("• Young-specific targets:", length(young_specific_targets), "genes (",
+    round(length(young_specific_targets)/length(geneset_NEyoung)*100, 1), "% of young targets)\n")
+cat("• Adult-specific targets:", length(adult_specific_targets), "genes (",
+    round(length(adult_specific_targets)/length(geneset_NEadult)*100, 1), "% of adult targets)\n")
+cat("• Total ligand-receptor pairs analyzed: 9,710\n")
+cat("• High-priority pairs (young niche):", 1082, "\n")
+cat("• High-priority pairs (adult niche):", 1330, "\n")
+cat("• S100A8/A9 receptor targets: 7 unique receptors (ALCAM, CD36, AGER, CD68, ITGB2, CD69, TLR4)\n")
+cat("• Top young ligand: IFITM1 (score: 0.768)\n")
+cat("• Top adult ligand: APOE (score: 0.797)\n")
+cat("• Most young-enriched ligand: FCGR3B (rank difference: -1162)\n")
+cat("• Most adult-enriched ligand: CCL19 (rank difference: +1178)\n")
+```
+
+
+# Enrichment
+
+```{r}
+# ===============================================================
+# COMPREHENSIVE PATHWAY ENRICHMENT ANALYSIS FOR NICHENET RESULTS
+# ===============================================================
+
+# Load required libraries
+library(clusterProfiler)
+library(org.Hs.eg.db)
+library(DOSE)
+library(enrichplot)
+library(ggplot2)
+library(dplyr)
+library(ReactomePA)
+library(msigdbr)
+library(tidyr)
+library(RColorBrewer)
+library(pheatmap)
+library(VennDiagram)
+library(UpSetR)
+
+# Set up
+set.seed(123)
+
+# ===============================================================
+# 1. PREPARE GENE LISTS AND BACKGROUND
+# ===============================================================
+
+cat("=== PREPARING GENE LISTS ===\n")
+
+# Your gene lists (already created)
+young_genes <- young_specific_targets
+adult_genes <- adult_specific_targets
+shared_genes <- shared_targets
+background_genes <- background
+
+# Convert to Entrez IDs for enrichment analysis
+convert_to_entrez <- function(gene_symbols) {
+  entrez_ids <- bitr(gene_symbols, fromType = "SYMBOL", toType = "ENTREZID", 
+                     OrgDb = org.Hs.eg.db, drop = TRUE)
+  return(entrez_ids$ENTREZID)
+}
+
+young_entrez <- convert_to_entrez(young_genes)
+adult_entrez <- convert_to_entrez(adult_genes)
+shared_entrez <- convert_to_entrez(shared_genes)
+background_entrez <- convert_to_entrez(background_genes)
+
+cat("Young genes converted:", length(young_entrez), "out of", length(young_genes), "\n")
+cat("Adult genes converted:", length(adult_entrez), "out of", length(adult_genes), "\n")
+cat("Shared genes converted:", length(shared_entrez), "out of", length(shared_genes), "\n")
+cat("Background genes:", length(background_entrez), "\n")
+
+# ===============================================================
+# 2. GO ENRICHMENT ANALYSIS
+# ===============================================================
+
+cat("\n=== GO ENRICHMENT ANALYSIS ===\n")
+
+# GO Biological Process
+go_young_bp <- enrichGO(gene = young_entrez,
+                        universe = background_entrez,
+                        OrgDb = org.Hs.eg.db,
+                        ont = "BP",
+                        pAdjustMethod = "BH",
+                        pvalueCutoff = 0.05,
+                        qvalueCutoff = 0.2,
+                        readable = TRUE)
+
+go_adult_bp <- enrichGO(gene = adult_entrez,
+                        universe = background_entrez,
+                        OrgDb = org.Hs.eg.db,
+                        ont = "BP",
+                        pAdjustMethod = "BH",
+                        pvalueCutoff = 0.05,
+                        qvalueCutoff = 0.2,
+                        readable = TRUE)
+
+go_shared_bp <- enrichGO(gene = shared_entrez,
+                         universe = background_entrez,
+                         OrgDb = org.Hs.eg.db,
+                         ont = "BP",
+                         pAdjustMethod = "BH",
+                         pvalueCutoff = 0.05,
+                         qvalueCutoff = 0.2,
+                         readable = TRUE)
+
+# Print results
+cat("Young-specific GO BP terms:", nrow(go_young_bp@result), "\n")
+cat("Adult-specific GO BP terms:", nrow(go_adult_bp@result), "\n")
+cat("Shared GO BP terms:", nrow(go_shared_bp@result), "\n")
+
+if(nrow(go_young_bp@result) > 0) {
+  cat("\nTop 10 Young-specific GO BP terms:\n")
+  print(go_young_bp@result[1:min(10, nrow(go_young_bp@result)), c("Description", "pvalue", "p.adjust", "Count")])
+}
+
+if(nrow(go_adult_bp@result) > 0) {
+  cat("\nTop 10 Adult-specific GO BP terms:\n")
+  print(go_adult_bp@result[1:min(10, nrow(go_adult_bp@result)), c("Description", "pvalue", "p.adjust", "Count")])
+}
+
+# GO Molecular Function
+go_young_mf <- enrichGO(gene = young_entrez,
+                        universe = background_entrez,
+                        OrgDb = org.Hs.eg.db,
+                        ont = "MF",
+                        pAdjustMethod = "BH",
+                        pvalueCutoff = 0.05,
+                        qvalueCutoff = 0.2,
+                        readable = TRUE)
+
+go_adult_mf <- enrichGO(gene = adult_entrez,
+                        universe = background_entrez,
+                        OrgDb = org.Hs.eg.db,
+                        ont = "MF",
+                        pAdjustMethod = "BH",
+                        pvalueCutoff = 0.05,
+                        qvalueCutoff = 0.2,
+                        readable = TRUE)
+
+# ===============================================================
+# 3. KEGG PATHWAY ENRICHMENT
+# ===============================================================
+
+cat("\n=== KEGG PATHWAY ENRICHMENT ===\n")
+
+kegg_young <- enrichKEGG(gene = young_entrez,
+                         universe = background_entrez,
+                         organism = 'hsa',
+                         pvalueCutoff = 0.05,
+                         pAdjustMethod = "BH",
+                         qvalueCutoff = 0.2)
+
+kegg_adult <- enrichKEGG(gene = adult_entrez,
+                         universe = background_entrez,
+                         organism = 'hsa',
+                         pvalueCutoff = 0.05,
+                         pAdjustMethod = "BH",
+                         qvalueCutoff = 0.2)
+
+kegg_shared <- enrichKEGG(gene = shared_entrez,
+                          universe = background_entrez,
+                          organism = 'hsa',
+                          pvalueCutoff = 0.05,
+                          pAdjustMethod = "BH",
+                          qvalueCutoff = 0.2)
+
+cat("Young-specific KEGG pathways:", nrow(kegg_young@result), "\n")
+cat("Adult-specific KEGG pathways:", nrow(kegg_adult@result), "\n")
+cat("Shared KEGG pathways:", nrow(kegg_shared@result), "\n")
+
+if(nrow(kegg_young@result) > 0) {
+  cat("\nTop Young-specific KEGG pathways:\n")
+  print(kegg_young@result[, c("Description", "pvalue", "p.adjust", "Count")])
+}
+
+if(nrow(kegg_adult@result) > 0) {
+  cat("\nTop Adult-specific KEGG pathways:\n")
+  print(kegg_adult@result[, c("Description", "pvalue", "p.adjust", "Count")])
+}
+
+# ===============================================================
+# 4. REACTOME PATHWAY ENRICHMENT
+# ===============================================================
+
+cat("\n=== REACTOME PATHWAY ENRICHMENT ===\n")
+
+reactome_young <- enrichPathway(gene = young_entrez,
+                                universe = background_entrez,
+                                pvalueCutoff = 0.05,
+                                pAdjustMethod = "BH",
+                                qvalueCutoff = 0.2,
+                                readable = TRUE)
+
+reactome_adult <- enrichPathway(gene = adult_entrez,
+                                universe = background_entrez,
+                                pvalueCutoff = 0.05,
+                                pAdjustMethod = "BH",
+                                qvalueCutoff = 0.2,
+                                readable = TRUE)
+
+reactome_shared <- enrichPathway(gene = shared_entrez,
+                                 universe = background_entrez,
+                                 pvalueCutoff = 0.05,
+                                 pAdjustMethod = "BH",
+                                 qvalueCutoff = 0.2,
+                                 readable = TRUE)
+
+cat("Young-specific Reactome pathways:", nrow(reactome_young@result), "\n")
+cat("Adult-specific Reactome pathways:", nrow(reactome_adult@result), "\n")
+cat("Shared Reactome pathways:", nrow(reactome_shared@result), "\n")
+
+if(nrow(reactome_young@result) > 0) {
+  cat("\nTop Young-specific Reactome pathways:\n")
+  print(reactome_young@result[1:min(10, nrow(reactome_young@result)), c("Description", "pvalue", "p.adjust", "Count")])
+}
+
+if(nrow(reactome_adult@result) > 0) {
+  cat("\nTop Adult-specific Reactome pathways:\n")
+  print(reactome_adult@result[1:min(10, nrow(reactome_adult@result)), c("Description", "pvalue", "p.adjust", "Count")])
+}
+
+# ===============================================================
+# 5. HALLMARK GENE SETS (MSigDB)
+# ===============================================================
+
+cat("\n=== HALLMARK GENE SET ENRICHMENT ===\n")
+
+# Get Hallmark gene sets
+hallmark_sets <- msigdbr(species = "Homo sapiens", category = "H")
+
+hallmark_young <- enricher(gene = young_genes,
+                           universe = background_genes,
+                           TERM2GENE = hallmark_sets[, c("gs_name", "gene_symbol")],
+                           pvalueCutoff = 0.05,
+                           pAdjustMethod = "BH",
+                           qvalueCutoff = 0.2)
+
+hallmark_adult <- enricher(gene = adult_genes,
+                           universe = background_genes,
+                           TERM2GENE = hallmark_sets[, c("gs_name", "gene_symbol")],
+                           pvalueCutoff = 0.05,
+                           pAdjustMethod = "BH",
+                           qvalueCutoff = 0.2)
+
+hallmark_shared <- enricher(gene = shared_genes,
+                            universe = background_genes,
+                            TERM2GENE = hallmark_sets[, c("gs_name", "gene_symbol")],
+                            pvalueCutoff = 0.05,
+                            pAdjustMethod = "BH",
+                            qvalueCutoff = 0.2)
+
+cat("Young-specific Hallmark pathways:", nrow(hallmark_young@result), "\n")
+cat("Adult-specific Hallmark pathways:", nrow(hallmark_adult@result), "\n")
+cat("Shared Hallmark pathways:", nrow(hallmark_shared@result), "\n")
+
+if(nrow(hallmark_young@result) > 0) {
+  cat("\nYoung-specific Hallmark pathways:\n")
+  print(hallmark_young@result[, c("Description", "pvalue", "p.adjust", "Count")])
+}
+
+if(nrow(hallmark_adult@result) > 0) {
+  cat("\nAdult-specific Hallmark pathways:\n")
+  print(hallmark_adult@result[, c("Description", "pvalue", "p.adjust", "Count")])
+}
+
+# ===============================================================
+# 6. CANCER-RELATED GENE SETS (C6 ONCOGENIC SIGNATURES)
+# ===============================================================
+
+cat("\n=== ONCOGENIC SIGNATURE ENRICHMENT ===\n")
+
+# Get oncogenic signature gene sets
+oncogenic_sets <- msigdbr(species = "Homo sapiens", category = "C6")
+
+oncogenic_young <- enricher(gene = young_genes,
+                            universe = background_genes,
+                            TERM2GENE = oncogenic_sets[, c("gs_name", "gene_symbol")],
+                            pvalueCutoff = 0.05,
+                            pAdjustMethod = "BH",
+                            qvalueCutoff = 0.2)
+
+oncogenic_adult <- enricher(gene = adult_genes,
+                            universe = background_genes,
+                            TERM2GENE = oncogenic_sets[, c("gs_name", "gene_symbol")],
+                            pvalueCutoff = 0.05,
+                            pAdjustMethod = "BH",
+                            qvalueCutoff = 0.2)
+
+cat("Young-specific oncogenic signatures:", nrow(oncogenic_young@result), "\n")
+cat("Adult-specific oncogenic signatures:", nrow(oncogenic_adult@result), "\n")
+
+if(nrow(oncogenic_young@result) > 0) {
+  cat("\nTop Young-specific oncogenic signatures:\n")
+  print(oncogenic_young@result[1:min(5, nrow(oncogenic_young@result)), c("Description", "pvalue", "p.adjust", "Count")])
+}
+
+if(nrow(oncogenic_adult@result) > 0) {
+  cat("\nTop Adult-specific oncogenic signatures:\n")
+  print(oncogenic_adult@result[1:min(5, nrow(oncogenic_adult@result)), c("Description", "pvalue", "p.adjust", "Count")])
+}
+
+# ===============================================================
+# 7. SAVE ENRICHMENT RESULTS
+# ===============================================================
+
+cat("\n=== SAVING ENRICHMENT RESULTS ===\n")
+
+# Function to save enrichment results
+save_enrichment_results <- function(enrich_obj, filename) {
+  if(nrow(enrich_obj@result) > 0) {
+    write.csv(enrich_obj@result, filename, row.names = FALSE)
+    return(TRUE)
+  } else {
+    cat("No significant results for", filename, "\n")
+    return(FALSE)
+  }
+}
+
+# Save all results
+save_enrichment_results(go_young_bp, "GO_BP_Young_Specific.csv")
+save_enrichment_results(go_adult_bp, "GO_BP_Adult_Specific.csv")
+save_enrichment_results(go_shared_bp, "GO_BP_Shared.csv")
+save_enrichment_results(go_young_mf, "GO_MF_Young_Specific.csv")
+save_enrichment_results(go_adult_mf, "GO_MF_Adult_Specific.csv")
+save_enrichment_results(kegg_young, "KEGG_Young_Specific.csv")
+save_enrichment_results(kegg_adult, "KEGG_Adult_Specific.csv")
+save_enrichment_results(kegg_shared, "KEGG_Shared.csv")
+save_enrichment_results(reactome_young, "Reactome_Young_Specific.csv")
+save_enrichment_results(reactome_adult, "Reactome_Adult_Specific.csv")
+save_enrichment_results(reactome_shared, "Reactome_Shared.csv")
+save_enrichment_results(hallmark_young, "Hallmark_Young_Specific.csv")
+save_enrichment_results(hallmark_adult, "Hallmark_Adult_Specific.csv")
+save_enrichment_results(hallmark_shared, "Hallmark_Shared.csv")
+save_enrichment_results(oncogenic_young, "Oncogenic_Young_Specific.csv")
+save_enrichment_results(oncogenic_adult, "Oncogenic_Adult_Specific.csv")
+
+# ===============================================================
+# 8. CREATE SUMMARY STATISTICS
+# ===============================================================
+
+cat("\n=== ENRICHMENT SUMMARY STATISTICS ===\n")
+
+enrichment_summary <- data.frame(
+  Database = c("GO_BP", "GO_MF", "KEGG", "Reactome", "Hallmark", "Oncogenic"),
+  Young_Pathways = c(
+    nrow(go_young_bp@result[go_young_bp@result$p.adjust < 0.05,]),
+    nrow(go_young_mf@result[go_young_mf@result$p.adjust < 0.05,]),
+    nrow(kegg_young@result[kegg_young@result$p.adjust < 0.05,]),
+    nrow(reactome_young@result[reactome_young@result$p.adjust < 0.05,]),
+    nrow(hallmark_young@result[hallmark_young@result$p.adjust < 0.05,]),
+    nrow(oncogenic_young@result[oncogenic_young@result$p.adjust < 0.05,])
+  ),
+  Adult_Pathways = c(
+    nrow(go_adult_bp@result[go_adult_bp@result$p.adjust < 0.05,]),
+    nrow(go_adult_mf@result[go_adult_mf@result$p.adjust < 0.05,]),
+    nrow(kegg_adult@result[kegg_adult@result$p.adjust < 0.05,]),
+    nrow(reactome_adult@result[reactome_adult@result$p.adjust < 0.05,]),
+    nrow(hallmark_adult@result[hallmark_adult@result$p.adjust < 0.05,]),
+    nrow(oncogenic_adult@result[oncogenic_adult@result$p.adjust < 0.05,])
+  ),
+  Shared_Pathways = c(
+    nrow(go_shared_bp@result[go_shared_bp@result$p.adjust < 0.05,]),
+    NA,  # No MF for shared
+    nrow(kegg_shared@result[kegg_shared@result$p.adjust < 0.05,]),
+    nrow(reactome_shared@result[reactome_shared@result$p.adjust < 0.05,]),
+    nrow(hallmark_shared@result[hallmark_shared@result$p.adjust < 0.05,]),
+    NA   # No oncogenic for shared
+  )
+)
+
+print(enrichment_summary)
+write.csv(enrichment_summary, "Enrichment_Summary_Statistics.csv", row.names = FALSE)
+
+cat("\n=== ENRICHMENT ANALYSIS COMPLETE ===\n")
+cat("All results saved as CSV files\n")
+cat("Summary statistics saved as Enrichment_Summary_Statistics.csv\n")
+```
+
+```{r}
+# ===============================================================
+# ENRICHMENT ANALYSIS VISUALIZATIONS
+# ===============================================================
+
+# Load additional libraries for advanced visualizations
+library(ggplot2)
+library(enrichplot)
+library(dplyr)
+library(tidyr)
+library(RColorBrewer)
+library(cowplot)
+library(ggrepel)
+library(viridis)
+library(ComplexHeatmap)
+library(circlize)
+
+# Set up color palettes
+young_color <- "#6495EDFF"  # Blue
+adult_color <- "#FF69B4FF"  # Pink  
+shared_color <- "#32CD32FF" # Green
+
+# ===============================================================
+# 1. DOT PLOTS FOR PATHWAY ENRICHMENT
+# ===============================================================
+
+cat("=== CREATING DOT PLOTS ===\n")
+
+# Function to create publication-ready dot plots
+create_dotplot <- function(enrich_obj, title, color = "red", top_n = 15) {
+  if(nrow(enrich_obj@result) == 0) {
+    return(ggplot() + ggtitle(paste("No significant results for", title)) + theme_minimal())
+  }
+  
+  dotplot(enrich_obj, showCategory = top_n, 
+          title = title, font.size = 10) +
+    scale_color_gradient(low = "blue", high = color) +
+    theme(axis.text.y = element_text(size = 9),
+          plot.title = element_text(size = 12, hjust = 0.5))
+}
+
+# Create dot plots for GO BP
+p1 <- create_dotplot(go_young_bp, "Young-Specific GO Biological Process", young_color)
+p2 <- create_dotplot(go_adult_bp, "Adult-Specific GO Biological Process", adult_color)
+p3 <- create_dotplot(go_shared_bp, "Shared GO Biological Process", shared_color)
+
+# Save GO BP plots
+ggsave("GO_BP_Young_Dotplot.pdf", p1, width = 12, height = 8)
+ggsave("GO_BP_Adult_Dotplot.pdf", p2, width = 12, height = 8)
+ggsave("GO_BP_Shared_Dotplot.pdf", p3, width = 12, height = 8)
+
+# Create dot plots for KEGG
+p4 <- create_dotplot(kegg_young, "Young-Specific KEGG Pathways", young_color)
+p5 <- create_dotplot(kegg_adult, "Adult-Specific KEGG Pathways", adult_color)
+p6 <- create_dotplot(kegg_shared, "Shared KEGG Pathways", shared_color)
+
+# Save KEGG plots
+# ggsave("KEGG_Young_Dotplot.pdf", p4, width = 12, height = 8)
+ggsave("KEGG_Adult_Dotplot.pdf", p5, width = 12, height = 8)
+ggsave("KEGG_Shared_Dotplot.pdf", p6, width = 12, height = 8)
+
+# Create dot plots for Reactome
+p7 <- create_dotplot(reactome_young, "Young-Specific Reactome Pathways", young_color)
+p8 <- create_dotplot(reactome_adult, "Adult-Specific Reactome Pathways", adult_color)
+p9 <- create_dotplot(reactome_shared, "Shared Reactome Pathways", shared_color)
+
+# Save Reactome plots
+ggsave("Reactome_Young_Dotplot.pdf", p7, width = 12, height = 8)
+ggsave("Reactome_Adult_Dotplot.pdf", p8, width = 12, height = 8)
+ggsave("Reactome_Shared_Dotplot.pdf", p9, width = 12, height = 8)
+
+# ===============================================================
+# 2. BAR PLOTS FOR HALLMARK PATHWAYS
+# ===============================================================
+
+cat("=== CREATING BAR PLOTS FOR HALLMARK PATHWAYS ===\n")
+
+# Function to create bar plots
+create_barplot <- function(enrich_obj, title, color = "red", top_n = 10) {
+  if(nrow(enrich_obj@result) == 0) {
+    return(ggplot() + ggtitle(paste("No significant results for", title)) + theme_minimal())
+  }
+  
+  barplot(enrich_obj, showCategory = top_n, title = title) +
+    scale_fill_gradient(low = "lightblue", high = color) +
+    theme(axis.text.y = element_text(size = 9),
+          plot.title = element_text(size = 12, hjust = 0.5))
+}
+
+# Hallmark bar plots
+h1 <- create_barplot(hallmark_young, "Young-Specific Hallmark Pathways", young_color)
+h2 <- create_barplot(hallmark_adult, "Adult-Specific Hallmark Pathways", adult_color)
+h3 <- create_barplot(hallmark_shared, "Shared Hallmark Pathways", shared_color)
+
+ggsave("Hallmark_Young_Barplot.pdf", h1, width = 10, height = 6)
+ggsave("Hallmark_Adult_Barplot.pdf", h2, width = 10, height = 6)
+ggsave("Hallmark_Shared_Barplot.pdf", h3, width = 10, height = 6)
+
+# ===============================================================
+# 3. COMBINED COMPARISON PLOTS
+# ===============================================================
+
+cat("=== CREATING COMPARISON PLOTS ===\n")
+
+# Function to extract top pathways for comparison
+extract_top_pathways <- function(enrich_obj, label, top_n = 10) {
+  if(nrow(enrich_obj@result) == 0) {
+    return(data.frame())
+  }
+  
+  result <- enrich_obj@result[1:min(top_n, nrow(enrich_obj@result)), ]
+  result$Group <- label
+  result$NegLogP <- -log10(result$p.adjust)
+  return(result[, c("Description", "Group", "NegLogP", "Count", "p.adjust")])
+}
+
+# Extract top GO BP pathways for comparison
+go_comparison <- rbind(
+  extract_top_pathways(go_young_bp, "Young", 8),
+  extract_top_pathways(go_adult_bp, "Adult", 8)
+)
+
+if(nrow(go_comparison) > 0) {
+  # Create comparison plot
+  comparison_plot <- ggplot(go_comparison, aes(x = reorder(Description, NegLogP), y = NegLogP, fill = Group)) +
+    geom_bar(stat = "identity", position = "dodge") +
+    scale_fill_manual(values = c("Young" = young_color, "Adult" = adult_color)) +
+    coord_flip() +
+    labs(title = "Top GO Biological Process: Young vs Adult",
+         x = "Pathway", y = "-log10(Adjusted P-value)",
+         fill = "Age Group") +
+    theme_minimal() +
+    theme(axis.text.y = element_text(size = 8),
+          plot.title = element_text(size = 12, hjust = 0.5))
+  
+  ggsave("GO_BP_Young_vs_Adult_Comparison.pdf", comparison_plot, width = 14, height = 10)
+}
+
+# Similar comparison for KEGG
+kegg_comparison <- rbind(
+  extract_top_pathways(kegg_young, "Young", 8),
+  extract_top_pathways(kegg_adult, "Adult", 8)
+)
+
+if(nrow(kegg_comparison) > 0) {
+  kegg_comparison_plot <- ggplot(kegg_comparison, aes(x = reorder(Description, NegLogP), y = NegLogP, fill = Group)) +
+    geom_bar(stat = "identity", position = "dodge") +
+    scale_fill_manual(values = c("Young" = young_color, "Adult" = adult_color)) +
+    coord_flip() +
+    labs(title = "Top KEGG Pathways: Young vs Adult",
+         x = "Pathway", y = "-log10(Adjusted P-value)",
+         fill = "Age Group") +
+    theme_minimal() +
+    theme(axis.text.y = element_text(size = 8),
+          plot.title = element_text(size = 12, hjust = 0.5))
+  
+  ggsave("KEGG_Young_vs_Adult_Comparison.pdf", kegg_comparison_plot, width = 14, height = 10)
+}
+
+# ===============================================================
+# 4. NETWORK PLOTS FOR TOP PATHWAYS
+# ===============================================================
+
+cat("=== CREATING NETWORK PLOTS ===\n")
+
+# Create network plots for enrichment results
+create_network_plot <- function(enrich_obj, title, filename) {
+  if(nrow(enrich_obj@result) == 0) {
+    cat("No results for network plot:", title, "\n")
+    return(NULL)
+  }
+  
+  tryCatch({
+    # Simplify terms to avoid overcrowding
+    enrich_simplified <- simplify(enrich_obj, cutoff = 0.7, by = "p.adjust", select_fun = min)
+    
+    if(nrow(enrich_simplified@result) > 0) {
+      p <- emapplot(enrich_simplified, showCategory = 15, cex_label_category = 0.6) +
+        ggtitle(title)
+      ggsave(filename, p, width = 12, height = 10)
+      return(p)
+    }
+  }, error = function(e) {
+    cat("Error creating network plot for", title, ":", e$message, "\n")
+    return(NULL)
+  })
+}
+
+# Create network plots (only for results with sufficient pathways)
+if(nrow(go_young_bp@result) > 5) {
+  create_network_plot(go_young_bp, "Young GO BP Network", "GO_BP_Young_Network.pdf")
+}
+if(nrow(go_adult_bp@result) > 5) {
+  create_network_plot(go_adult_bp, "Adult GO BP Network", "GO_BP_Adult_Network.pdf")
+}
+if(nrow(reactome_young@result) > 5) {
+  create_network_plot(reactome_young, "Young Reactome Network", "Reactome_Young_Network.pdf")
+}
+if(nrow(reactome_adult@result) > 5) {
+  create_network_plot(reactome_adult, "Adult Reactome Network", "Reactome_Adult_Network.pdf")
+}
+
+# ===============================================================
+# 5. HEATMAP OF ENRICHMENT SCORES
+# ===============================================================
+
+cat("=== CREATING ENRICHMENT HEATMAP ===\n")
+
+# Function to create enrichment score matrix
+create_enrichment_matrix <- function() {
+  # Combine all enrichment results
+  all_results <- list()
+  
+  # Helper function to extract scores
+  extract_scores <- function(enrich_obj, db_name, group_name) {
+    if(nrow(enrich_obj@result) == 0) return(data.frame())
+    
+    result <- enrich_obj@result
+    result$Database <- db_name
+    result$Group <- group_name
+    result$NegLogP <- -log10(result$p.adjust)
+    return(result[, c("Description", "Database", "Group", "NegLogP", "p.adjust")])
+  }
+  
+  # Extract all results
+  results_list <- list(
+    extract_scores(go_young_bp, "GO_BP", "Young"),
+    extract_scores(go_adult_bp, "GO_BP", "Adult"),
+    extract_scores(kegg_young, "KEGG", "Young"),
+    extract_scores(kegg_adult, "KEGG", "Adult"),
+    extract_scores(reactome_young, "Reactome", "Young"),
+    extract_scores(reactome_adult, "Reactome", "Adult"),
+    extract_scores(hallmark_young, "Hallmark", "Young"),
+    extract_scores(hallmark_adult, "Hallmark", "Adult")
+  )
+  
+  # Combine and filter
+  combined_results <- do.call(rbind, results_list[sapply(results_list, nrow) > 0])
+  
+  if(nrow(combined_results) == 0) {
+    cat("No results for heatmap\n")
+    return(NULL)
+  }
+  
+  # Select top pathways per database per group
+  top_pathways <- combined_results %>%
+    group_by(Database, Group) %>%
+    top_n(5, NegLogP) %>%
+    ungroup()
+  
+  # Create matrix
+  heatmap_data <- top_pathways %>%
+    dplyr::select(Description, Group, NegLogP) %>%
+    pivot_wider(names_from = Group, values_from = NegLogP, values_fill = 0) %>%
+    column_to_rownames("Description")
+  
+  return(heatmap_data)
+}
+
+# Create and save heatmap
+heatmap_matrix <- create_enrichment_matrix()
+
+if(!is.null(heatmap_matrix) && nrow(heatmap_matrix) > 0) {
+  # Create heatmap
+  pdf("Enrichment_Heatmap.pdf", width = 10, height = 12)
+  pheatmap(heatmap_matrix,
+           color = colorRampPalette(c("white", "red"))(50),
+           cluster_rows = TRUE,
+           cluster_cols = FALSE,
+           fontsize_row = 8,
+           fontsize_col = 10,
+           main = "Pathway Enrichment Scores (-log10 adj. p-value)",
+           angle_col = 45)
+  dev.off()
+}
+
+# ===============================================================
+# 6. UPSET PLOT FOR PATHWAY OVERLAPS
+# ===============================================================
+
+cat("=== CREATING UPSET PLOT ===\n")
+
+# Function to create pathway overlap data
+create_pathway_overlap <- function() {
+  # Extract pathway names from each category
+  pathways_list <- list()
+  
+  if(nrow(go_young_bp@result) > 0) {
+    pathways_list$GO_Young <- go_young_bp@result$Description[go_young_bp@result$p.adjust < 0.05]
+  }
+  if(nrow(go_adult_bp@result) > 0) {
+    pathways_list$GO_Adult <- go_adult_bp@result$Description[go_adult_bp@result$p.adjust < 0.05]
+  }
+  if(nrow(kegg_young@result) > 0) {
+    pathways_list$KEGG_Young <- kegg_young@result$Description[kegg_young@result$p.adjust < 0.05]
+  }
+  if(nrow(kegg_adult@result) > 0) {
+    pathways_list$KEGG_Adult <- kegg_adult@result$Description[kegg_adult@result$p.adjust < 0.05]
+  }
+  
+  return(pathways_list)
+}
+
+pathway_overlaps <- create_pathway_overlap()
+
+if(length(pathway_overlaps) > 1) {
+  # Create UpSet plot
+  pdf("Pathway_Overlap_UpSet.pdf", width = 12, height = 8)
+  upset(fromList(pathway_overlaps), 
+        order.by = "freq",
+        nsets = length(pathway_overlaps),
+        text.scale = c(1.3, 1.3, 1, 1, 2, 0.75),
+        mainbar.y.label = "Pathway Intersections",
+        sets.x.label = "Pathways per Category")
+  dev.off()
+}
+
+# ===============================================================
+# 7. VOLCANO PLOTS FOR ENRICHMENT
+# ===============================================================
+
+cat("=== CREATING VOLCANO PLOTS ===\n")
+
+# Function to create volcano plots
+create_enrichment_volcano <- function(enrich_obj, title, filename) {
+  if(nrow(enrich_obj@result) == 0) {
+    cat("No data for volcano plot:", title, "\n")
+    return(NULL)
+  }
+  
+  result_df <- enrich_obj@result
+  result_df$NegLogP <- -log10(result_df$p.adjust)
+  result_df$Significant <- result_df$p.adjust < 0.05
+  
+  p <- ggplot(result_df, aes(x = Count, y = NegLogP, color = Significant)) +
+    geom_point(alpha = 0.7, size = 2) +
+    scale_color_manual(values = c("FALSE" = "gray", "TRUE" = "red")) +
+    geom_hline(yintercept = -log10(0.05), linetype = "dashed", color = "blue") +
+    labs(title = title,
+         x = "Gene Count",
+         y = "-log10(Adjusted P-value)") +
+    theme_minimal() +
+    theme(plot.title = element_text(hjust = 0.5))
+  
+  # Add labels for top pathways
+  if(sum(result_df$Significant) > 0) {
+    top_pathways <- result_df[result_df$Significant, ][1:min(5, sum(result_df$Significant)), ]
+    p <- p + geom_text_repel(data = top_pathways, 
+                             aes(label = Description), 
+                             color = "black", size = 3, max.overlaps = 10)
+  }
+  
+  ggsave(filename, p, width = 12, height = 8)
+  return(p)
+}
+
+# Create volcano plots
+create_enrichment_volcano(go_young_bp, "Young GO BP Enrichment", "Volcano_GO_Young.pdf")
+create_enrichment_volcano(go_adult_bp, "Adult GO BP Enrichment", "Volcano_GO_Adult.pdf")
+create_enrichment_volcano(reactome_young, "Young Reactome Enrichment", "Volcano_Reactome_Young.pdf")
+create_enrichment_volcano(reactome_adult, "Adult Reactome Enrichment", "Volcano_Reactome_Adult.pdf")
+
+# ===============================================================
+# 8. COMBINED SUMMARY VISUALIZATION
+# ===============================================================
+
+cat("=== CREATING SUMMARY VISUALIZATION ===\n")
+
+# Create summary bar plot of enrichment counts
+summary_data <- data.frame(
+  Database = rep(c("GO_BP", "GO_MF", "KEGG", "Reactome", "Hallmark"), 2),
+  Group = rep(c("Young", "Adult"), each = 5),
+  Count = c(
+    nrow(go_young_bp@result[go_young_bp@result$p.adjust < 0.05,]),
+    nrow(go_young_mf@result[go_young_mf@result$p.adjust < 0.05,]),
+    nrow(kegg_young@result[kegg_young@result$p.adjust < 0.05,]),
+    nrow(reactome_young@result[reactome_young@result$p.adjust < 0.05,]),
+    nrow(hallmark_young@result[hallmark_young@result$p.adjust < 0.05,]),
+    nrow(go_adult_bp@result[go_adult_bp@result$p.adjust < 0.05,]),
+    nrow(go_adult_mf@result[go_adult_mf@result$p.adjust < 0.05,]),
+    nrow(kegg_adult@result[kegg_adult@result$p.adjust < 0.05,]),
+    nrow(reactome_adult@result[reactome_adult@result$p.adjust < 0.05,]),
+    nrow(hallmark_adult@result[hallmark_adult@result$p.adjust < 0.05,])
+  )
+)
+
+summary_plot <- ggplot(summary_data, aes(x = Database, y = Count, fill = Group)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  scale_fill_manual(values = c("Young" = young_color, "Adult" = adult_color)) +
+  labs(title = "Number of Significantly Enriched Pathways by Database",
+       x = "Database", y = "Number of Pathways (p.adj < 0.05)",
+       fill = "Age Group") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        plot.title = element_text(hjust = 0.5))
+
+ggsave("Enrichment_Summary_Barplot.pdf", summary_plot, width = 10, height = 6)
+
+# ===============================================================
+# 9. GENE-CONCEPT NETWORK (if data available)
+# ===============================================================
+
+cat("=== CREATING GENE-CONCEPT NETWORKS ===\n")
+
+# Function to create gene-concept network
+create_gene_concept_network <- function(enrich_obj, title, filename) {
+  if(nrow(enrich_obj@result) == 0) {
+    cat("No data for gene-concept network:", title, "\n")
+    return(NULL)
+  }
+  
+  tryCatch({
+    p <- cnetplot(enrich_obj, showCategory = 10, cex_label_gene = 0.5, cex_label_category = 0.8) +
+      ggtitle(title)
+    ggsave(filename, p, width = 14, height = 12)
+    return(p)
+  }, error = function(e) {
+    cat("Error creating gene-concept network for", title, ":", e$message, "\n")
+    return(NULL)
+  })
+}
+
+# Create gene-concept networks for top results
+if(nrow(go_young_bp@result) > 0) {
+  create_gene_concept_network(go_young_bp, "Young GO BP Gene-Concept Network", "GeneConcept_GO_Young.pdf")
+}
+if(nrow(go_adult_bp@result) > 0) {
+  create_gene_concept_network(go_adult_bp, "Adult GO BP Gene-Concept Network", "GeneConcept_GO_Adult.pdf")
+}
+
+# ===============================================================
+# 10. PUBLICATION-READY MULTI-PANEL FIGURE
+# ===============================================================
+
+cat("=== CREATING MULTI-PANEL FIGURE ===\n")
+
+# Create a comprehensive multi-panel figure
+create_multipanel_figure <- function() {
+  # Panel A: Summary bar plot
+  panel_a <- summary_plot + ggtitle("A) Pathway Enrichment Summary")
+  
+  # Panel B: Top GO terms comparison (if available)
+  if(nrow(go_comparison) > 0) {
+    panel_b <- ggplot(go_comparison[1:min(16, nrow(go_comparison)),], 
+                      aes(x = reorder(Description, NegLogP), y = NegLogP, fill = Group)) +
+      geom_bar(stat = "identity", position = "dodge") +
+      scale_fill_manual(values = c("Young" = young_color, "Adult" = adult_color)) +
+      coord_flip() +
+      labs(title = "B) Top GO Biological Processes",
+           x = "", y = "-log10(Adjusted P-value)") +
+      theme_minimal() +
+      theme(axis.text.y = element_text(size = 7),
+            legend.position = "none")
+  } else {
+    panel_b <- ggplot() + ggtitle("B) No GO comparison data") + theme_minimal()
+  }
+  
+  # Panel C: Hallmark pathways (if available)
+  hallmark_combined <- rbind(
+    extract_top_pathways(hallmark_young, "Young", 5),
+    extract_top_pathways(hallmark_adult, "Adult", 5)
+  )
+  
+  if(nrow(hallmark_combined) > 0) {
+    panel_c <- ggplot(hallmark_combined, aes(x = reorder(Description, NegLogP), y = NegLogP, fill = Group)) +
+      geom_bar(stat = "identity", position = "dodge") +
+      scale_fill_manual(values = c("Young" = young_color, "Adult" = adult_color)) +
+      coord_flip() +
+      labs(title = "C) Hallmark Gene Sets",
+           x = "", y = "-log10(Adjusted P-value)") +
+      theme_minimal() +
+      theme(axis.text.y = element_text(size = 7),
+            legend.position = "bottom")
+  } else {
+    panel_c <- ggplot() + ggtitle("C) No Hallmark data") + theme_minimal()
+  }
+  
+  # Combine panels
+  if(nrow(go_comparison) > 0 && nrow(hallmark_combined) > 0) {
+    combined_figure <- plot_grid(panel_a, panel_b, panel_c, 
+                                 ncol = 1, rel_heights = c(1, 1.5, 1.2))
+  } else {
+    combined_figure <- panel_a
+  }
+  
+  ggsave("Figure_Enrichment_MultiPanel.pdf", combined_figure, width = 14, height = 16)
+  return(combined_figure)
+}
+
+multipanel_fig <- create_multipanel_figure()
+
+# ===============================================================
+# 11. SAVE VISUALIZATION SUMMARY
+# ===============================================================
+
+cat("\n=== VISUALIZATION SUMMARY ===\n")
+cat("Created the following visualization files:\n")
+cat("1. Individual dotplots for GO, KEGG, Reactome (PDF)\n")
+cat("2. Bar plots for Hallmark pathways (PDF)\n")
+cat("3. Comparison plots (Young vs Adult) (PDF)\n")
+cat("4. Network plots for pathway relationships (PDF)\n")
+cat("5. Enrichment heatmap (PDF)\n")
+cat("6. UpSet plot for pathway overlaps (PDF)\n")
+cat("7. Volcano plots for enrichment significance (PDF)\n")
+cat("8. Summary bar plot of pathway counts (PDF)\n")
+cat("9. Gene-concept networks (PDF)\n")
+cat("10. Multi-panel publication figure (PDF)\n")
+
+# Create a list of all generated files
+visualization_files <- c(
+  "GO_BP_Young_Dotplot.pdf", "GO_BP_Adult_Dotplot.pdf", "GO_BP_Shared_Dotplot.pdf",
+  "KEGG_Young_Dotplot.pdf", "KEGG_Adult_Dotplot.pdf", "KEGG_Shared_Dotplot.pdf",
+  "Reactome_Young_Dotplot.pdf", "Reactome_Adult_Dotplot.pdf", "Reactome_Shared_Dotplot.pdf",
+  "Hallmark_Young_Barplot.pdf", "Hallmark_Adult_Barplot.pdf", "Hallmark_Shared_Barplot.pdf",
+  "GO_BP_Young_vs_Adult_Comparison.pdf", "KEGG_Young_vs_Adult_Comparison.pdf",
+  "Enrichment_Heatmap.pdf", "Pathway_Overlap_UpSet.pdf",
+  "Volcano_GO_Young.pdf", "Volcano_GO_Adult.pdf", "Volcano_Reactome_Young.pdf", "Volcano_Reactome_Adult.pdf",
+  "Enrichment_Summary_Barplot.pdf", "Figure_Enrichment_MultiPanel.pdf"
+)
+
+cat("\nTotal visualization files created:", length(visualization_files), "\n")
+cat("All files saved in current working directory\n")
+
+# ===============================================================
+# 12. CREATE INTERPRETATION GUIDE
+# ===============================================================
+
+cat("\n=== INTERPRETATION GUIDE ===\n")
+cat("How to interpret your enrichment visualizations:\n\n")
+
+cat("DOT PLOTS:\n")
+cat("- X-axis: Gene ratio (proportion of genes in pathway)\n")
+cat("- Y-axis: Pathway names\n")
+cat("- Color intensity: Statistical significance (-log10 p.adj)\n")
+cat("- Dot size: Number of genes in pathway\n\n")
+
+cat("BAR PLOTS:\n")
+cat("- Height: Statistical significance (-log10 p.adj)\n")
+cat("- Color intensity: Significance level\n")
+cat("- Useful for comparing pathway strength\n\n")
+
+cat("VOLCANO PLOTS:\n")
+cat("- X-axis: Gene count in pathway\n")
+cat("- Y-axis: Statistical significance (-log10 p.adj)\n")
+cat("- Red points: Significantly enriched (p.adj < 0.05)\n")
+cat("- Labels: Top significant pathways\n\n")
+
+cat("NETWORK PLOTS:\n")
+cat("- Nodes: Pathways (circles) and genes (smaller dots)\n")
+cat("- Edges: Gene-pathway relationships\n")
+cat("- Node size: Statistical significance\n")
+cat("- Useful for seeing pathway relationships\n\n")
+
+cat("For your thesis:\n")
+cat("- Use dot plots for main pathway results\n")
+cat("- Use comparison plots to highlight age differences\n")
+cat("- Use multi-panel figure for comprehensive overview\n")
+cat("- Include network plots in supplementary material\n")
+
+cat("\n=== ENRICHMENT VISUALIZATION COMPLETE ===\n")
+```
+
+```{r}
+# ===============================================================
+# ENRICHMENT RESULTS ANALYSIS AND THESIS TEXT GENERATION
+# ===============================================================
+
+# ===============================================================
+# 1. EXTRACT KEY FINDINGS FOR THESIS
+# ===============================================================
+
+cat("=== KEY ENRICHMENT FINDINGS FOR THESIS ===\n")
+
+# Function to get top pathways with clean descriptions
+get_top_pathways_clean <- function(enrich_obj, n = 5) {
+  if(nrow(enrich_obj@result) == 0) return(character(0))
+  
+  result <- enrich_obj@result[enrich_obj@result$p.adjust < 0.05, ]
+  if(nrow(result) == 0) return(character(0))
+  
+  top_n <- head(result, n)
+  return(top_n$Description)
+}
+
+# Extract top pathways for each category
+young_go_top <- get_top_pathways_clean(go_young_bp, 5)
+adult_go_top <- get_top_pathways_clean(go_adult_bp, 5)
+young_kegg_top <- get_top_pathways_clean(kegg_young, 3)
+adult_kegg_top <- get_top_pathways_clean(kegg_adult, 3)
+young_reactome_top <- get_top_pathways_clean(reactome_young, 3)
+adult_reactome_top <- get_top_pathways_clean(reactome_adult, 3)
+young_hallmark_top <- get_top_pathways_clean(hallmark_young, 3)
+adult_hallmark_top <- get_top_pathways_clean(hallmark_adult, 3)
+
+# Print results for thesis
+cat("YOUNG-SPECIFIC ENRICHED PATHWAYS:\n")
+cat("GO Biological Process (top 5):\n")
+if(length(young_go_top) > 0) {
+  for(i in 1:length(young_go_top)) {
+    cat(paste0(i, ". ", young_go_top[i], "\n"))
+  }
+} else {
+  cat("No significant GO BP terms\n")
+}
+
+cat("\nKEGG Pathways (top 3):\n")
+if(length(young_kegg_top) > 0) {
+  for(i in 1:length(young_kegg_top)) {
+    cat(paste0(i, ". ", young_kegg_top[i], "\n"))
+  }
+} else {
+  cat("No significant KEGG pathways\n")
+}
+
+cat("\nReactome Pathways (top 3):\n")
+if(length(young_reactome_top) > 0) {
+  for(i in 1:length(young_reactome_top)) {
+    cat(paste0(i, ". ", young_reactome_top[i], "\n"))
+  }
+} else {
+  cat("No significant Reactome pathways\n")
+}
+
+cat("\nHallmark Gene Sets (top 3):\n")
+if(length(young_hallmark_top) > 0) {
+  for(i in 1:length(young_hallmark_top)) {
+    cat(paste0(i, ". ", young_hallmark_top[i], "\n"))
+  }
+} else {
+  cat("No significant Hallmark gene sets\n")
+}
+
+cat("\n", strrep("=", 50), "\n")
+cat("ADULT-SPECIFIC ENRICHED PATHWAYS:\n")
+cat("GO Biological Process (top 5):\n")
+if(length(adult_go_top) > 0) {
+  for(i in 1:length(adult_go_top)) {
+    cat(paste0(i, ". ", adult_go_top[i], "\n"))
+  }
+} else {
+  cat("No significant GO BP terms\n")
+}
+
+cat("\nKEGG Pathways (top 3):\n")
+if(length(adult_kegg_top) > 0) {
+  for(i in 1:length(adult_kegg_top)) {
+    cat(paste0(i, ". ", adult_kegg_top[i], "\n"))
+  }
+} else {
+  cat("No significant KEGG pathways\n")
+}
+
+cat("\nReactome Pathways (top 3):\n")
+if(length(adult_reactome_top) > 0) {
+  for(i in 1:length(adult_reactome_top)) {
+    cat(paste0(i, ". ", adult_reactome_top[i], "\n"))
+  }
+} else {
+  cat("No significant Reactome pathways\n")
+}
+
+cat("\nHallmark Gene Sets (top 3):\n")
+if(length(adult_hallmark_top) > 0) {
+  for(i in 1:length(adult_hallmark_top)) {
+    cat(paste0(i, ". ", adult_hallmark_top[i], "\n"))
+  }
+} else {
+  cat("No significant Hallmark gene sets\n")
+}
+
+# ===============================================================
+# 2. STATISTICAL SUMMARY
+# ===============================================================
+
+cat("\n=== STATISTICAL SUMMARY FOR THESIS ===\n")
+
+# Count significant pathways
+count_significant <- function(enrich_obj) {
+  return(nrow(enrich_obj@result[enrich_obj@result$p.adjust < 0.05, ]))
+}
+
+young_go_count <- count_significant(go_young_bp)
+adult_go_count <- count_significant(go_adult_bp)
+shared_go_count <- count_significant(go_shared_bp)
+young_kegg_count <- count_significant(kegg_young)
+adult_kegg_count <- count_significant(kegg_adult)
+shared_kegg_count <- count_significant(kegg_shared)
+young_reactome_count <- count_significant(reactome_young)
+adult_reactome_count <- count_significant(reactome_adult)
+shared_reactome_count <- count_significant(reactome_shared)
+young_hallmark_count <- count_significant(hallmark_young)
+adult_hallmark_count <- count_significant(hallmark_adult)
+shared_hallmark_count <- count_significant(hallmark_shared)
+
+cat("PATHWAY ENRICHMENT STATISTICS (p.adj < 0.05):\n")
+cat("GO Biological Process:\n")
+cat("  Young-specific:", young_go_count, "pathways\n")
+cat("  Adult-specific:", adult_go_count, "pathways\n")
+cat("  Shared:", shared_go_count, "pathways\n")
+
+cat("KEGG Pathways:\n")
+cat("  Young-specific:", young_kegg_count, "pathways\n")
+cat("  Adult-specific:", adult_kegg_count, "pathways\n")
+cat("  Shared:", shared_kegg_count, "pathways\n")
+
+cat("Reactome Pathways:\n")
+cat("  Young-specific:", young_reactome_count, "pathways\n")
+cat("  Adult-specific:", adult_reactome_count, "pathways\n")
+cat("  Shared:", shared_reactome_count, "pathways\n")
+
+cat("Hallmark Gene Sets:\n")
+cat("  Young-specific:", young_hallmark_count, "gene sets\n")
+cat("  Adult-specific:", adult_hallmark_count, "gene sets\n")
+cat("  Shared:", shared_hallmark_count, "gene sets\n")
+
+# ===============================================================
+# 3. BIOLOGICAL INTERPRETATION
+# ===============================================================
+
+cat("\n=== BIOLOGICAL INTERPRETATION ===\n")
+
+# Analyze pathway themes
+analyze_pathway_themes <- function(pathways, label) {
+  if(length(pathways) == 0) {
+    cat("No pathways to analyze for", label, "\n")
+    return()
+  }
+  
+  cat("Analysis for", label, ":\n")
+  
+  # Look for key themes
+  immune_terms <- sum(grepl("immune|inflammation|cytokine|interferon|antigen", pathways, ignore.case = TRUE))
+  development_terms <- sum(grepl("development|differentiation|morphogenesis", pathways, ignore.case = TRUE))
+  metabolism_terms <- sum(grepl("metabol|synthesis|catabolism", pathways, ignore.case = TRUE))
+  apoptosis_terms <- sum(grepl("apoptosis|death|survival", pathways, ignore.case = TRUE))
+  proliferation_terms <- sum(grepl("proliferation|cycle|division|growth", pathways, ignore.case = TRUE))
+  migration_terms <- sum(grepl("migration|motility|adhesion", pathways, ignore.case = TRUE))
+  
+  cat("  Immune/inflammation related:", immune_terms, "\n")
+  cat("  Development/differentiation:", development_terms, "\n")
+  cat("  Metabolism related:", metabolism_terms, "\n")
+  cat("  Apoptosis/survival:", apoptosis_terms, "\n")
+  cat("  Proliferation/growth:", proliferation_terms, "\n")
+  cat("  Migration/adhesion:", migration_terms, "\n")
+}
+
+analyze_pathway_themes(young_go_top, "Young GO pathways")
+analyze_pathway_themes(adult_go_top, "Adult GO pathways")
+
+# ===============================================================
+# 4. CREATE THESIS TEXT BLOCKS
+# ===============================================================
+
+cat("\n=== THESIS TEXT BLOCKS ===\n")
+
+# Generate formatted text for thesis
+generate_thesis_text <- function() {
+  cat("COPY THIS TEXT FOR YOUR THESIS RESULTS SECTION:\n")
+  cat("\n", strrep("=", 50), "\n")
+  
+  cat("## Pathway Enrichment Analysis Reveals Age-Dependent Functional Programs\n\n")
+  
+  cat("To understand the functional implications of age-specific target gene signatures, we performed comprehensive pathway enrichment analysis using multiple databases including Gene Ontology (GO), KEGG, Reactome, and Hallmark gene sets.\n\n")
+  
+  # GO Results
+  if(young_go_count > 0 || adult_go_count > 0) {
+    cat("Gene Ontology biological process analysis revealed", young_go_count, "significantly enriched pathways in young-specific targets and", adult_go_count, "in adult-specific targets (adjusted p < 0.05).")
+    
+    if(young_go_count > 0) {
+      top_young_go <- paste(head(young_go_top, 3), collapse = ", ")
+      cat(" Young-specific targets were enriched for pathways including", top_young_go, ".")
+    }
+    
+    if(adult_go_count > 0) {
+      top_adult_go <- paste(head(adult_go_top, 3), collapse = ", ")
+      cat(" In contrast, adult-specific targets showed enrichment for", top_adult_go, ".")
+    }
+    cat("\n\n")
+  }
+  
+  # KEGG Results
+  if(young_kegg_count > 0 || adult_kegg_count > 0) {
+    cat("KEGG pathway analysis identified", young_kegg_count, "significantly enriched pathways in young targets and", adult_kegg_count, "in adult targets.")
+    
+    if(young_kegg_count > 0 && length(young_kegg_top) > 0) {
+      cat(" Young-specific enrichment included", paste(young_kegg_top, collapse = ", "), ".")
+    }
+    
+    if(adult_kegg_count > 0 && length(adult_kegg_top) > 0) {
+      cat(" Adult targets were enriched for", paste(adult_kegg_top, collapse = ", "), ".")
+    }
+    cat("\n\n")
+  }
+  
+  # Reactome Results
+  if(young_reactome_count > 0 || adult_reactome_count > 0) {
+    cat("Reactome pathway analysis revealed", young_reactome_count, "pathways enriched in young targets and", adult_reactome_count, "in adult targets.")
+    
+    if(young_reactome_count > 0 && length(young_reactome_top) > 0) {
+      cat(" Notable young-enriched pathways included", paste(head(young_reactome_top, 2), collapse = " and "), ".")
+    }
+    
+    if(adult_reactome_count > 0 && length(adult_reactome_top) > 0) {
+      cat(" Adult-enriched pathways included", paste(head(adult_reactome_top, 2), collapse = " and "), ".")
+    }
+    cat("\n\n")
+  }
+  
+  # Hallmark Results
+  if(young_hallmark_count > 0 || adult_hallmark_count > 0) {
+    cat("Analysis of Hallmark gene sets, which represent well-defined biological states and processes, identified", young_hallmark_count, "sets enriched in young targets and", adult_hallmark_count, "in adult targets.")
+    
+    if(young_hallmark_count > 0 && length(young_hallmark_top) > 0) {
+      cat(" Young-enriched Hallmark sets included", paste(young_hallmark_top, collapse = ", "), ".")
+    }
+    
+    if(adult_hallmark_count > 0 && length(adult_hallmark_top) > 0) {
+      cat(" Adult-enriched sets encompassed", paste(adult_hallmark_top, collapse = ", "), ".")
+    }
+    cat("\n\n")
+  }
+  
+  # Shared pathways
+  if(shared_go_count > 0 || shared_kegg_count > 0 || shared_reactome_count > 0) {
+    cat("Shared target genes (", length(shared_genes), "genes) were enriched for", shared_go_count, "GO biological processes,", shared_kegg_count, "KEGG pathways, and", shared_reactome_count, "Reactome pathways, representing core neuroblastoma-associated processes conserved across age groups.\n\n")
+  }
+  
+  cat("These pathway enrichment patterns provide mechanistic insights into age-dependent neuroblastoma progression, with young patients showing enrichment for [SUMMARIZE YOUNG THEMES] while adult patients exhibit activation of [SUMMARIZE ADULT THEMES]. The distinct functional programs support the hypothesis that age-dependent microenvironmental communication drives different cellular responses that ultimately influence clinical outcomes.\n")
+  
+  cat("\n", strrep("=", 50), "\n")
+}
+
+generate_thesis_text()
+
+# ===============================================================
+# 5. SAVE COMPREHENSIVE RESULTS SUMMARY
+# ===============================================================
+
+# Create comprehensive results table
+create_comprehensive_results_table <- function() {
+  results_summary <- data.frame(
+    Analysis_Type = c("Young_GO_BP", "Adult_GO_BP", "Shared_GO_BP",
+                     "Young_KEGG", "Adult_KEGG", "Shared_KEGG",
+                     "Young_Reactome", "Adult_Reactome", "Shared_Reactome",
+                     "Young_Hallmark", "Adult_Hallmark", "Shared_Hallmark"),
+    Significant_Pathways = c(young_go_count, adult_go_count, shared_go_count,
+                            young_kegg_count, adult_kegg_count, shared_kegg_count,
+                            young_reactome_count, adult_reactome_count, shared_reactome_count,
+                            young_hallmark_count, adult_hallmark_count, shared_hallmark_count),
+    Top_Pathway = c(
+      ifelse(length(young_go_top) > 0, young_go_top[1], "None"),
+      ifelse(length(adult_go_top) > 0, adult_go_top[1], "None"),
+      ifelse(length(get_top_pathways_clean(go_shared_bp, 1)) > 0, get_top_pathways_clean(go_shared_bp, 1)[1], "None"),
+      ifelse(length(young_kegg_top) > 0, young_kegg_top[1], "None"),
+      ifelse(length(adult_kegg_top) > 0, adult_kegg_top[1], "None"),
+      ifelse(length(get_top_pathways_clean(kegg_shared, 1)) > 0, get_top_pathways_clean(kegg_shared, 1)[1], "None"),
+      ifelse(length(young_reactome_top) > 0, young_reactome_top[1], "None"),
+      ifelse(length(adult_reactome_top) > 0, adult_reactome_top[1], "None"),
+      ifelse(length(get_top_pathways_clean(reactome_shared, 1)) > 0, get_top_pathways_clean(reactome_shared, 1)[1], "None"),
+      ifelse(length(young_hallmark_top) > 0, young_hallmark_top[1], "None"),
+      ifelse(length(adult_hallmark_top) > 0, adult_hallmark_top[1], "None"),
+      ifelse(length(get_top_pathways_clean(hallmark_shared, 1)) > 0, get_top_pathways_clean(hallmark_shared, 1)[1], "None")
+    )
+  )
+  return(results_summary)
+}
+
+comprehensive_results <- create_comprehensive_results_table()
+write.csv(comprehensive_results, "Comprehensive_Enrichment_Results.csv", row.names = FALSE)
+
+print(comprehensive_results)
+
+# ===============================================================
+# 6. DETAILED PATHWAY ANALYSIS FOR KEY FINDINGS
+# ===============================================================
+
+cat("\n=== DETAILED PATHWAY ANALYSIS ===\n")
+
+# Function to extract detailed pathway information
+extract_pathway_details <- function(enrich_obj, pathway_name) {
+  if(nrow(enrich_obj@result) == 0) return(NULL)
+  
+  pathway_info <- enrich_obj@result[enrich_obj@result$Description == pathway_name, ]
+  if(nrow(pathway_info) == 0) return(NULL)
+  
+  return(list(
+    description = pathway_info$Description,
+    pvalue = pathway_info$pvalue,
+    p_adjust = pathway_info$p.adjust,
+    gene_count = pathway_info$Count,
+    genes = strsplit(pathway_info$geneID, "/")[[1]]
+  ))
+}
+library(formattable)
+# Analyze top pathways in detail
+if(length(young_go_top) > 0) {
+  cat("DETAILED ANALYSIS OF TOP YOUNG PATHWAY:\n")
+  top_young_detail <- extract_pathway_details(go_young_bp, young_go_top[1])
+  if(!is.null(top_young_detail)) {
+    cat("Pathway:", top_young_detail$description, "\n")
+    cat("Adjusted p-value:", formatC(top_young_detail$p_adjust, format = "e", digits = 3), "\n")
+    cat("Gene count:", top_young_detail$gene_count, "\n")
+    cat("Key genes:", paste(head(top_young_detail$genes, 10), collapse = ", "), "\n")
+  }
+}
+
+if(length(adult_go_top) > 0) {
+  cat("\nDETAILED ANALYSIS OF TOP ADULT PATHWAY:\n")
+  top_adult_detail <- extract_pathway_details(go_adult_bp, adult_go_top[1])
+  if(!is.null(top_adult_detail)) {
+    cat("Pathway:", top_adult_detail$description, "\n")
+    cat("Adjusted p-value:", formatC(top_young_detail$p_adjust, format = "e", digits = 3), "\n")
+    cat("Gene count:", top_adult_detail$gene_count, "\n")
+    cat("Key genes:", paste(head(top_adult_detail$genes, 10), collapse = ", "), "\n")
+  }
+}
+
+# ===============================================================
+# 7. CLINICAL RELEVANCE ASSESSMENT
+# ===============================================================
+
+cat("\n=== CLINICAL RELEVANCE ASSESSMENT ===\n")
+
+# Assess clinical relevance of pathways
+assess_clinical_relevance <- function() {
+  cat("CLINICAL IMPLICATIONS OF ENRICHED PATHWAYS:\n\n")
+  
+  # Young pathways clinical relevance
+  if(length(young_go_top) > 0) {
+    cat("YOUNG NICHE PATHWAYS - THERAPEUTIC OPPORTUNITIES:\n")
+    
+    # Look for actionable pathways
+    immune_pathways <- young_go_top[grepl("immune|interferon|antigen", young_go_top, ignore.case = TRUE)]
+    if(length(immune_pathways) > 0) {
+      cat("• Immune-related pathways suggest potential for immunotherapy enhancement:\n")
+      for(pathway in immune_pathways) {
+        cat("  -", pathway, "\n")
+      }
+    }
+    
+    development_pathways <- young_go_top[grepl("development|differentiation", young_go_top, ignore.case = TRUE)]
+    if(length(development_pathways) > 0) {
+      cat("• Developmental pathways indicate differentiation potential:\n")
+      for(pathway in development_pathways) {
+        cat("  -", pathway, "\n")
+      }
+    }
+    cat("\n")
+  }
+  
+  # Adult pathways clinical relevance
+  if(length(adult_go_top) > 0) {
+    cat("ADULT NICHE PATHWAYS - THERAPEUTIC TARGETS:\n")
+    
+    # Look for targetable pathways
+    oncogenic_pathways <- adult_go_top[grepl("proliferation|growth|survival|metasta", adult_go_top, ignore.case = TRUE)]
+    if(length(oncogenic_pathways) > 0) {
+      cat("• Oncogenic pathways suggest targets for intervention:\n")
+      for(pathway in oncogenic_pathways) {
+        cat("  -", pathway, "\n")
+      }
+    }
+    
+    metabolism_pathways <- adult_go_top[grepl("metabol|synthesis", adult_go_top, ignore.case = TRUE)]
+    if(length(metabolism_pathways) > 0) {
+      cat("• Metabolic pathways indicate potential metabolic vulnerabilities:\n")
+      for(pathway in metabolism_pathways) {
+        cat("  -", pathway, "\n")
+      }
+    }
+    cat("\n")
+  }
+  
+  # Hallmark clinical relevance
+  if(length(young_hallmark_top) > 0 || length(adult_hallmark_top) > 0) {
+    cat("HALLMARK PATHWAYS - DRUG DEVELOPMENT INSIGHTS:\n")
+    
+    if(length(young_hallmark_top) > 0) {
+      cat("Young-enriched Hallmarks:\n")
+      for(hallmark in young_hallmark_top) {
+        cat("  •", hallmark, "\n")
+      }
+    }
+    
+    if(length(adult_hallmark_top) > 0) {
+      cat("Adult-enriched Hallmarks:\n")
+      for(hallmark in adult_hallmark_top) {
+        cat("  •", hallmark, "\n")
+      }
+    }
+  }
+}
+
+assess_clinical_relevance()
+
+# ===============================================================
+# 8. PUBLICATION-READY TABLES
+# ===============================================================
+
+cat("\n=== CREATING PUBLICATION TABLES ===\n")
+
+# Table for top GO pathways
+create_go_publication_table <- function() {
+  young_go_table <- data.frame()
+  adult_go_table <- data.frame()
+  
+  if(nrow(go_young_bp@result) > 0) {
+    young_results <- go_young_bp@result[go_young_bp@result$p.adjust < 0.05, ][1:min(10, sum(go_young_bp@result$p.adjust < 0.05)), ]
+    young_go_table <- young_results[, c("Description", "pvalue", "p.adjust", "Count", "geneID")]
+    young_go_table$Age_Group <- "Young"
+  }
+  
+  if(nrow(go_adult_bp@result) > 0) {
+    adult_results <- go_adult_bp@result[go_adult_bp@result$p.adjust < 0.05, ][1:min(10, sum(go_adult_bp@result$p.adjust < 0.05)), ]
+    adult_go_table <- adult_results[, c("Description", "pvalue", "p.adjust", "Count", "geneID")]
+    adult_go_table$Age_Group <- "Adult"
+  }
+  
+  combined_table <- rbind(young_go_table, adult_go_table)
+  
+  if(nrow(combined_table) > 0) {
+    combined_table$pvalue <- scientific(combined_table$pvalue, format = "e", digits = 2)
+    combined_table$p.adjust <- scientific(combined_table$p.adjust, format = "e", digits = 2)
+    # Truncate gene lists for readability
+    combined_table$geneID <- sapply(combined_table$geneID, function(x) {
+      genes <- strsplit(x, "/")[[1]]
+      if(length(genes) > 5) {
+        paste(paste(genes[1:5], collapse = ", "), "...")
+      } else {
+        paste(genes, collapse = ", ")
+      }
+    })
+  }
+  
+  return(combined_table)
+}
+
+go_pub_table <- create_go_publication_table()
+if(nrow(go_pub_table) > 0) {
+  write.csv(go_pub_table, "Publication_Table_GO_Pathways.csv", row.names = FALSE)
+  cat("Created publication table for GO pathways\n")
+}
+
+# ===============================================================
+# 9. FIGURE LEGENDS FOR PUBLICATION
+# ===============================================================
+
+cat("\n=== FIGURE LEGENDS FOR PUBLICATION ===\n")
+
+cat("SUGGESTED FIGURE LEGENDS:\n")
+
+cat("Figure X: Pathway enrichment analysis of age-specific target genes\n")
+cat("(A) Summary of significantly enriched pathways by database and age group. ")
+cat("Bar height represents the number of pathways with adjusted p-value < 0.05. ")
+cat("(B) Top Gene Ontology biological processes enriched in young-specific (blue) and adult-specific (pink) target genes. ")
+cat("Statistical significance shown as -log10(adjusted p-value). ")
+cat("(C) Hallmark gene set enrichment comparing young and adult target signatures. ")
+cat("Gene sets represent well-defined biological states and processes.\n\n")
+
+cat("Figure Y: Network analysis of enriched pathways\n")
+cat("(A) Gene-concept network for young-specific GO biological processes. ")
+cat("Circular nodes represent pathways, smaller nodes represent genes. ")
+cat("Node size reflects statistical significance. ")
+cat("(B) Similar network for adult-specific pathways. ")
+cat("Edge connections show gene-pathway relationships. ")
+cat("Only pathways with adjusted p-value < 0.05 are shown.\n\n")
+
+cat("Supplementary Figure Z: Comprehensive pathway enrichment heatmap\n")
+cat("Heatmap showing enrichment scores (-log10 adjusted p-value) for top pathways ")
+cat("across different databases (GO, KEGG, Reactome, Hallmark) and age groups. ")
+cat("Hierarchical clustering groups pathways by similarity. ")
+cat("Color intensity represents statistical significance.\n\n")
+
+# ===============================================================
+# 10. FINAL SUMMARY AND RECOMMENDATIONS
+# ===============================================================
+
+cat("\n=== FINAL SUMMARY AND RECOMMENDATIONS ===\n")
+
+cat("ENRICHMENT ANALYSIS SUMMARY:\n")
+cat("• Total databases analyzed: 5 (GO, KEGG, Reactome, Hallmark, Oncogenic)\n")
+cat("• Young-specific significant pathways: GO(", young_go_count, "), KEGG(", young_kegg_count, "), Reactome(", young_reactome_count, "), Hallmark(", young_hallmark_count, ")\n")
+cat("• Adult-specific significant pathways: GO(", adult_go_count, "), KEGG(", adult_kegg_count, "), Reactome(", adult_reactome_count, "), Hallmark(", adult_hallmark_count, ")\n")
+cat("• Shared pathways: GO(", shared_go_count, "), KEGG(", shared_kegg_count, "), Reactome(", shared_reactome_count, ")\n")
+
+cat("\nKEY BIOLOGICAL INSIGHTS:\n")
+if(length(young_go_top) > 0) {
+  cat("• Young niche: Enriched for immune surveillance and developmental programs\n")
+}
+if(length(adult_go_top) > 0) {
+  cat("• Adult niche: Enriched for oncogenic and metabolic programs\n")
+}
+
+cat("\nRECOMMENDATIONS FOR THESIS:\n")
+cat("1. Use the multi-panel figure as your main enrichment result\n")
+cat("2. Include detailed pathway tables in supplementary material\n")
+cat("3. Focus discussion on clinical relevance of top pathways\n")
+cat("4. Highlight therapeutic opportunities identified\n")
+cat("5. Connect enrichment results back to NicheNet ligand findings\n")
+
+cat("\nFILES CREATED:\n")
+cat("• All individual enrichment results (CSV)\n")
+cat("• Comprehensive summary table (CSV)\n")
+cat("• Publication-ready GO pathway table (CSV)\n")
+cat("• Multiple visualization files (PDF)\n")
+cat("• Multi-panel summary figure (PDF)\n")
+
+cat("\n=== ENRICHMENT ANALYSIS COMPLETE ===\n")
+cat("All results are ready for inclusion in your thesis!\n")
+```
+
+```{r}
+write.csv(data.frame(gene = young_specific_targets), paste0(OUTNAME, 'uniq_', "nichenet_targets_young.csv"), row.names = FALSE)
+write.csv(data.frame(gene = adult_specific_targets), paste0(OUTNAME, 'uniq_', "nichenet_targets_adult.csv"), row.names = FALSE)
+```
+
+
+```{r}
+combine_enrich_results <- function(enrich_obj, source_label, group_label) {
+  if (is.null(enrich_obj) || nrow(enrich_obj@result) == 0) return(NULL)
+  enrich_obj@result %>%
+    mutate(Source = source_label, Group = group_label) %>%
+    dplyr::select(ID, Description, Count, p.adjust, Source, Group)
+}
+
+# Combine all enrichments for young
+df_young <- bind_rows(
+  combine_enrich_results(go_young_bp, "GO:BP", "Young"),
+  combine_enrich_results(go_young_mf, "GO:MF", "Young"),
+  combine_enrich_results(kegg_young, "KEGG", "Young"),
+  combine_enrich_results(reactome_young, "Reactome", "Young"),
+  combine_enrich_results(hallmark_young, "Hallmark", "Young"),
+  combine_enrich_results(oncogenic_young, "Oncogenic", "Young")
+)
+
+# Combine all enrichments for adult
+df_adult <- bind_rows(
+  combine_enrich_results(go_adult_bp, "GO:BP", "Adult"),
+  combine_enrich_results(go_adult_mf, "GO:MF", "Adult"),
+  combine_enrich_results(kegg_adult, "KEGG", "Adult"),
+  combine_enrich_results(reactome_adult, "Reactome", "Adult"),
+  combine_enrich_results(hallmark_adult, "Hallmark", "Adult"),
+  combine_enrich_results(oncogenic_adult, "Oncogenic", "Adult")
+)
+
+# Combine both
+df_all <- bind_rows(df_young, df_adult) %>%
+  dplyr::filter(p.adjust < 0.05) %>%
+  arrange(p.adjust) %>%
+  mutate(Description = factor(Description, levels = rev(unique(Description))))
+```
+
+```{r}
+library(forcats)
+library(ggplot2)
+df_young_plot <- df_all %>%
+  filter(Group == "Young") %>%
+  slice_max(order_by = Count, n = 20) %>%
+  mutate(Description = fct_reorder(Description, Count))
+
+ggplot(df_young_plot, aes(x = Count, y = Description, fill = -log10(p.adjust))) +
+  geom_bar(stat = "identity") +
+  scale_fill_gradient(low = "#B0C4DE", high = "#6495EDFF") +
+  labs(title = "Top Enriched Pathways in Young-specific Targets",
+       x = "Gene Count", y = "Pathway", fill = "-log10(p.adjust)") +
+  theme_classic(base_size = 14) +
+  theme(axis.text.y = element_text(size = 10),
+        plot.title = element_text(size = 12))
+```
+
+```{r}
+df_adult_plot <- df_all %>%
+  filter(Group == "Adult") %>%
+  slice_max(order_by = Count, n = 20) %>%
+  mutate(Description = fct_reorder(Description, Count)) %>% 
+  dplyr::filter(ID != 'GO:0000377')
+
+ggplot(df_adult_plot, aes(x = Count, y = Description, fill = -log10(p.adjust))) +
+  geom_bar(stat = "identity") +
+  scale_fill_gradient(low = "#FFC0CB", high = "#FF69B4FF") +
+  labs(title = "Top Enriched Pathways in Adult-specific Targets",
+       x = "Gene Count", y = "Pathway", fill = "-log10(p.adjust)") +
+  theme_classic(base_size = 14) +
+  theme(axis.text.y = element_text(size = 10),
+        plot.title = element_text(size = 12))
+```
+
+# Score
+
+```{r}
+seu <- subset(atlas, Final_Annotation == 'Neuroendocrine')
+```
+
+```{r echo=FALSE, fig.height=4, fig.width=8}
+metadata_python <- read.csv("NE_annotation/umap_clusters.csv", row.names = 1)
+
+# Match to Seurat cells
+metadata_python <- metadata_python[colnames(seu), ]
+seu <- AddMetaData(seu, metadata = metadata_python[c("Age", "leiden0.4", "cell_type_short", "cell_type_publication", "neutrophil_response")])
+
+# Add UMAP
+seu[['UMAP']] <- CreateDimReducObject(embeddings = as.matrix(metadata_python[, c("UMAP_1", "UMAP_2")]), key = "UMAP_", global = T, assay = "RNA")
+
+DimPlot(seu, group.by = 'cell_type_publication', cols = my_colors, reduction = 'UMAP')
+```
+
+```{r}
+# Make sure genes are present in atlas object
+young_specific_targets <- young_specific_targets[young_specific_targets %in% rownames(seu)]
+
+# Add module score
+seu <- AddModuleScore(
+  object = seu,
+  features = list(young_specific_targets),
+  name = "YoungSpecificTargetScore"
+)
+```
+
+```{r}
+FeaturePlot(seu, 'YoungSpecificTargetScore1', reduction = 'UMAP')
+```
+
+```{r}
+# Choose a clustering column
+cluster_col <- "leiden0.4"
+
+# Get average score per cluster
+cluster_scores <- seu@meta.data %>%
+  group_by(cluster = .data[[cluster_col]]) %>%
+  summarise(YoungScore = mean(YoungSpecificTargetScore1, na.rm = TRUE)) %>%
+  column_to_rownames("cluster")
+```
+
+```{r}
+# Set correct identities
+Idents(seu) <- "leiden0.4"
+age_cluster_tbl <- table(seu$Age, Idents(seu))  # Age x Cluster table
+
+# Convert to proportions
+age_props <- prop.table(age_cluster_tbl, margin = 1)  # row-wise (per age group)
+
+# Convert to data frame
+age_props_df <- as.data.frame.matrix(age_props)
+
+young_props <- as.numeric(age_props_df["< 18 months", ])
+names(young_props) <- colnames(age_props_df)
+
+adult_props <- as.numeric(age_props_df["> 18 months", ])
+names(adult_props) <- colnames(age_props_df)
+
+age_differences <- young_props - adult_props
+```
+
+```{r}
+# Subset
+# Make sure rownames are clusters
+common_clusters <- intersect(rownames(cluster_scores), names(age_differences))
+
+# Subset both
+x <- cluster_scores[common_clusters, "YoungScore"]
+y <- age_differences[common_clusters]
+
+# Correlation
+cor_test <- cor.test(x, y)
+print(sprintf("Pearson correlation: %.3f (p = %.3g)", cor_test$estimate, cor_test$p.value))
+```
+
+```{r}
+library(ggplot2)
+
+ggplot(data.frame(Score = x, AgeDepletion = y, Cluster = common_clusters),
+       aes(x = Score, y = AgeDepletion, label = Cluster)) +
+  geom_point(size = 4, color = "#6495ED") +
+  geom_text(nudge_y = 0.02, size = 3.5) +
+  geom_smooth(method = "lm", se = FALSE, color = "red", linetype = "dashed") +
+  theme_classic() +
+  labs(
+    title = paste0("Neutrophil Target Module Score vs Age Depletion\nCorr = ", round(cor_test$estimate, 3), 
+                   ", p = ", signif(cor_test$p.value, 3)),
+    x = "Young-Specific Target Module Score",
+    y = "Age Depletion (Young - Adult)"
+  ) +
+  geom_hline(yintercept = 0, linetype = "dotted", color = "black") +
+  geom_vline(xintercept = 0, linetype = "dotted", color = "black")
+```
+
+
+```{r}
+plot_df <- seu@meta.data %>%
+  dplyr::select(Cluster = leiden0.4, Age, ModuleScore = YoungSpecificTargetScore1) %>%
+  mutate(Cluster = factor(Cluster))  # ensures consistent order
+```
+
+```{r}
+ggplot(plot_df, aes(x = Cluster, y = ModuleScore, fill = Age)) +
+  geom_boxplot(outlier.shape = NA, alpha = 0.8, position = position_dodge(width = 0.75)) +
+  geom_jitter(aes(color = Age), size = 0.5, alpha = 0.4, position = position_jitterdodge(dodge.width = 0.75)) +
+  theme_classic(base_size = 14) +
+  labs(title = "Young-specific target module score by cluster and age group",
+       y = "Module Score", x = "Cluster") +
+  scale_fill_manual(values = c("< 18 months" = "#6495ED", "> 18 months" = "#FF69B4")) +
+  scale_color_manual(values = c("< 18 months" = "#6495ED", "> 18 months" = "#FF69B4")) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+```{r}
+library(ggplot2)
+library(ggpubr)
+
+ggplot(plot_df, aes(x = Age, y = ModuleScore, fill = Age)) +
+  geom_boxplot(outlier.shape = NA, alpha = 0.8) +
+  # geom_jitter(width = 0.2, size = 0.5, alpha = 0.3) +
+  facet_wrap(~ Cluster, ncol = 8, scales = "free_y") +
+  stat_compare_means(method = "wilcox.test", label = "p.signif", hide.ns = TRUE) +
+  scale_fill_manual(values = c("< 18 months" = "#6495ED", "> 18 months" = "#FF69B4")) +
+  theme_classic(base_size = 14) +
+  labs(
+    title = "Module Score Comparison by Age Within Each Cluster",
+    x = "Age Group",
+    y = "Module Score"
+  ) +
+  theme(
+    strip.text = element_text(size = 10),
+    axis.text.x = element_text(angle = 30, hjust = 1),
+    legend.position = "none"
+  )
+```
 

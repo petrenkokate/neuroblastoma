@@ -402,8 +402,12 @@ plotExprHeatmap(sce_fs2, features = "type",
 
 ### Differential Abundances Analysis
 
-```{r}
+```{r eval=FALSE, include=FALSE}
 qsave(sce_fs2, paste0(PREPRDATADIR, 'cytof_naive.qs'))
+```
+
+```{r}
+sce_fs2 <- qread(paste0(PREPRDATADIR, 'cytof_naive.qs'))
 ```
 
 ```{r echo=FALSE}
